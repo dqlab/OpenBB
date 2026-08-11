@@ -7,6 +7,7 @@ from openbb_core.app.model.obbject import OBBject
 from openbb_core.app.router import Router
 from openbb_core.provider.abstract.data import Data
 
+from openbb_quantitative.dqlib_router import router as dqlib_router
 from openbb_quantitative.models import (
     ADFTestModel,
     CAPMModel,
@@ -23,6 +24,7 @@ from openbb_quantitative.rolling.rolling_router import router as rolling_router
 from openbb_quantitative.stats.stats_router import router as stats_router
 
 router = Router(prefix="", description="Quantitative analysis tools.")
+router.include_router(dqlib_router)
 router.include_router(rolling_router)
 router.include_router(stats_router)
 router.include_router(performance_router)

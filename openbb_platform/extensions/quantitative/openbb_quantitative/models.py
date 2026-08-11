@@ -68,3 +68,14 @@ class CAPMModel(BaseModel):
     market_risk: float
     systematic_risk: float
     idiosyncratic_risk: float
+
+
+class DQLibStatusModel(BaseModel):
+    """Status of the optional dqlib analytics runtime."""
+
+    available: bool
+    supported_runtime: bool
+    release_version: str
+    installed_version: str | None = None
+    release_url: str
+    message: str
