@@ -2,6 +2,7 @@
 
 from openbb_core.app.model.obbject import OBBject
 from openbb_core.app.router import Router
+
 from openbb_quantitative._dqlib import get_status
 from openbb_quantitative.models import DQLibStatusModel
 
