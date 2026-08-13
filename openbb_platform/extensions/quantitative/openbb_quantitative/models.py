@@ -1,6 +1,8 @@
 """Pydantic models for Quantitative Analysis."""
 
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 
 class TestModel(BaseModel):
@@ -79,3 +81,41 @@ class DQLibStatusModel(BaseModel):
     installed_version: str | None = None
     release_url: str
     message: str
+
+
+class DQLibFunctionModel(BaseModel):
+    """One callable exposed from an installed dqlib analytics domain."""
+
+    name: str
+    signature: str
+    description: str = ""
+
+
+class DQLibCallResult(BaseModel):
+    """JSON-safe result from one dqlib function call."""
+
+    domain: str
+    function: str
+    result: Any
+
+
+class DQLibPipelineStep(BaseModel):
+    """One native-object-aware operation in a dqlib execution pipeline."""
+
+    id: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    domain: str
+    function: str
+    args: list[Any] = Field(default_factory=list)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+
+
+class DQLibPipelineResult(BaseModel):
+    """Selected JSON-safe outputs from a dqlib execution pipeline."""
+
+    outputs: dict[str, Any]
+
+
+class DQLibScalarResult(BaseModel):
+    """Named JSON-safe result from a typed dqlib command."""
+
+    value: Any
