@@ -78,6 +78,15 @@ This notebook demonstrates how to calculate the implied earnings move using opti
 - Find the nearest call and put strikes to the last price of the stock.
 - Calculate the implied daily move using the price of a straddle.
 
+### dqlibSpxVolatilitySurface
+
+[`dqlib_spx_volatility_surface.py`](dqlib_spx_volatility_surface.py) fetches the
+SPX option chain with `obb.derivatives.options.chains`, selects liquid OTM
+quotes, translates them to a typed dqlib request, and builds a native equity
+volatility surface. It requires the Cboe and quantitative OpenBB extensions and
+a licensed dqlib 3.0.2 runtime. The rates in the example are illustrative and
+should be replaced with market curves.
+
 ### streamlit/news
 
 This is an example Streamlit dashboard for news headlines with data from Biztoc, Benzinga, FMP, Intrinio, and Tiingo.

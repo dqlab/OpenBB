@@ -10,6 +10,7 @@ import pytest
 from openbb_quantitative import (
     _dqlib,
     datetime as datetime_bridge,
+    dqlib_router as dqlib_commands,
 )
 from openbb_quantitative.dqlib_models import TailRiskRequest
 from openbb_quantitative.dqlib_router import router as dqlib_router
@@ -142,6 +143,43 @@ def test_pipeline_rejects_unknown_reference(monkeypatch):
                 }
             ]
         )
+
+
+def test_pipeline_command_validates_dict_steps(monkeypatch):
+    """The public pipeline avoids unresolved nested model client annotations."""
+    captured: dict[str, Any] = {}
+
+    def fake_pipeline(steps, outputs):
+        captured.update({"steps": steps, "outputs": outputs})
+        return {"metric": 3.0}
+
+    monkeypatch.setattr(dqlib_commands, "execute_pipeline", fake_pipeline)
+
+    result = dqlib_commands.pipeline(
+        steps=[
+            {
+                "id": "metric",
+                "domain": "analytics",
+                "function": "calculate_metric",
+                "args": [3.0],
+            }
+        ],
+        outputs=["metric"],
+    )
+
+    assert captured == {
+        "steps": [
+            {
+                "id": "metric",
+                "domain": "analytics",
+                "function": "calculate_metric",
+                "args": [3.0],
+                "kwargs": {},
+            }
+        ],
+        "outputs": ["metric"],
+    }
+    assert result.results.outputs == {"metric": 3.0}
 
 
 def test_json_serializer_handles_native_shapes():

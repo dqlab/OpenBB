@@ -109,6 +109,9 @@ obb.quantitative.dqlib.equity.build_volatility_surface(
 )
 ```
 
+For an end-to-end market-data workflow, see the
+[SPX option-chain volatility-surface example](../../../examples/dqlib_spx_volatility_surface.py).
+
 The typed native surface currently covers interest-rate curves, fixed-coupon
 bond yield, equity volatility-surface calibration, equity and commodity
 European option pricing, FX ATM strike, credit curves, VaR, and expected

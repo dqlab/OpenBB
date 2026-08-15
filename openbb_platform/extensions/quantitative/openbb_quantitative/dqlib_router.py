@@ -96,11 +96,13 @@ def call(
 
 @router.command(methods=["POST"])
 def pipeline(
-    steps: list[DQLibPipelineStep],
+    steps: list[dict[str, Any]],
     outputs: list[str] | None = None,
 ) -> OBBject[DQLibPipelineResult]:
     """Execute a native-object dqlib workflow and return selected outputs."""
-    raw_steps = [step.model_dump() for step in steps]
+    raw_steps = [
+        DQLibPipelineStep.model_validate(step).model_dump() for step in steps
+    ]
     raw_outputs = execute_pipeline(raw_steps, outputs)
     serialized = to_jsonable(raw_outputs)
     return OBBject(
