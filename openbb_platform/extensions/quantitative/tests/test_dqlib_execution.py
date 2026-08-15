@@ -12,6 +12,7 @@ from openbb_quantitative import (
     datetime as datetime_bridge,
     mktrisk,
 )
+from openbb_quantitative.dqlib_models import TailRiskRequest
 from openbb_quantitative.dqlib_router import router as dqlib_router
 
 
@@ -242,9 +243,14 @@ def test_market_risk_value_at_risk_uses_native_request(monkeypatch):
         lambda domain, function, args, kwargs=None: native_vector,
     )
 
-    result = mktrisk.value_at_risk([-4.0, 1.0, -2.0], probability=0.975)
+    result = mktrisk.value_at_risk(
+        TailRiskRequest(
+            profit_loss_samples=[-4.0, 1.0, -2.0], probability=0.975
+        )
+    )
 
-    assert result.results.value["value_at_risk"] == 8.5
+    assert result.results.value_at_risk == 8.5
+    assert result.results.probability == 0.975
     assert captured == {
         "vector": native_vector,
         "request": ("CALCULATE_VALUE_AT_RISK", b"var-input"),
@@ -298,7 +304,14 @@ def test_root_router_builds_without_dqlib():
         "/dqlib/call",
         "/dqlib/pipeline",
         "/dqlib/iranalytics/call",
+        "/dqlib/iranalytics/curve_analytics",
+        "/dqlib/fianalytics/fixed_coupon_bond_ytm",
+        "/dqlib/eqanalytics/european_option",
+        "/dqlib/fxanalytics/atm_strike",
+        "/dqlib/cranalytics/curve_analytics",
+        "/dqlib/cmanalytics/european_option",
         "/dqlib/datetime/simple_year_fraction",
         "/dqlib/mktrisk/value_at_risk",
+        "/dqlib/mktrisk/expected_shortfall",
     } <= paths
     assert len(operation_ids) == len(set(operation_ids))

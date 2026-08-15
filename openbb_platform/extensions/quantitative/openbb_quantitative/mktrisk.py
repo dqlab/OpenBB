@@ -9,19 +9,17 @@ from openbb_quantitative._dqlib import (
     domain_dir,
     domain_getattr,
     execute_function,
-    to_jsonable,
 )
+from openbb_quantitative._dqlib_typed import checked_response
 from openbb_quantitative.dqlib_domain import create_domain_router
-from openbb_quantitative.models import DQLibScalarResult
+from openbb_quantitative.dqlib_models import (
+    ExpectedShortfallResult,
+    TailRiskRequest,
+    ValueAtRiskResult,
+)
 
 _DOMAIN = "mktrisk"
 router = create_domain_router(_DOMAIN)
-
-
-def _result(function: str, args: list[Any]) -> OBBject[DQLibScalarResult]:
-    """Execute one market-risk function and serialize its result."""
-    result = execute_function(_DOMAIN, function, args)
-    return OBBject(results=DQLibScalarResult(value=to_jsonable(result)))
 
 
 def _profit_loss_vector(samples: list[float]) -> Any:
@@ -73,9 +71,8 @@ def _tail_risk_request(
         pb_output = getattr(dqproto, output_class_name)()
         pb_output.ParseFromString(response)
         if hasattr(pb_output, "success") and not pb_output.success:
-            message = getattr(pb_output, "err_msg", "")
             raise DQLibExecutionError(
-                message or f"dqlib reported failure for {request_name}."
+                f"dqlib reported failure for {request_name}."
             )
         return pb_output
     except DQLibExecutionError:
@@ -88,49 +85,34 @@ def _tail_risk_request(
 
 @router.command(
     methods=["POST"],
-    operation_id="dqlib_mktrisk_risk_factor_change",
-)
-def risk_factor_change(
-    values: list[float],
-    change_type: str = "RELATIVE",
-) -> OBBject[DQLibScalarResult]:
-    """Calculate historical dqlib risk-factor changes."""
-    return _result("calculate_risk_factor_change", [values, change_type])
-
-
-@router.command(
-    methods=["POST"],
-    operation_id="dqlib_mktrisk_simulate_risk_factor",
-)
-def simulate_risk_factor(
-    changes: list[float],
-    base: float,
-    change_type: str = "RELATIVE",
-) -> OBBject[DQLibScalarResult]:
-    """Simulate dqlib risk-factor levels from historical changes."""
-    return _result("simulate_risk_factor", [changes, change_type, base])
-
-
-@router.command(
-    methods=["POST"],
     operation_id="dqlib_mktrisk_value_at_risk",
 )
 def value_at_risk(
-    profit_loss_samples: list[float],
-    probability: float = 0.99,
-    antithetic: bool = False,
-) -> OBBject[DQLibScalarResult]:
+    request: TailRiskRequest,
+) -> OBBject[ValueAtRiskResult]:
     """Calculate dqlib value at risk from profit-and-loss samples."""
-    result = _tail_risk_request(
-        profit_loss_samples,
-        probability,
-        antithetic,
-        request_name="CALCULATE_VALUE_AT_RISK",
-        input_class_name="CalculateValueAtRiskInput",
-        output_class_name="CalculateValueAtRiskOutput",
-        mirrored_field="calc_var_mirrored",
+    response = checked_response(
+        _tail_risk_request(
+            request.profit_loss_samples,
+            request.probability,
+            request.antithetic,
+            request_name="CALCULATE_VALUE_AT_RISK",
+            input_class_name="CalculateValueAtRiskInput",
+            output_class_name="CalculateValueAtRiskOutput",
+            mirrored_field="calc_var_mirrored",
+        ),
+        "value-at-risk calculation",
     )
-    return OBBject(results=DQLibScalarResult(value=to_jsonable(result)))
+    mirrored = (
+        float(response.value_at_risk_mirrored) if request.antithetic else None
+    )
+    return OBBject(
+        results=ValueAtRiskResult(
+            probability=request.probability,
+            value_at_risk=float(response.value_at_risk),
+            value_at_risk_mirrored=mirrored,
+        )
+    )
 
 
 @router.command(
@@ -138,21 +120,33 @@ def value_at_risk(
     operation_id="dqlib_mktrisk_expected_shortfall",
 )
 def expected_shortfall(
-    profit_loss_samples: list[float],
-    probability: float = 0.99,
-    antithetic: bool = False,
-) -> OBBject[DQLibScalarResult]:
+    request: TailRiskRequest,
+) -> OBBject[ExpectedShortfallResult]:
     """Calculate dqlib expected shortfall from profit-and-loss samples."""
-    result = _tail_risk_request(
-        profit_loss_samples,
-        probability,
-        antithetic,
-        request_name="CALCULATE_EXPECTED_SHORT_FALL",
-        input_class_name="CalculateExpectedShortfallInput",
-        output_class_name="CalculateExpectedShortfallOutput",
-        mirrored_field="calc_es_mirrored",
+    response = checked_response(
+        _tail_risk_request(
+            request.profit_loss_samples,
+            request.probability,
+            request.antithetic,
+            request_name="CALCULATE_EXPECTED_SHORT_FALL",
+            input_class_name="CalculateExpectedShortfallInput",
+            output_class_name="CalculateExpectedShortfallOutput",
+            mirrored_field="calc_es_mirrored",
+        ),
+        "expected-shortfall calculation",
     )
-    return OBBject(results=DQLibScalarResult(value=to_jsonable(result)))
+    mirrored = (
+        float(response.expected_shortfall_mirrored)
+        if request.antithetic
+        else None
+    )
+    return OBBject(
+        results=ExpectedShortfallResult(
+            probability=request.probability,
+            expected_shortfall=float(response.expected_shortfall),
+            expected_shortfall_mirrored=mirrored,
+        )
+    )
 
 
 def __getattr__(name: str) -> Any:

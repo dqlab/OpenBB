@@ -49,16 +49,38 @@ obb.quantitative.dqlib.datetime.simple_year_fraction(
     day_count="ACT_365_FIXED",
 )
 
-obb.quantitative.dqlib.mktrisk.risk_factor_change(
-    values=[100.0, 102.0, 99.0, 104.0],
-    change_type="RELATIVE",
+obb.quantitative.dqlib.mktrisk.value_at_risk(
+    request={
+        "profit_loss_samples": [-4.0, 1.0, -2.0, 3.0, -7.0],
+        "probability": 0.99,
+    }
 )
 
-obb.quantitative.dqlib.mktrisk.value_at_risk(
-    profit_loss_samples=[-4.0, 1.0, -2.0, 3.0, -7.0],
-    probability=0.99,
+obb.quantitative.dqlib.mktrisk.expected_shortfall(
+    request={
+        "profit_loss_samples": [-4.0, 1.0, -2.0, 3.0, -7.0],
+        "probability": 0.99,
+    }
+)
+
+obb.quantitative.dqlib.iranalytics.curve_analytics(
+    request={
+        "as_of_date": "2026-01-02",
+        "currency": "USD",
+        "pillars": [
+            {"date": "2027-01-02", "zero_rate": 0.02, "name": "1Y"},
+            {"date": "2028-01-02", "zero_rate": 0.023, "name": "2Y"},
+        ],
+        "query_dates": ["2027-07-02"],
+    }
 )
 ```
+
+The typed native surface currently covers interest-rate curves, fixed-coupon
+bond yield, equity and commodity European option pricing, FX ATM strike,
+credit curves, VaR, and expected shortfall. See [the dqlib public API map](DQLIB_API.md)
+for the exact public wrappers used, response models, tested compatibility
+paths, and operations intentionally left unsupported in dqlib 3.0.2.
 
 Every released domain also exposes an allowlisted `call` command. For example,
 the same date calculation can be executed by function name:

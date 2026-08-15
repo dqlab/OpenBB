@@ -1,0 +1,186 @@
+"""Opt-in tests against the installed native dqlib 3.0.2 Linux runtime."""
+
+import os
+from datetime import date
+
+import pytest
+from openbb_quantitative import (
+    cmanalytics,
+    cranalytics,
+    datetime as datetime_analytics,
+    eqanalytics,
+    fianalytics,
+    fxanalytics,
+    iranalytics,
+    mktrisk,
+)
+from openbb_quantitative.dqlib_models import (
+    CommodityEuropeanOptionRequest,
+    CreditCurveAnalyticsRequest,
+    EquityEuropeanOptionRequest,
+    FixedCouponBondYtmRequest,
+    FxAtmStrikeRequest,
+    IrCurveAnalyticsRequest,
+    TailRiskRequest,
+)
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("OPENBB_RUN_DQLIB_NATIVE_TESTS") != "1",
+    reason="set OPENBB_RUN_DQLIB_NATIVE_TESTS=1 to use the licensed runtime",
+)
+
+
+def test_native_simple_year_fraction():
+    """The existing typed date command still reaches the real native runtime."""
+    result = datetime_analytics.simple_year_fraction(
+        date(2022, 3, 7), date(2023, 6, 7)
+    ).results
+
+    assert result.value == pytest.approx(1.252054794520548)
+
+
+def test_native_value_at_risk_and_expected_shortfall():
+    """VaR and ES execute through the dqlib 3.0.2 protobuf compatibility path."""
+    samples = [-12.0, -8.0, -5.0, -3.0, -1.0, 0.0, 1.0, 2.0, 4.0, 7.0]
+
+    value_at_risk = mktrisk.value_at_risk(
+        TailRiskRequest(
+            profit_loss_samples=samples,
+            probability=0.95,
+            antithetic=True,
+        )
+    ).results
+    expected_shortfall = mktrisk.expected_shortfall(
+        TailRiskRequest(
+            profit_loss_samples=samples,
+            probability=0.95,
+            antithetic=True,
+        )
+    ).results
+
+    assert value_at_risk.value_at_risk == pytest.approx(5.65)
+    assert value_at_risk.value_at_risk_mirrored == pytest.approx(-10.2)
+    assert expected_shortfall.expected_shortfall == pytest.approx(-1.5)
+    assert expected_shortfall.expected_shortfall_mirrored == pytest.approx(
+        -1 / 3
+    )
+
+
+def test_native_ir_curve_analytics():
+    """A typed IR request builds and queries a real native yield curve."""
+    request = IrCurveAnalyticsRequest(
+        as_of_date=date(2026, 1, 2),
+        currency="USD",
+        pillars=[
+            {"date": date(2026, 7, 2), "zero_rate": 0.018, "name": "6M"},
+            {"date": date(2027, 1, 2), "zero_rate": 0.020, "name": "1Y"},
+            {"date": date(2028, 1, 2), "zero_rate": 0.023, "name": "2Y"},
+            {"date": date(2031, 1, 2), "zero_rate": 0.028, "name": "5Y"},
+        ],
+        query_dates=[date(2026, 4, 2), date(2027, 7, 2), date(2030, 1, 2)],
+        curve_name="USD_TEST",
+    )
+
+    result = iranalytics.curve_analytics(request).results
+
+    assert [point.zero_rate for point in result.points] == pytest.approx(
+        [0.018, 0.02148767123287671, 0.02633485401459854]
+    )
+    assert [point.discount_factor for point in result.points] == pytest.approx(
+        [0.9955714787826248, 0.9683679005580244, 0.8999540555557722]
+    )
+
+
+def test_native_fixed_coupon_bond_yield_to_maturity():
+    """A typed FI request builds a real bond and calculates its native yield."""
+    request = FixedCouponBondYtmRequest(
+        calculation_date=date(2026, 1, 2),
+        issue_date=date(2025, 1, 2),
+        maturity="6Y",
+        coupon_rate=0.05,
+        price=102.0,
+        curve_rate=0.04,
+        calendar="USNY",
+    )
+
+    result = fianalytics.fixed_coupon_bond_ytm(request).results
+
+    assert result.yield_to_maturity == pytest.approx(0.044438035673887766)
+
+
+def test_native_equity_european_option():
+    """A typed equity request returns a real native European option price."""
+    request = EquityEuropeanOptionRequest(
+        valuation_date=date(2026, 1, 2),
+        expiry_date=date(2027, 1, 2),
+        strike=100.0,
+        spot=100.0,
+        volatility=0.20,
+        discount_rate=0.02,
+        carry_rate=0.01,
+        underlying="SPX",
+    )
+
+    result = eqanalytics.european_option(request).results
+
+    assert result.present_value == pytest.approx(8.349405767096755)
+    assert result.currency == "USD"
+
+
+def test_native_fx_atm_strike():
+    """A typed FX request returns a real native ATM forward strike."""
+    request = FxAtmStrikeRequest(
+        valuation_date=date(2026, 1, 2),
+        expiry_date=date(2027, 1, 2),
+        currency_pair="EURUSD",
+        spot=1.10,
+        domestic_rate=0.04,
+        foreign_rate=0.02,
+        volatility=0.12,
+    )
+
+    result = fxanalytics.atm_strike(request).results
+
+    assert result.strike == pytest.approx(1.1222214740294314)
+
+
+def test_native_credit_curve_analytics():
+    """A typed credit request builds and queries a real native hazard curve."""
+    request = CreditCurveAnalyticsRequest(
+        as_of_date=date(2026, 1, 2),
+        pillars=[
+            {"date": date(2027, 1, 2), "hazard_rate": 0.01, "name": "1Y"},
+            {"date": date(2028, 1, 2), "hazard_rate": 0.015, "name": "2Y"},
+            {"date": date(2031, 1, 2), "hazard_rate": 0.02, "name": "5Y"},
+        ],
+        query_dates=[date(2027, 1, 2), date(2028, 1, 2), date(2031, 1, 2)],
+        curve_name="ACME",
+    )
+
+    result = cranalytics.curve_analytics(request).results
+
+    assert [point.credit_spread for point in result.points] == pytest.approx(
+        [0.01, 0.015, 0.02]
+    )
+    assert [point.survival_probability for point in result.points] == pytest.approx(
+        [0.9900498337491681, 0.9704455335485082, 0.9047878392617994]
+    )
+
+
+def test_native_commodity_european_option():
+    """A typed commodity request returns a real native European option price."""
+    request = CommodityEuropeanOptionRequest(
+        valuation_date=date(2026, 1, 2),
+        expiry_date=date(2027, 1, 2),
+        strike=80.0,
+        spot=75.0,
+        volatility=0.25,
+        discount_rate=0.03,
+        carry_rate=0.02,
+        underlying="WTI",
+    )
+
+    result = cmanalytics.european_option(request).results
+
+    assert result.present_value == pytest.approx(5.634795853371306)
+    assert result.currency == "USD"
