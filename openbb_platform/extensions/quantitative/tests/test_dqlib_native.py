@@ -3,6 +3,8 @@
 import inspect
 import os
 from datetime import date
+from math import exp, log, sqrt
+from statistics import NormalDist
 
 import pytest
 from openbb_quantitative import datetime as datetime_analytics
@@ -10,6 +12,7 @@ from openbb_quantitative.commodity import analytics as cmanalytics
 from openbb_quantitative.common import analytics as common_analytics
 from openbb_quantitative.credit import analytics as cranalytics
 from openbb_quantitative.dqlib_models import (
+    BuildEqVolatilitySurfaceRequest,
     CommodityEuropeanOptionRequest,
     CreditCurveAnalyticsRequest,
     EquityEuropeanOptionRequest,
@@ -149,6 +152,106 @@ def test_native_equity_european_option():
 
     assert result.present_value == pytest.approx(8.349405767096755)
     assert result.currency == "USD"
+
+
+def test_native_build_equity_volatility_surface():
+    """A typed option chain calibrates through the real dqlib EQ builder."""
+    as_of_date = date(2026, 1, 2)
+    expiries = [date(2026, 4, 2), date(2026, 7, 2), date(2027, 1, 2)]
+    strikes = [80.0, 90.0, 100.0, 110.0, 120.0]
+    spot = 100.0
+    discount_rate = 0.02
+    repo_rate = 0.015
+    dividend_rate = 0.01
+    effective_dividend_rate = discount_rate - repo_rate + dividend_rate
+    expected_volatility = 0.20
+    normal = NormalDist()
+    option_chain = []
+
+    for expiry in expiries:
+        term = (expiry - as_of_date).days / 365
+        for strike in strikes:
+            d1 = (
+                log(spot / strike)
+                + (
+                    repo_rate
+                    - dividend_rate
+                    + expected_volatility**2 / 2
+                )
+                * term
+            ) / (expected_volatility * sqrt(term))
+            d2 = d1 - expected_volatility * sqrt(term)
+            call_price = (
+                spot * exp(-effective_dividend_rate * term) * normal.cdf(d1)
+                - strike
+                * exp(-discount_rate * term)
+                * normal.cdf(d2)
+            )
+            put_price = (
+                strike
+                * exp(-discount_rate * term)
+                * normal.cdf(-d2)
+                - spot
+                * exp(-effective_dividend_rate * term)
+                * normal.cdf(-d1)
+            )
+            option_chain.extend(
+                [
+                    {
+                        "expiry_date": expiry,
+                        "strike": strike,
+                        "option_type": "CALL",
+                        "price": call_price,
+                    },
+                    {
+                        "expiry_date": expiry,
+                        "strike": strike,
+                        "option_type": "PUT",
+                        "price": put_price,
+                    },
+                ]
+            )
+
+    request = BuildEqVolatilitySurfaceRequest(
+        as_of_date=as_of_date,
+        option_chain=option_chain,
+        underlying_price=spot,
+        discount_curve={
+            "pillars": [
+                {"date": date(2026, 2, 2), "rate": discount_rate},
+                {"date": date(2028, 1, 2), "rate": discount_rate},
+            ]
+        },
+        repo_curve={
+            "pillars": [
+                {"date": date(2026, 2, 2), "rate": repo_rate},
+                {"date": date(2028, 1, 2), "rate": repo_rate},
+            ]
+        },
+        dividend_curve={
+            "pillars": [
+                {"date": date(2026, 2, 2), "rate": dividend_rate},
+                {"date": date(2028, 1, 2), "rate": dividend_rate},
+            ]
+        },
+        build_settings={
+            "smile_method": "LINEAR_SMILE_METHOD",
+            "wing_strike_type": "ABSOLUTE_STRIKE",
+            "lower": 50.0,
+            "upper": 150.0,
+        },
+        underlying="SPX",
+        currency="USD",
+        evaluation_strikes=[90.0, 100.0, 110.0],
+    )
+
+    result = eqanalytics.build_volatility_surface(request).results
+
+    assert len(result.points) == 9
+    assert [point.volatility for point in result.points] == pytest.approx(
+        [expected_volatility] * 9,
+        abs=1e-8,
+    )
 
 
 def test_native_fx_atm_strike():

@@ -5,6 +5,7 @@ from typing import Any
 import openbb_quantitative.equity.analytics as _analytics
 
 PUBLIC_FUNCTIONS = _analytics.PUBLIC_FUNCTIONS
+build_volatility_surface = _analytics.build_volatility_surface
 european_option = _analytics.european_option
 router = _analytics.router
 

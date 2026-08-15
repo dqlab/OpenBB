@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from openbb_quantitative.commodity import analytics as cmanalytics
 from openbb_quantitative.credit import analytics as cranalytics
 from openbb_quantitative.dqlib_models import (
+    BuildEqVolatilitySurfaceRequest,
     CommodityEuropeanOptionRequest,
     CreditCurveAnalyticsRequest,
     EquityEuropeanOptionRequest,
@@ -191,6 +192,165 @@ def test_european_option_commands_translate_pricing_response(
     assert pricing_function in captured
 
 
+def test_build_equity_volatility_surface_runs_typed_native_pipeline(monkeypatch):
+    """The equity surface command groups quotes, applies repo carry, and translates."""
+    captured: list[tuple[str, str, list[Any], dict[str, Any]]] = []
+    curves: dict[object, float] = {}
+    quote_matrix = object()
+    carry_curve = object()
+    surface = SimpleNamespace(vol_smiles=[object()])
+
+    def fake_execute(domain, function, args=None, kwargs=None):
+        call_args = args or []
+        captured.append((domain, function, call_args, kwargs or {}))
+        if function == "create_flat_ir_yield_curve":
+            native_curve = object()
+            curves[native_curve] = call_args[2]
+            return native_curve
+        if function == "get_zero_rate":
+            return _vector([curves[call_args[0]]] * len(call_args[1]))
+        if function == "create_flat_dividend_curve":
+            assert call_args[1] == pytest.approx(0.015)
+            return carry_curve
+        if function == "create_eq_option_quote_matrix":
+            return quote_matrix
+        if function == "create_pricing_settings":
+            return object()
+        if function == "eq_vol_surface_builder":
+            assert call_args[5] is quote_matrix
+            assert call_args[6] == [100.0, 100.0]
+            assert call_args[8] is carry_curve
+            assert call_args[2] == "ABOSULTE_STRIKE"
+            return surface
+        if function == "get_volatility":
+            assert call_args[0] is surface
+            assert call_args[2] == [90.0, 100.0]
+            return _vector([0.21, 0.20, 0.22, 0.205])
+        raise AssertionError(f"Unexpected native call: {domain}.{function}")
+
+    monkeypatch.setattr(eqanalytics, "execute_function", fake_execute)
+    request = BuildEqVolatilitySurfaceRequest(
+        as_of_date=date(2026, 1, 2),
+        option_chain=[
+            {
+                "expiry_date": date(2026, 7, 2),
+                "strike": 100.0,
+                "option_type": "CALL",
+                "bid": 5.0,
+                "ask": 5.2,
+            },
+            {
+                "expiry_date": date(2026, 7, 2),
+                "strike": 90.0,
+                "option_type": "PUT",
+                "price": 2.0,
+            },
+            {
+                "expiry_date": date(2027, 1, 2),
+                "strike": 100.0,
+                "option_type": "CALL",
+                "price": 8.0,
+            },
+            {
+                "expiry_date": date(2027, 1, 2),
+                "strike": 90.0,
+                "option_type": "PUT",
+                "price": 3.0,
+            },
+        ],
+        underlying_price=100.0,
+        discount_curve={"flat_rate": 0.02},
+        repo_curve={"flat_rate": 0.015},
+        dividend_curve={"flat_rate": 0.01},
+        build_settings={"lower": 50.0, "upper": 150.0},
+        underlying="SPX",
+    )
+
+    result = eqanalytics.build_volatility_surface(request).results
+
+    assert [point.volatility for point in result.points] == [
+        0.21,
+        0.20,
+        0.22,
+        0.205,
+    ]
+    matrix_call = next(
+        item for item in captured if item[1] == "create_eq_option_quote_matrix"
+    )
+    assert matrix_call[2][3] == [datetime(2026, 7, 2), datetime(2027, 1, 2)]
+    assert matrix_call[2][4] == [["PUT", "CALL"], ["PUT", "CALL"]]
+    assert matrix_call[2][5] == [[2.0, 5.1], [3.0, 8.0]]
+    assert matrix_call[2][6] == [[90.0, 100.0], [90.0, 100.0]]
+
+
+def test_build_equity_volatility_surface_rejects_native_string(monkeypatch):
+    """The dqlib wrapper's string-on-error behavior becomes a stable exception."""
+    request = BuildEqVolatilitySurfaceRequest(
+        as_of_date=date(2026, 1, 2),
+        option_chain=[
+            {
+                "expiry_date": date(2027, 1, 2),
+                "strike": 90.0,
+                "option_type": "PUT",
+                "price": 3.0,
+            },
+            {
+                "expiry_date": date(2027, 1, 2),
+                "strike": 100.0,
+                "option_type": "CALL",
+                "price": 8.0,
+            },
+        ],
+        underlying_price=100.0,
+        discount_curve={"flat_rate": 0.02},
+        dividend_curve={"flat_rate": 0.01},
+        build_settings={"lower": 50.0, "upper": 150.0},
+        underlying="SPX",
+    )
+
+    def fake_execute(domain, function, args=None, kwargs=None):
+        if function == "get_zero_rate":
+            return _vector([0.01])
+        if function == "eq_vol_surface_builder":
+            return "private native detail"
+        return object()
+
+    monkeypatch.setattr(eqanalytics, "execute_function", fake_execute)
+
+    with pytest.raises(
+        eqanalytics.DQLibExecutionError,
+        match="failed to build the equity volatility surface",
+    ):
+        eqanalytics.build_volatility_surface(request)
+
+
+def test_build_equity_volatility_surface_validates_chain_shape():
+    """A surface request rejects expiries with only one distinct strike."""
+    with pytest.raises(ValidationError, match="at least two strikes"):
+        BuildEqVolatilitySurfaceRequest(
+            as_of_date=date(2026, 1, 2),
+            option_chain=[
+                {
+                    "expiry_date": date(2027, 1, 2),
+                    "strike": 100.0,
+                    "option_type": "CALL",
+                    "price": 8.0,
+                },
+                {
+                    "expiry_date": date(2027, 1, 2),
+                    "strike": 100.0,
+                    "option_type": "PUT",
+                    "price": 6.0,
+                },
+            ],
+            underlying_price=100.0,
+            discount_curve={"flat_rate": 0.02},
+            dividend_curve={"flat_rate": 0.01},
+            build_settings={"lower": 50.0, "upper": 150.0},
+            underlying="SPX",
+        )
+
+
 def test_fx_atm_strike_builds_native_market_inputs(monkeypatch):
     """The FX command sends typed flat-market inputs to the native calculator."""
     captured: list[tuple[str, str, list[Any]]] = []
@@ -304,6 +464,10 @@ def test_typed_routes_publish_request_and_response_models():
         "/dqlib/equity/european_option": (
             "EquityEuropeanOptionRequest",
             "OBBject_EuropeanOptionResult_",
+        ),
+        "/dqlib/equity/build_volatility_surface": (
+            "BuildEqVolatilitySurfaceRequest",
+            "OBBject_BuildEqVolatilitySurfaceResult_",
         ),
         "/dqlib/foreign_exchange/atm_strike": (
             "FxAtmStrikeRequest",
