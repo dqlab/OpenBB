@@ -1,19 +1,14 @@
 """Opt-in tests against the installed native dqlib 3.0.2 Linux runtime."""
 
+import inspect
 import os
 from datetime import date
 
 import pytest
-from openbb_quantitative import (
-    cmanalytics,
-    cranalytics,
-    datetime as datetime_analytics,
-    eqanalytics,
-    fianalytics,
-    fxanalytics,
-    iranalytics,
-    mktrisk,
-)
+from openbb_quantitative import datetime as datetime_analytics
+from openbb_quantitative.commodity import analytics as cmanalytics
+from openbb_quantitative.common import analytics as common_analytics
+from openbb_quantitative.credit import analytics as cranalytics
 from openbb_quantitative.dqlib_models import (
     CommodityEuropeanOptionRequest,
     CreditCurveAnalyticsRequest,
@@ -23,11 +18,40 @@ from openbb_quantitative.dqlib_models import (
     IrCurveAnalyticsRequest,
     TailRiskRequest,
 )
+from openbb_quantitative.equity import analytics as eqanalytics
+from openbb_quantitative.fixed_income import analytics as fianalytics
+from openbb_quantitative.foreign_exchange import analytics as fxanalytics
+from openbb_quantitative.interest_rate import analytics as iranalytics
+from openbb_quantitative.risk import analytics as mktrisk
+
+DOMAIN_MODULES = {
+    "analytics": common_analytics,
+    "cmanalytics": cmanalytics,
+    "cranalytics": cranalytics,
+    "eqanalytics": eqanalytics,
+    "fianalytics": fianalytics,
+    "fxanalytics": fxanalytics,
+    "iranalytics": iranalytics,
+    "mktrisk": mktrisk,
+}
 
 pytestmark = pytest.mark.skipif(
     os.getenv("OPENBB_RUN_DQLIB_NATIVE_TESTS") != "1",
     reason="set OPENBB_RUN_DQLIB_NATIVE_TESTS=1 to use the licensed runtime",
 )
+
+
+@pytest.mark.parametrize(("domain", "bridge"), DOMAIN_MODULES.items())
+def test_native_public_analytics_surface_is_fully_mapped(domain, bridge):
+    """Every public function defined by installed dqlib has an explicit binding."""
+    native = __import__(f"dqlib.{domain}", fromlist=[domain])
+    expected = {
+        name
+        for name, value in vars(native).items()
+        if inspect.isfunction(value) and value.__module__ == native.__name__
+    }
+
+    assert set(bridge.PUBLIC_FUNCTIONS) == expected
 
 
 def test_native_simple_year_fraction():

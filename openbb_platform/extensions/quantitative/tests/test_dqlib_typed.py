@@ -6,15 +6,8 @@ from typing import Any
 
 import pytest
 from fastapi import FastAPI
-from openbb_quantitative import (
-    cmanalytics,
-    cranalytics,
-    eqanalytics,
-    fianalytics,
-    fxanalytics,
-    iranalytics,
-    mktrisk,
-)
+from openbb_quantitative.commodity import analytics as cmanalytics
+from openbb_quantitative.credit import analytics as cranalytics
 from openbb_quantitative.dqlib_models import (
     CommodityEuropeanOptionRequest,
     CreditCurveAnalyticsRequest,
@@ -25,6 +18,11 @@ from openbb_quantitative.dqlib_models import (
     TailRiskRequest,
 )
 from openbb_quantitative.dqlib_router import router as dqlib_router
+from openbb_quantitative.equity import analytics as eqanalytics
+from openbb_quantitative.fixed_income import analytics as fianalytics
+from openbb_quantitative.foreign_exchange import analytics as fxanalytics
+from openbb_quantitative.interest_rate import analytics as iranalytics
+from openbb_quantitative.risk import analytics as mktrisk
 from pydantic import ValidationError
 
 
@@ -295,35 +293,35 @@ def test_typed_routes_publish_request_and_response_models():
     app.include_router(dqlib_router.api_router)
     schema = app.openapi()
     expected = {
-        "/dqlib/iranalytics/curve_analytics": (
+        "/dqlib/interest_rate/curve_analytics": (
             "IrCurveAnalyticsRequest",
             "OBBject_IrCurveAnalyticsResult_",
         ),
-        "/dqlib/fianalytics/fixed_coupon_bond_ytm": (
+        "/dqlib/fixed_income/fixed_coupon_bond_ytm": (
             "FixedCouponBondYtmRequest",
             "OBBject_FixedCouponBondYtmResult_",
         ),
-        "/dqlib/eqanalytics/european_option": (
+        "/dqlib/equity/european_option": (
             "EquityEuropeanOptionRequest",
             "OBBject_EuropeanOptionResult_",
         ),
-        "/dqlib/fxanalytics/atm_strike": (
+        "/dqlib/foreign_exchange/atm_strike": (
             "FxAtmStrikeRequest",
             "OBBject_FxAtmStrikeResult_",
         ),
-        "/dqlib/cranalytics/curve_analytics": (
+        "/dqlib/credit/curve_analytics": (
             "CreditCurveAnalyticsRequest",
             "OBBject_CreditCurveAnalyticsResult_",
         ),
-        "/dqlib/cmanalytics/european_option": (
+        "/dqlib/commodity/european_option": (
             "CommodityEuropeanOptionRequest",
             "OBBject_EuropeanOptionResult_",
         ),
-        "/dqlib/mktrisk/value_at_risk": (
+        "/dqlib/risk/value_at_risk": (
             "TailRiskRequest",
             "OBBject_ValueAtRiskResult_",
         ),
-        "/dqlib/mktrisk/expected_shortfall": (
+        "/dqlib/risk/expected_shortfall": (
             "TailRiskRequest",
             "OBBject_ExpectedShortfallResult_",
         ),

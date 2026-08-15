@@ -30,16 +30,17 @@ def call_dqlib(
     )
 
 
-def create_domain_router(domain: str) -> Router:
+def create_domain_router(domain: str, prefix: str | None = None) -> Router:
     """Create the /call command for one validated dqlib domain."""
+    route_prefix = prefix or domain
     router = Router(
-        prefix=f"/{domain}",
+        prefix=f"/{route_prefix}",
         description=f"Executable dqlib {domain} analytics.",
     )
 
     @router.command(
         methods=["POST"],
-        operation_id=f"dqlib_{domain}_call",
+        operation_id=f"dqlib_{route_prefix}_call",
     )
     def call(
         function: str,

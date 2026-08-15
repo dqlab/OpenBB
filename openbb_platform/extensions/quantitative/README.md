@@ -49,21 +49,21 @@ obb.quantitative.dqlib.datetime.simple_year_fraction(
     day_count="ACT_365_FIXED",
 )
 
-obb.quantitative.dqlib.mktrisk.value_at_risk(
+obb.quantitative.dqlib.risk.value_at_risk(
     request={
         "profit_loss_samples": [-4.0, 1.0, -2.0, 3.0, -7.0],
         "probability": 0.99,
     }
 )
 
-obb.quantitative.dqlib.mktrisk.expected_shortfall(
+obb.quantitative.dqlib.risk.expected_shortfall(
     request={
         "profit_loss_samples": [-4.0, 1.0, -2.0, 3.0, -7.0],
         "probability": 0.99,
     }
 )
 
-obb.quantitative.dqlib.iranalytics.curve_analytics(
+obb.quantitative.dqlib.interest_rate.curve_analytics(
     request={
         "as_of_date": "2026-01-02",
         "currency": "USD",
@@ -78,9 +78,11 @@ obb.quantitative.dqlib.iranalytics.curve_analytics(
 
 The typed native surface currently covers interest-rate curves, fixed-coupon
 bond yield, equity and commodity European option pricing, FX ATM strike,
-credit curves, VaR, and expected shortfall. See [the dqlib public API map](DQLIB_API.md)
-for the exact public wrappers used, response models, tested compatibility
-paths, and operations intentionally left unsupported in dqlib 3.0.2.
+credit curves, VaR, and expected shortfall. The Python packages also explicitly
+bind all 188 functions defined by the installed analytics modules. See
+[the dqlib public API map](DQLIB_API.md) for package ownership, response models,
+tested compatibility paths, and operations that cannot honestly be exposed as
+typed JSON commands in dqlib 3.0.2.
 
 Every released domain also exposes an allowlisted `call` command. For example,
 the same date calculation can be executed by function name:
@@ -131,13 +133,16 @@ Pipeline arguments support `$ref`, `$date`, `$datetime`, and base64
 typed converters are exposed; private, demo, process-request, and file-loading
 functions are rejected.
 
-The released Python APIs remain available through lazy module namespaces:
+The released Python APIs are organized by quantitative domain:
 
 ```python
-from openbb_quantitative.iranalytics import ir_single_ccy_curve_builder
-from openbb_quantitative.fianalytics import vanilla_bond_pricer
-from openbb_quantitative.eqanalytics import eq_european_option_pricer
+from openbb_quantitative.interest_rate.analytics import ir_single_ccy_curve_builder
+from openbb_quantitative.fixed_income.analytics import vanilla_bond_pricer
+from openbb_quantitative.equity.analytics import eq_european_option_pricer
 ```
+
+The former `iranalytics`, `fianalytics`, `eqanalytics`, `fxanalytics`,
+`cranalytics`, `cmanalytics`, and `mktrisk` imports remain compatibility shims.
 
 Bridged domains include shared analytics, dates, markets, numerics, interest
 rates, fixed income, equities, foreign exchange, credit, commodities, and

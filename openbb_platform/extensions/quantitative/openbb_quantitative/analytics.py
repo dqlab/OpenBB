@@ -1,19 +1,21 @@
-"""Lazy bridge to dqlib shared analytics."""
+"""Compatibility module for :mod:`openbb_quantitative.common.analytics`."""
 
 from typing import Any
 
-from openbb_quantitative._dqlib import domain_dir, domain_getattr
-from openbb_quantitative.dqlib_domain import create_domain_router
+import openbb_quantitative.common.analytics as _analytics
 
-_DOMAIN = "analytics"
-router = create_domain_router(_DOMAIN)
+PUBLIC_FUNCTIONS = _analytics.PUBLIC_FUNCTIONS
+router = _analytics.router
 
 
 def __getattr__(name: str) -> Any:
-    """Resolve a public attribute from dqlib.analytics."""
-    return domain_getattr(_DOMAIN, name)
+    """Delegate public dqlib analytics bindings to the common package."""
+    return getattr(_analytics, name)
 
 
 def __dir__() -> list[str]:
-    """Return local and dqlib domain attributes for interactive discovery."""
-    return sorted(set(globals()) | set(domain_dir(_DOMAIN)))
+    """Return the common analytics public names."""
+    return dir(_analytics)
+
+
+__all__ = _analytics.__all__

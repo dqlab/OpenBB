@@ -1,102 +1,22 @@
-"""Lazy bridge to dqlib interest-rate analytics."""
+"""Compatibility module for :mod:`openbb_quantitative.interest_rate.analytics`."""
 
 from typing import Any
 
-from openbb_core.app.model.obbject import OBBject
+import openbb_quantitative.interest_rate.analytics as _analytics
 
-from openbb_quantitative._dqlib import (
-    domain_dir,
-    domain_getattr,
-    execute_function,
-)
-from openbb_quantitative._dqlib_typed import to_datetime, vector_values
-from openbb_quantitative.dqlib_domain import create_domain_router
-from openbb_quantitative.dqlib_models import (
-    IrCurveAnalyticsRequest,
-    IrCurveAnalyticsResult,
-    IrCurvePoint,
-)
-
-_DOMAIN = "iranalytics"
-router = create_domain_router(_DOMAIN)
-
-
-@router.command(
-    methods=["POST"],
-    operation_id="dqlib_iranalytics_curve_analytics",
-)
-def curve_analytics(
-    request: IrCurveAnalyticsRequest,
-) -> OBBject[IrCurveAnalyticsResult]:
-    """Construct a native dqlib zero curve and calculate curve measures."""
-    as_of_date = to_datetime(request.as_of_date)
-    pillar_dates = [to_datetime(pillar.date) for pillar in request.pillars]
-    query_dates = [to_datetime(value) for value in request.query_dates]
-    curve = execute_function(
-        "analytics",
-        "create_ir_yield_curve",
-        [
-            as_of_date,
-            request.currency,
-            pillar_dates,
-            [pillar.zero_rate for pillar in request.pillars],
-        ],
-        {
-            "day_count": request.day_count,
-            "interp_method": request.interpolation,
-            "extrap_method": request.extrapolation,
-            "compounding_type": request.compounding,
-            "frequency": request.frequency,
-            "curve_name": request.curve_name,
-            "pillar_names": [pillar.name for pillar in request.pillars],
-        },
-    )
-    size = len(query_dates)
-    zero_rates = vector_values(
-        execute_function("analytics", "get_zero_rate", [curve, query_dates]),
-        size,
-        "IR zero-rate calculation",
-    )
-    discount_factors = vector_values(
-        execute_function(
-            "analytics", "get_discount_factor", [curve, query_dates]
-        ),
-        size,
-        "IR discount-factor calculation",
-    )
-    forward_rates = vector_values(
-        execute_function(
-            "analytics",
-            "get_fwd_rate",
-            [curve, query_dates, request.forward_tenor],
-        ),
-        size,
-        "IR forward-rate calculation",
-    )
-    points = [
-        IrCurvePoint(
-            date=value,
-            zero_rate=zero_rates[index],
-            discount_factor=discount_factors[index],
-            forward_rate=forward_rates[index],
-        )
-        for index, value in enumerate(request.query_dates)
-    ]
-    return OBBject(
-        results=IrCurveAnalyticsResult(
-            as_of_date=request.as_of_date,
-            currency=request.currency,
-            curve_name=request.curve_name,
-            points=points,
-        )
-    )
+PUBLIC_FUNCTIONS = _analytics.PUBLIC_FUNCTIONS
+curve_analytics = _analytics.curve_analytics
+router = _analytics.router
 
 
 def __getattr__(name: str) -> Any:
-    """Resolve a public attribute from dqlib.iranalytics."""
-    return domain_getattr(_DOMAIN, name)
+    """Delegate public dqlib interest-rate analytics bindings."""
+    return getattr(_analytics, name)
 
 
 def __dir__() -> list[str]:
-    """Return local and dqlib domain attributes for interactive discovery."""
-    return sorted(set(globals()) | set(domain_dir(_DOMAIN)))
+    """Return the interest-rate analytics public names."""
+    return dir(_analytics)
+
+
+__all__ = _analytics.__all__

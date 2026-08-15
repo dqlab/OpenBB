@@ -10,10 +10,10 @@ import pytest
 from openbb_quantitative import (
     _dqlib,
     datetime as datetime_bridge,
-    mktrisk,
 )
 from openbb_quantitative.dqlib_models import TailRiskRequest
 from openbb_quantitative.dqlib_router import router as dqlib_router
+from openbb_quantitative.risk import analytics as mktrisk
 
 
 @dataclass
@@ -166,9 +166,19 @@ def test_json_serializer_handles_native_shapes():
 @pytest.mark.parametrize("domain", sorted(_dqlib.DQLIB_DOMAINS))
 def test_each_domain_exposes_a_call_router(domain):
     """Every released dqlib domain has an executable OpenBB call command."""
+    route_prefixes = {
+        "analytics": "common",
+        "cmanalytics": "commodity",
+        "cranalytics": "credit",
+        "eqanalytics": "equity",
+        "fianalytics": "fixed_income",
+        "fxanalytics": "foreign_exchange",
+        "iranalytics": "interest_rate",
+        "mktrisk": "risk",
+    }
     bridge = import_module(f"openbb_quantitative.{domain}")
     paths = {route.path for route in bridge.router.api_router.routes}
-    assert f"/{domain}/call" in paths
+    assert f"/{route_prefixes.get(domain, domain)}/call" in paths
 
 
 def test_datetime_command_executes_dqlib(monkeypatch):
@@ -258,8 +268,6 @@ def test_market_risk_value_at_risk_uses_native_request(monkeypatch):
     }
 
 
-
-
 def test_generic_market_risk_call_uses_compatibility_path(monkeypatch):
     """Generic calls and pipelines avoid the broken dqlib 3.0.2 wrapper."""
     native_vector = object()
@@ -288,6 +296,7 @@ def test_generic_market_risk_call_uses_compatibility_path(monkeypatch):
     assert captured["samples"] is native_vector
     assert captured["request_name"] == "CALCULATE_VALUE_AT_RISK"
 
+
 def test_root_router_builds_without_dqlib():
     """OpenBB exposes the full command tree without importing proprietary code."""
     routes = dqlib_router.api_router.routes
@@ -303,15 +312,15 @@ def test_root_router_builds_without_dqlib():
         "/dqlib/functions",
         "/dqlib/call",
         "/dqlib/pipeline",
-        "/dqlib/iranalytics/call",
-        "/dqlib/iranalytics/curve_analytics",
-        "/dqlib/fianalytics/fixed_coupon_bond_ytm",
-        "/dqlib/eqanalytics/european_option",
-        "/dqlib/fxanalytics/atm_strike",
-        "/dqlib/cranalytics/curve_analytics",
-        "/dqlib/cmanalytics/european_option",
+        "/dqlib/interest_rate/call",
+        "/dqlib/interest_rate/curve_analytics",
+        "/dqlib/fixed_income/fixed_coupon_bond_ytm",
+        "/dqlib/equity/european_option",
+        "/dqlib/foreign_exchange/atm_strike",
+        "/dqlib/credit/curve_analytics",
+        "/dqlib/commodity/european_option",
         "/dqlib/datetime/simple_year_fraction",
-        "/dqlib/mktrisk/value_at_risk",
-        "/dqlib/mktrisk/expected_shortfall",
+        "/dqlib/risk/value_at_risk",
+        "/dqlib/risk/expected_shortfall",
     } <= paths
     assert len(operation_ids) == len(set(operation_ids))
