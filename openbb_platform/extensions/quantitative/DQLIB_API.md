@@ -34,6 +34,7 @@ JSON routes; callers can compose those objects in-process. The `/call` and
 | OpenBB command | Public dqlib operations used | Typed result |
 | --- | --- | --- |
 | `interest_rate.curve_analytics` | `create_ir_yield_curve`, `get_zero_rate`, `get_discount_factor`, `get_fwd_rate` | zero, discount, and forward rates by date |
+| `interest_rate.single_currency_curve` | public IBOR/deposit/swap template constructors, `create_ir_par_rate_curve`, `create_ir_curve_build_settings`, `ir_single_ccy_curve_builder`, curve analytics functions | calibrated target pillars and curve measures by date |
 | `fixed_income.fixed_coupon_bond_ytm` | `create_fixed_cpn_bond_template`, `build_fixed_cpn_bond`, `create_flat_ir_yield_curve`, `yield_to_maturity_calculator` | yield to maturity |
 | `equity.european_option` | public flat curve/surface constructors, `create_european_option`, `create_eq_mkt_data_set`, `eq_european_option_pricer` | present value and currency |
 | `equity.build_volatility_surface` | `create_eq_option_quote_matrix`, curve constructors, `get_zero_rate`, `create_pricing_settings`, `eq_vol_surface_builder`, `get_volatility` | calibrated volatility grid by expiry and strike |
@@ -47,6 +48,17 @@ All request dates, curve points, market inputs, option terms, probabilities,
 and output shapes are validated by Pydantic models before or after the native
 call. Native protobuf objects remain in process and are translated to stable
 OpenBB response models.
+
+The single-currency interest-rate command registers typed deposit and vanilla
+fixed/floating swap templates, validates their IBOR index definitions and curve
+manager references, and supports one or more simultaneous target curves. Known
+zero curves can be supplied to a multi-curve bootstrap. Building method, finite
+difference, threading, and Jacobian settings map directly to the installed
+public dqlib wrapper; calibrated protobuf curves are translated to stable
+pillar, Jacobian, zero-rate, discount-factor, and forward-rate models.
+The integration translates Jacobian matrices when the native result contains
+them; dqlib 3.0.2 returned no matrices in the licensed regression even when
+`calculate_jacobian` was enabled.
 
 The equity volatility-surface command accepts direct option prices or bid/ask
 pairs, groups them into the nested expiry-smile vectors required by dqlib, and

@@ -352,6 +352,7 @@ def test_root_router_builds_without_dqlib():
         "/dqlib/pipeline",
         "/dqlib/interest_rate/call",
         "/dqlib/interest_rate/curve_analytics",
+        "/dqlib/interest_rate/single_currency_curve",
         "/dqlib/fixed_income/fixed_coupon_bond_ytm",
         "/dqlib/equity/european_option",
         "/dqlib/foreign_exchange/atm_strike",

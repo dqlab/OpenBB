@@ -19,6 +19,7 @@ from openbb_quantitative.dqlib_models import (
     FixedCouponBondYtmRequest,
     FxAtmStrikeRequest,
     IrCurveAnalyticsRequest,
+    IrSingleCurrencyCurveBuildRequest,
     TailRiskRequest,
 )
 from openbb_quantitative.equity import analytics as eqanalytics
@@ -116,6 +117,145 @@ def test_native_ir_curve_analytics():
     assert [point.discount_factor for point in result.points] == pytest.approx(
         [0.9955714787826248, 0.9683679005580244, 0.8999540555557722]
     )
+
+
+def test_native_ir_single_currency_curve_builder():
+    """Deposits and swaps bootstrap through the real single-currency builder."""
+    request = IrSingleCurrencyCurveBuildRequest(
+        as_of_date=date(2026, 1, 2),
+        currency="USD",
+        ibor_indices=[
+            {
+                "index_name": "OPENBB_USD_LIBOR_3M_NATIVE",
+                "tenor": "3M",
+                "calendars": ["USNY"],
+                "start_delay": 2,
+            }
+        ],
+        instrument_templates=[
+            {
+                "instrument_type": "DEPOSIT",
+                "instrument_name": "OPENBB_USD_DEP_NATIVE",
+                "calendar": "USNY",
+                "start_delay": 2,
+            },
+            {
+                "instrument_type": "IR_VANILLA_SWAP",
+                "instrument_name": "OPENBB_USD_SWAP_NATIVE",
+                "calendar": "USNY",
+                "start_delay": 2,
+                "reference_index": "OPENBB_USD_LIBOR_3M_NATIVE",
+                "fixing_calendars": ["USNY"],
+                "fixed_leg": {
+                    "frequency": "SEMIANNUAL",
+                    "day_count": "THIRTY_360",
+                },
+                "floating_leg": {
+                    "frequency": "QUARTERLY",
+                    "fixing_frequency": "QUARTERLY",
+                    "day_count": "ACT_360",
+                },
+            },
+        ],
+        targets=[
+            {
+                "curve_name": "OPENBB_USD_SINGLE_NATIVE",
+                "forward_curves": {
+                    "OPENBB_USD_LIBOR_3M_NATIVE": "OPENBB_USD_SINGLE_NATIVE"
+                },
+                "quotes": [
+                    {
+                        "instrument_type": "DEPOSIT",
+                        "instrument_name": "OPENBB_USD_DEP_NATIVE",
+                        "term": "1M",
+                        "quote": 0.040,
+                    },
+                    {
+                        "instrument_type": "DEPOSIT",
+                        "instrument_name": "OPENBB_USD_DEP_NATIVE",
+                        "term": "3M",
+                        "quote": 0.041,
+                    },
+                    {
+                        "instrument_type": "DEPOSIT",
+                        "instrument_name": "OPENBB_USD_DEP_NATIVE",
+                        "term": "6M",
+                        "quote": 0.042,
+                    },
+                    {
+                        "instrument_type": "IR_VANILLA_SWAP",
+                        "instrument_name": "OPENBB_USD_SWAP_NATIVE",
+                        "term": "1Y",
+                        "quote": 0.043,
+                    },
+                    {
+                        "instrument_type": "IR_VANILLA_SWAP",
+                        "instrument_name": "OPENBB_USD_SWAP_NATIVE",
+                        "term": "2Y",
+                        "quote": 0.044,
+                    },
+                    {
+                        "instrument_type": "IR_VANILLA_SWAP",
+                        "instrument_name": "OPENBB_USD_SWAP_NATIVE",
+                        "term": "3Y",
+                        "quote": 0.045,
+                    },
+                    {
+                        "instrument_type": "IR_VANILLA_SWAP",
+                        "instrument_name": "OPENBB_USD_SWAP_NATIVE",
+                        "term": "5Y",
+                        "quote": 0.047,
+                    },
+                ],
+            }
+        ],
+        query_dates=[
+            date(2026, 2, 2),
+            date(2026, 4, 2),
+            date(2026, 7, 2),
+            date(2027, 1, 2),
+            date(2028, 1, 2),
+            date(2031, 1, 2),
+        ],
+        calculate_jacobian=True,
+    )
+
+    result = iranalytics.single_currency_curve(request).results
+
+    assert len(result.curves) == 1
+    assert result.curves[0].curve_name == "OPENBB_USD_SINGLE_NATIVE"
+    assert [pillar.name for pillar in result.curves[0].pillars] == [
+        "1M",
+        "3M",
+        "6M",
+        "1Y",
+        "2Y",
+        "3Y",
+        "5Y",
+    ]
+    assert [point.zero_rate for point in result.curves[0].points] == pytest.approx(
+        [
+            0.040485869800075826,
+            0.04126413896176373,
+            0.042069753765041205,
+            0.042520685552040666,
+            0.043525876331184876,
+            0.04660907627306925,
+        ]
+    )
+    assert [
+        point.discount_factor for point in result.curves[0].points
+    ] == pytest.approx(
+        [
+            0.9965673790319954,
+            0.9898768681488099,
+            0.9793541183692214,
+            0.9583706408901396,
+            0.9166296563804843,
+            0.7920164814562519,
+        ]
+    )
+    assert result.curves[0].jacobians == []
 
 
 def test_native_fixed_coupon_bond_yield_to_maturity():

@@ -7,6 +7,7 @@ import openbb_quantitative.interest_rate.analytics as _analytics
 PUBLIC_FUNCTIONS = _analytics.PUBLIC_FUNCTIONS
 curve_analytics = _analytics.curve_analytics
 router = _analytics.router
+single_currency_curve = _analytics.single_currency_curve
 
 
 def __getattr__(name: str) -> Any:

@@ -16,6 +16,7 @@ from openbb_quantitative.dqlib_models import (
     FixedCouponBondYtmRequest,
     FxAtmStrikeRequest,
     IrCurveAnalyticsRequest,
+    IrSingleCurrencyCurveBuildRequest,
     TailRiskRequest,
 )
 from openbb_quantitative.dqlib_router import router as dqlib_router
@@ -97,6 +98,213 @@ def test_ir_curve_request_rejects_unordered_pillars():
             ],
             query_dates=[date(2027, 7, 2)],
         )
+
+
+def _single_currency_curve_request() -> IrSingleCurrencyCurveBuildRequest:
+    """Return a mixed deposit/swap request for typed conversion tests."""
+    return IrSingleCurrencyCurveBuildRequest(
+        as_of_date=date(2026, 1, 2),
+        currency="USD",
+        ibor_indices=[
+            {
+                "index_name": "USD_LIBOR_3M_TEST",
+                "tenor": "3M",
+                "calendars": ["USNY"],
+                "start_delay": 2,
+            }
+        ],
+        instrument_templates=[
+            {
+                "instrument_type": "DEPOSIT",
+                "instrument_name": "USD_DEP_TEST",
+                "calendar": "USNY",
+                "start_delay": 2,
+            },
+            {
+                "instrument_type": "IR_VANILLA_SWAP",
+                "instrument_name": "USD_SWAP_TEST",
+                "calendar": "USNY",
+                "start_delay": 2,
+                "reference_index": "USD_LIBOR_3M_TEST",
+                "fixing_calendars": ["USNY"],
+            },
+        ],
+        targets=[
+            {
+                "curve_name": "USD_SINGLE_TEST",
+                "forward_curves": {
+                    "USD_LIBOR_3M_TEST": "USD_SINGLE_TEST"
+                },
+                "quotes": [
+                    {
+                        "instrument_type": "DEPOSIT",
+                        "instrument_name": "USD_DEP_TEST",
+                        "term": "1M",
+                        "quote": 0.04,
+                    },
+                    {
+                        "instrument_type": "DEPOSIT",
+                        "instrument_name": "USD_DEP_TEST",
+                        "term": "3M",
+                        "quote": 0.041,
+                    },
+                    {
+                        "instrument_type": "IR_VANILLA_SWAP",
+                        "instrument_name": "USD_SWAP_TEST",
+                        "term": "1Y",
+                        "quote": 0.043,
+                    },
+                ],
+            }
+        ],
+        query_dates=[date(2026, 4, 2), date(2027, 1, 2)],
+        calculate_jacobian=True,
+    )
+
+
+def test_single_currency_curve_builds_and_translates_native_objects(monkeypatch):
+    """The typed command constructs static data and translates native curves."""
+    request = _single_currency_curve_request()
+    captured: list[tuple[str, str, list[Any], dict[str, Any]]] = []
+    fixed_leg = object()
+    floating_leg = object()
+    par_curve = object()
+    build_settings = object()
+    term_structure = SimpleNamespace(
+        name="USD_SINGLE_TEST",
+        pillar_date=[
+            SimpleNamespace(year=2026, month=2, day=6),
+            SimpleNamespace(year=2026, month=4, day=6),
+            SimpleNamespace(year=2027, month=1, day=6),
+        ],
+        pillar_name=["1M", "3M", "1Y"],
+        pillar_values=_vector([0.0405, 0.0413, 0.0425]),
+    )
+    native_curve = SimpleNamespace(
+        curve=SimpleNamespace(curve=term_structure),
+        jacobians=[
+            SimpleNamespace(
+                name="USD_SINGLE_TEST",
+                matrix=SimpleNamespace(
+                    rows=2,
+                    cols=2,
+                    data=[1.0, 0.0, 0.1, 1.0],
+                ),
+            )
+        ],
+    )
+
+    def fake_execute(domain, function, args=None, kwargs=None):
+        captured.append((domain, function, args or [], kwargs or {}))
+        return {
+            "create_ibor_index": True,
+            "create_depo_template": object(),
+            "create_fixed_leg_definition": fixed_leg,
+            "create_floating_leg_definition": floating_leg,
+            "create_ir_vanilla_swap_template": object(),
+            "create_ir_par_rate_curve": par_curve,
+            "create_ir_curve_build_settings": build_settings,
+            "ir_single_ccy_curve_builder": [native_curve],
+            "get_zero_rate": _vector([0.0412, 0.0425]),
+            "get_discount_factor": _vector([0.9899, 0.9584]),
+            "get_fwd_rate": _vector([0.0420, 0.0430]),
+        }[function]
+
+    monkeypatch.setattr(iranalytics, "execute_function", fake_execute)
+
+    result = iranalytics.single_currency_curve(request).results
+
+    assert result.curves[0].curve_name == "USD_SINGLE_TEST"
+    assert [pillar.zero_rate for pillar in result.curves[0].pillars] == [
+        0.0405,
+        0.0413,
+        0.0425,
+    ]
+    assert result.curves[0].points[1].model_dump() == {
+        "date": date(2027, 1, 2),
+        "zero_rate": 0.0425,
+        "discount_factor": 0.9584,
+        "forward_rate": 0.043,
+    }
+    assert result.curves[0].jacobians[0].values == [1.0, 0.0, 0.1, 1.0]
+
+    par_call = next(item for item in captured if item[1] == "create_ir_par_rate_curve")
+    assert par_call[2][3] == ["USD_DEP_TEST", "USD_DEP_TEST", "USD_SWAP_TEST"]
+    assert par_call[2][4] == ["DEPOSIT", "DEPOSIT", "IR_VANILLA_SWAP"]
+    assert par_call[2][5] == ["1M", "3M", "1Y"]
+    settings_call = next(
+        item for item in captured if item[1] == "create_ir_curve_build_settings"
+    )
+    assert settings_call[2][1] == {"USD": "USD_SINGLE_TEST"}
+    assert settings_call[2][2] == {"USD_LIBOR_3M_TEST": "USD_SINGLE_TEST"}
+    builder_call = next(
+        item for item in captured if item[1] == "ir_single_ccy_curve_builder"
+    )
+    assert builder_call[2][1] == ["USD_SINGLE_TEST"]
+    assert builder_call[2][2] == [build_settings]
+    assert builder_call[2][3] == [par_curve]
+    assert builder_call[3]["calc_jacobian"] is True
+
+
+def test_single_currency_curve_validates_static_definitions():
+    """Quotes and swap indices must have matching static definitions."""
+    data = _single_currency_curve_request().model_dump()
+    data["instrument_templates"] = data["instrument_templates"][:1]
+
+    with pytest.raises(ValidationError, match="Missing IR instrument templates"):
+        IrSingleCurrencyCurveBuildRequest.model_validate(data)
+
+    data = _single_currency_curve_request().model_dump()
+    data["ibor_indices"] = []
+
+    with pytest.raises(ValidationError, match="Missing IBOR index definitions"):
+        IrSingleCurrencyCurveBuildRequest.model_validate(data)
+
+
+def test_single_currency_curve_normalizes_static_identities():
+    """Static-data keys are normalized and blank curve references are rejected."""
+    data = _single_currency_curve_request().model_dump()
+    data["ibor_indices"][0]["index_name"] = " usd_libor_3m_test "
+    data["ibor_indices"][0]["calendars"] = [" usny "]
+    data["instrument_templates"][1]["reference_index"] = " usd_libor_3m_test "
+    data["targets"][0]["forward_curves"] = {
+        " usd_libor_3m_test ": " USD_SINGLE_TEST "
+    }
+
+    request = IrSingleCurrencyCurveBuildRequest.model_validate(data)
+
+    assert request.ibor_indices[0].index_name == "USD_LIBOR_3M_TEST"
+    assert request.ibor_indices[0].calendars == ["USNY"]
+    assert request.targets[0].forward_curves == {
+        "USD_LIBOR_3M_TEST": "USD_SINGLE_TEST"
+    }
+
+    data = _single_currency_curve_request().model_dump()
+    data["targets"][0]["discount_curves"] = {"USD": " "}
+    with pytest.raises(ValidationError, match="Curve references cannot be blank"):
+        IrSingleCurrencyCurveBuildRequest.model_validate(data)
+
+
+def test_single_currency_curve_rejects_invalid_native_result(monkeypatch):
+    """A malformed native builder response becomes a stable execution error."""
+    request = _single_currency_curve_request()
+    monkeypatch.setattr(iranalytics, "_register_instrument_templates", lambda _: None)
+    monkeypatch.setattr(
+        iranalytics,
+        "_build_target_inputs",
+        lambda _: ([object()], [object()]),
+    )
+    monkeypatch.setattr(
+        iranalytics,
+        "execute_function",
+        lambda *args, **kwargs: "private native detail",
+    )
+
+    with pytest.raises(
+        iranalytics.DQLibExecutionError,
+        match="failed to build the single-currency yield curves",
+    ):
+        iranalytics.single_currency_curve(request)
 
 
 def test_fixed_coupon_bond_ytm_runs_native_object_pipeline(monkeypatch):
@@ -456,6 +664,10 @@ def test_typed_routes_publish_request_and_response_models():
         "/dqlib/interest_rate/curve_analytics": (
             "IrCurveAnalyticsRequest",
             "OBBject_IrCurveAnalyticsResult_",
+        ),
+        "/dqlib/interest_rate/single_currency_curve": (
+            "IrSingleCurrencyCurveBuildRequest",
+            "OBBject_IrSingleCurrencyCurveBuildResult_",
         ),
         "/dqlib/fixed_income/fixed_coupon_bond_ytm": (
             "FixedCouponBondYtmRequest",

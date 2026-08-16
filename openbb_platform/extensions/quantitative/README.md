@@ -75,6 +75,70 @@ obb.quantitative.dqlib.interest_rate.curve_analytics(
     }
 )
 
+obb.quantitative.dqlib.interest_rate.single_currency_curve(
+    request={
+        "as_of_date": "2026-01-02",
+        "currency": "USD",
+        "ibor_indices": [
+            {
+                "index_name": "USD_LIBOR_3M",
+                "tenor": "3M",
+                "calendars": ["USNY"],
+                "start_delay": 2,
+            }
+        ],
+        "instrument_templates": [
+            {
+                "instrument_type": "DEPOSIT",
+                "instrument_name": "USD_DEP",
+                "calendar": "USNY",
+                "start_delay": 2,
+            },
+            {
+                "instrument_type": "IR_VANILLA_SWAP",
+                "instrument_name": "USD_SWAP",
+                "calendar": "USNY",
+                "start_delay": 2,
+                "reference_index": "USD_LIBOR_3M",
+                "fixing_calendars": ["USNY"],
+            },
+        ],
+        "targets": [
+            {
+                "curve_name": "USD_SINGLE",
+                "forward_curves": {"USD_LIBOR_3M": "USD_SINGLE"},
+                "quotes": [
+                    {
+                        "instrument_type": "DEPOSIT",
+                        "instrument_name": "USD_DEP",
+                        "term": "1M",
+                        "quote": 0.040,
+                    },
+                    {
+                        "instrument_type": "DEPOSIT",
+                        "instrument_name": "USD_DEP",
+                        "term": "3M",
+                        "quote": 0.041,
+                    },
+                    {
+                        "instrument_type": "IR_VANILLA_SWAP",
+                        "instrument_name": "USD_SWAP",
+                        "term": "1Y",
+                        "quote": 0.043,
+                    },
+                    {
+                        "instrument_type": "IR_VANILLA_SWAP",
+                        "instrument_name": "USD_SWAP",
+                        "term": "2Y",
+                        "quote": 0.044,
+                    },
+                ],
+            }
+        ],
+        "query_dates": ["2026-07-02", "2027-01-02", "2028-01-02"],
+    }
+)
+
 obb.quantitative.dqlib.equity.build_volatility_surface(
     request={
         "as_of_date": "2026-01-02",
@@ -112,10 +176,11 @@ obb.quantitative.dqlib.equity.build_volatility_surface(
 For an end-to-end market-data workflow, see the
 [SPX option-chain volatility-surface example](../../../examples/dqlib_spx_volatility_surface.py).
 
-The typed native surface currently covers interest-rate curves, fixed-coupon
-bond yield, equity volatility-surface calibration, equity and commodity
-European option pricing, FX ATM strike, credit curves, VaR, and expected
-shortfall. The Python packages also explicitly bind all 188 functions defined
+The typed native surface currently covers direct interest-rate curve analytics,
+single-currency curve bootstrapping, fixed-coupon bond yield, equity
+volatility-surface calibration, equity and commodity European option pricing,
+FX ATM strike, credit curves, VaR, and expected shortfall. The Python packages
+also explicitly bind all 188 functions defined
 by the installed analytics modules. See
 [the dqlib public API map](DQLIB_API.md) for package ownership, response models,
 tested compatibility paths, and operations that cannot honestly be exposed as
