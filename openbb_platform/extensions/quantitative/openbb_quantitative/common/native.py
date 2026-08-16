@@ -50,7 +50,11 @@ def pricing_values(response: Any, operation: str) -> tuple[float, float | None, 
     return float(results.present_value), cash_value, str(results.currency)
 
 
-def build_option_settings(domain: str, currency: str) -> tuple[Any, Any, Any]:
+def build_option_settings(
+    domain: str,
+    currency: str,
+    pricing_method: str = "ANALYTICAL",
+) -> tuple[Any, Any, Any]:
     """Build native model-free pricing, risk, and no-scenario settings."""
     risk_functions = {
         "cmanalytics": "create_cm_risk_settings",
@@ -65,7 +69,7 @@ def build_option_settings(domain: str, currency: str) -> tuple[Any, Any, Any]:
         {
             "pricing_currency": currency,
             "inc_current": False,
-            "pricing_method": "ANALYTICAL",
+            "pricing_method": pricing_method,
         },
     )
     risk = execute_function(

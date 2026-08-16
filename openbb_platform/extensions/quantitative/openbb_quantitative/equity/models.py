@@ -16,6 +16,26 @@ class EquityEuropeanOptionRequest(EuropeanOptionRequest):
     """Inputs for a native dqlib equity European option valuation."""
 
 
+EquityAmericanOptionPricingMethod = Literal[
+    "ANALYTICAL",
+    "PDE",
+    "BINOMIAL_TREE",
+]
+
+
+class EquityAmericanOptionRequest(EuropeanOptionRequest):
+    """Inputs for a native dqlib equity American option valuation."""
+
+    settlement_days: int = Field(default=0, ge=0)
+    pricing_method: EquityAmericanOptionPricingMethod = "ANALYTICAL"
+
+
+class EquityAmericanOptionResult(EuropeanOptionResult):
+    """Translated native equity American option pricing result."""
+
+    pricing_method: EquityAmericanOptionPricingMethod
+
+
 class EqOptionChainQuote(BaseModel):
     """One equity option quote supplied to the native surface builder."""
 
@@ -225,6 +245,9 @@ __all__ = [
     "EqRateCurvePillar",
     "EqVolatilitySurfaceBuildSettings",
     "EqVolatilitySurfacePoint",
+    "EquityAmericanOptionPricingMethod",
+    "EquityAmericanOptionRequest",
+    "EquityAmericanOptionResult",
     "EquityEuropeanOptionRequest",
     "EuropeanOptionResult",
 ]

@@ -22,6 +22,8 @@ from openbb_quantitative.equity.models import (
     BuildEqVolatilitySurfaceRequest,
     BuildEqVolatilitySurfaceResult,
     EqRateCurveInput,
+    EquityAmericanOptionRequest,
+    EquityAmericanOptionResult,
     EquityEuropeanOptionRequest,
     EqVolatilitySurfacePoint,
     EuropeanOptionResult,
@@ -56,6 +58,49 @@ _FUNCTION_NAMES = (
 )
 
 PUBLIC_FUNCTIONS = install_public_functions(globals(), _DOMAIN, _FUNCTION_NAMES)
+
+
+def _build_flat_equity_market(
+    request: EquityEuropeanOptionRequest | EquityAmericanOptionRequest,
+) -> tuple[Any, Any]:
+    """Build the native flat market shared by typed equity option pricers."""
+    valuation_date = to_datetime(request.valuation_date)
+    discount_curve = execute_function(
+        "analytics",
+        "create_flat_ir_yield_curve",
+        [valuation_date, request.currency, request.discount_rate],
+    )
+    dividend_curve = execute_function(
+        "analytics",
+        "create_flat_dividend_curve",
+        [valuation_date, request.carry_rate, f"{request.underlying}_DIVIDEND"],
+    )
+    volatility_surface = execute_function(
+        "analytics",
+        "create_flat_volatility_surface",
+        [valuation_date, request.volatility, request.underlying],
+    )
+    quanto_volatility = execute_function(
+        "analytics",
+        "create_flat_vol_curve",
+        [valuation_date, 0.0, f"{request.currency}{request.currency}"],
+    )
+    market_data = execute_function(
+        _DOMAIN,
+        "create_eq_mkt_data_set",
+        [
+            valuation_date,
+            discount_curve,
+            request.spot,
+            volatility_surface,
+            dividend_curve,
+            discount_curve,
+            quanto_volatility,
+            0.0,
+            request.underlying,
+        ],
+    )
+    return valuation_date, market_data
 
 
 def _build_rate_curve(
@@ -315,23 +360,8 @@ def european_option(
     request: EquityEuropeanOptionRequest,
 ) -> OBBject[EuropeanOptionResult]:
     """Price an equity European option with native flat dqlib market data."""
-    valuation_date = to_datetime(request.valuation_date)
+    valuation_date, market_data = _build_flat_equity_market(request)
     expiry_date = to_datetime(request.expiry_date)
-    discount_curve = execute_function(
-        "analytics",
-        "create_flat_ir_yield_curve",
-        [valuation_date, request.currency, request.discount_rate],
-    )
-    dividend_curve = execute_function(
-        "analytics",
-        "create_flat_dividend_curve",
-        [valuation_date, request.carry_rate, f"{request.underlying}_DIVIDEND"],
-    )
-    volatility_surface = execute_function(
-        "analytics",
-        "create_flat_volatility_surface",
-        [valuation_date, request.volatility, request.underlying],
-    )
     instrument = execute_function(
         "market",
         "create_european_option",
@@ -344,26 +374,6 @@ def european_option(
             request.currency,
             "EQ_SPOT",
             request.currency,
-            request.underlying,
-        ],
-    )
-    quanto_volatility = execute_function(
-        "analytics",
-        "create_flat_vol_curve",
-        [valuation_date, 0.0, f"{request.currency}{request.currency}"],
-    )
-    market_data = execute_function(
-        _DOMAIN,
-        "create_eq_mkt_data_set",
-        [
-            valuation_date,
-            discount_curve,
-            request.spot,
-            volatility_surface,
-            dividend_curve,
-            discount_curve,
-            quanto_volatility,
-            0.0,
             request.underlying,
         ],
     )
@@ -383,6 +393,54 @@ def european_option(
     )
 
 
+@router.command(
+    methods=["POST"],
+    operation_id="dqlib_equity_american_option",
+)
+def american_option(
+    request: EquityAmericanOptionRequest,
+) -> OBBject[EquityAmericanOptionResult]:
+    """Price an equity American option with native flat dqlib market data."""
+    valuation_date, market_data = _build_flat_equity_market(request)
+    instrument = execute_function(
+        "market",
+        "create_american_option",
+        [
+            request.payoff_type,
+            to_datetime(request.expiry_date),
+            request.strike,
+            request.settlement_days,
+            request.nominal,
+            request.currency,
+            "EQ_SPOT",
+            request.currency,
+            request.underlying,
+        ],
+    )
+    pricing, risk, scenario = build_option_settings(
+        _DOMAIN,
+        request.currency,
+        request.pricing_method,
+    )
+    response = execute_function(
+        _DOMAIN,
+        "eq_american_option_pricer",
+        [instrument, valuation_date, market_data, pricing, risk, scenario],
+    )
+    present_value, cash_value, currency = pricing_values(
+        response,
+        "equity American option pricing",
+    )
+    return OBBject(
+        results=EquityAmericanOptionResult(
+            present_value=present_value,
+            cash_value=cash_value,
+            currency=currency,
+            pricing_method=request.pricing_method,
+        )
+    )
+
+
 def __getattr__(name: str) -> Any:
     """Resolve re-exported public attributes from dqlib.eqanalytics."""
     return domain_getattr(_DOMAIN, name)
@@ -396,6 +454,7 @@ def __dir__() -> list[str]:
 __all__ = [  # noqa: PLE0604
     *PUBLIC_FUNCTIONS,
     "PUBLIC_FUNCTIONS",
+    "american_option",
     "build_volatility_surface",
     "european_option",
     "router",

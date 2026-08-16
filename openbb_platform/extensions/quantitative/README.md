@@ -139,6 +139,23 @@ obb.quantitative.dqlib.interest_rate.single_currency_curve(
     }
 )
 
+obb.quantitative.dqlib.equity.american_option(
+    request={
+        "valuation_date": "2026-01-02",
+        "expiry_date": "2027-01-02",
+        "payoff_type": "PUT",
+        "strike": 100.0,
+        "spot": 100.0,
+        "volatility": 0.20,
+        "discount_rate": 0.02,
+        "carry_rate": 0.01,
+        "settlement_days": 0,
+        "pricing_method": "PDE",
+        "currency": "USD",
+        "underlying": "SPX",
+    }
+)
+
 obb.quantitative.dqlib.equity.build_volatility_surface(
     request={
         "as_of_date": "2026-01-02",
@@ -178,10 +195,10 @@ For an end-to-end market-data workflow, see the
 
 The typed native surface currently covers direct interest-rate curve analytics,
 single-currency curve bootstrapping, fixed-coupon bond yield, equity
-volatility-surface calibration, equity and commodity European option pricing,
-FX ATM strike, credit curves, VaR, and expected shortfall. The Python packages
-also explicitly bind all 188 functions defined
-by the installed analytics modules. See
+volatility-surface calibration, equity American and European option pricing,
+commodity European option pricing, FX ATM strike, credit curves, VaR, and
+expected shortfall. The Python packages also explicitly bind all 188 functions
+defined by the installed analytics modules. See
 [the dqlib public API map](DQLIB_API.md) for package ownership, response models,
 tested compatibility paths, and operations that cannot honestly be exposed as
 typed JSON commands in dqlib 3.0.2.

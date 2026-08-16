@@ -15,6 +15,7 @@ from openbb_quantitative.dqlib_models import (
     BuildEqVolatilitySurfaceRequest,
     CommodityEuropeanOptionRequest,
     CreditCurveAnalyticsRequest,
+    EquityAmericanOptionRequest,
     EquityEuropeanOptionRequest,
     FixedCouponBondYtmRequest,
     FxAtmStrikeRequest,
@@ -292,6 +293,40 @@ def test_native_equity_european_option():
 
     assert result.present_value == pytest.approx(8.349405767096755)
     assert result.currency == "USD"
+
+
+@pytest.mark.parametrize(
+    ("pricing_method", "expected_present_value"),
+    [
+        ("ANALYTICAL", 7.455709249168012),
+        ("PDE", 7.455113012496653),
+        ("BINOMIAL_TREE", 7.455709249168012),
+    ],
+)
+def test_native_equity_american_option(
+    pricing_method,
+    expected_present_value,
+):
+    """A typed American put prices under every verified native method."""
+    request = EquityAmericanOptionRequest(
+        valuation_date=date(2026, 1, 2),
+        expiry_date=date(2027, 1, 2),
+        payoff_type="PUT",
+        strike=100.0,
+        spot=100.0,
+        volatility=0.20,
+        discount_rate=0.02,
+        carry_rate=0.01,
+        settlement_days=0,
+        pricing_method=pricing_method,
+        underlying="SPX_OPENBB_AMERICAN",
+    )
+
+    result = eqanalytics.american_option(request).results
+
+    assert result.present_value == pytest.approx(expected_present_value)
+    assert result.currency == "USD"
+    assert result.pricing_method == pricing_method
 
 
 def test_native_build_equity_volatility_surface():

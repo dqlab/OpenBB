@@ -12,6 +12,7 @@ from openbb_quantitative.dqlib_models import (
     BuildEqVolatilitySurfaceRequest,
     CommodityEuropeanOptionRequest,
     CreditCurveAnalyticsRequest,
+    EquityAmericanOptionRequest,
     EquityEuropeanOptionRequest,
     FixedCouponBondYtmRequest,
     FxAtmStrikeRequest,
@@ -400,6 +401,94 @@ def test_european_option_commands_translate_pricing_response(
     assert pricing_function in captured
 
 
+def test_equity_american_option_runs_typed_native_pipeline(monkeypatch):
+    """The American command maps settlement and pricing settings to dqlib."""
+    captured: list[tuple[str, str, list[Any], dict[str, Any]]] = []
+    instrument = object()
+    market_data = object()
+    settings_calls: list[tuple[str, str, str]] = []
+
+    def fake_execute(domain, function, args=None, kwargs=None):
+        call_args = args or []
+        captured.append((domain, function, call_args, kwargs or {}))
+        if function == "create_american_option":
+            return instrument
+        if function == "create_eq_mkt_data_set":
+            return market_data
+        if function == "eq_american_option_pricer":
+            assert call_args == [
+                instrument,
+                datetime(2026, 1, 2),
+                market_data,
+                1,
+                2,
+                3,
+            ]
+            return _pricing_response(7.45)
+        return object()
+
+    def fake_settings(domain, currency, pricing_method="ANALYTICAL"):
+        settings_calls.append((domain, currency, pricing_method))
+        return 1, 2, 3
+
+    monkeypatch.setattr(eqanalytics, "execute_function", fake_execute)
+    monkeypatch.setattr(eqanalytics, "build_option_settings", fake_settings)
+    request = EquityAmericanOptionRequest(
+        valuation_date=date(2026, 1, 2),
+        expiry_date=date(2027, 1, 2),
+        payoff_type="PUT",
+        strike=100.0,
+        spot=100.0,
+        volatility=0.20,
+        discount_rate=0.02,
+        carry_rate=0.01,
+        settlement_days=2,
+        pricing_method="PDE",
+        underlying="SPX",
+    )
+
+    result = eqanalytics.american_option(request).results
+
+    assert result.model_dump() == {
+        "present_value": 7.45,
+        "cash_value": None,
+        "currency": "USD",
+        "pricing_method": "PDE",
+    }
+    instrument_call = next(
+        item for item in captured if item[1] == "create_american_option"
+    )
+    assert instrument_call[0] == "market"
+    assert instrument_call[2] == [
+        "PUT",
+        datetime(2027, 1, 2),
+        100.0,
+        2,
+        1.0,
+        "USD",
+        "EQ_SPOT",
+        "USD",
+        "SPX",
+    ]
+    assert settings_calls == [("eqanalytics", "USD", "PDE")]
+
+
+def test_equity_american_option_validates_inputs():
+    """American option inputs reject invalid settlement and method values."""
+    inputs = {
+        "valuation_date": date(2026, 1, 2),
+        "expiry_date": date(2027, 1, 2),
+        "strike": 100.0,
+        "spot": 100.0,
+        "volatility": 0.20,
+        "underlying": "SPX",
+    }
+    with pytest.raises(ValidationError):
+        EquityAmericanOptionRequest(**inputs, settlement_days=-1)
+    with pytest.raises(ValidationError):
+        EquityAmericanOptionRequest(**inputs, pricing_method="MONTE_CARLO")
+
+
 def test_build_equity_volatility_surface_runs_typed_native_pipeline(monkeypatch):
     """The equity surface command groups quotes, applies repo carry, and translates."""
     captured: list[tuple[str, str, list[Any], dict[str, Any]]] = []
@@ -676,6 +765,10 @@ def test_typed_routes_publish_request_and_response_models():
         "/dqlib/equity/european_option": (
             "EquityEuropeanOptionRequest",
             "OBBject_EuropeanOptionResult_",
+        ),
+        "/dqlib/equity/american_option": (
+            "EquityAmericanOptionRequest",
+            "OBBject_EquityAmericanOptionResult_",
         ),
         "/dqlib/equity/build_volatility_surface": (
             "BuildEqVolatilitySurfaceRequest",

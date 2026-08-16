@@ -36,6 +36,7 @@ JSON routes; callers can compose those objects in-process. The `/call` and
 | `interest_rate.curve_analytics` | `create_ir_yield_curve`, `get_zero_rate`, `get_discount_factor`, `get_fwd_rate` | zero, discount, and forward rates by date |
 | `interest_rate.single_currency_curve` | public IBOR/deposit/swap template constructors, `create_ir_par_rate_curve`, `create_ir_curve_build_settings`, `ir_single_ccy_curve_builder`, curve analytics functions | calibrated target pillars and curve measures by date |
 | `fixed_income.fixed_coupon_bond_ytm` | `create_fixed_cpn_bond_template`, `build_fixed_cpn_bond`, `create_flat_ir_yield_curve`, `yield_to_maturity_calculator` | yield to maturity |
+| `equity.american_option` | public flat curve/surface constructors, `create_american_option`, `create_eq_mkt_data_set`, `eq_american_option_pricer` | present value, cash value, currency, and pricing method |
 | `equity.european_option` | public flat curve/surface constructors, `create_european_option`, `create_eq_mkt_data_set`, `eq_european_option_pricer` | present value and currency |
 | `equity.build_volatility_surface` | `create_eq_option_quote_matrix`, curve constructors, `get_zero_rate`, `create_pricing_settings`, `eq_vol_surface_builder`, `get_volatility` | calibrated volatility grid by expiry and strike |
 | `foreign_exchange.atm_strike` | public flat curve/surface constructors, `create_foreign_exchange_rate`, `create_fx_spot_rate`, `create_fx_mkt_conventions`, `fx_atm_strike_calculator` | ATM strike |
@@ -69,6 +70,11 @@ effective dividend curve as `discount rate - repo rate + dividend yield`. If no
 repo curve is supplied, it is treated as equal to the discount curve. The
 native surface is evaluated on the requested strike grid and translated to
 stable expiry/strike/volatility points.
+
+The equity American-option command maps settlement days to the public native
+instrument constructor and exposes only the `ANALYTICAL`, `PDE`, and
+`BINOMIAL_TREE` pricing methods verified against dqlib 3.0.2. Pricing failures
+use the same validated native response contract as the typed European pricer.
 
 ## dqlib 3.0.2 compatibility boundaries
 
