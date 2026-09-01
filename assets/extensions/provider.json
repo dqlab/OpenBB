@@ -250,6 +250,17 @@
         "website": "https://www.stockgrid.io"
     },
     {
+        "packageName": "openbb-stooq",
+        "optional": true,
+        "reprName": "Stooq",
+        "description": "Stooq provides historical market data for global equities, ETFs, indices, and currency pairs through its CSV download service.",
+        "credentials": [
+            "stooq_api_key"
+        ],
+        "website": "https://stooq.com",
+        "instructions": "Open https://stooq.com/q/d/?s=aapl.us&get_apikey, complete the verification, and copy the apikey value from the CSV download link."
+    },
+    {
         "packageName": "openbb-tiingo",
         "optional": false,
         "reprName": "Tiingo",
