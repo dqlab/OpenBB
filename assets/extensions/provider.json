@@ -88,6 +88,17 @@
         "instructions": "This provider does not require any credentials and is not meant for trading."
     },
     {
+        "packageName": "openbb-duckdb",
+        "optional": true,
+        "reprName": "DuckDB",
+        "description": "DuckDB provides read-only access to historical market data stored in a user-owned local DuckDB database.",
+        "credentials": [
+            "duckdb_database_path"
+        ],
+        "website": "https://duckdb.org",
+        "instructions": "Set duckdb_database_path in OpenBB user settings, or pass database_path with each query. The database is opened in read-only mode."
+    },
+    {
         "packageName": "openbb-ecb",
         "optional": true,
         "reprName": "European Central Bank (ECB)",
