@@ -1,0 +1,70 @@
+# Configuration v2: provider/model dispatch with explicit parameter mappings.
+version: 2
+storage:
+  root: data/derivative_history
+  format: parquet
+sources:
+  ibkr:
+    parameters:
+      host: 127.0.0.1
+      port: 4002
+      client_id: 13811
+    min_interval_seconds: 11
+    provider: ibkr
+    model: MarketHistorical
+    parameter_map:
+      symbol: symbol
+      start_date: start_date
+      end_date: end_date
+      interval: frequency
+      asset_type: asset_type
+      currency: currency
+      exchange: exchange
+      primary_exchange: primary_exchange
+      con_id: con_id
+      end_datetime: end_datetime
+      what_to_show: what_to_show
+      use_rth: use_rth
+      timeout: timeout
+instruments:
+  future:
+    symbol: ES
+    asset_type: future
+    currency: USD
+    exchange: CME
+    timezone: America/Chicago
+    con_id: null
+  option:
+    symbol: SPY
+    asset_type: option
+    currency: USD
+    exchange: SMART
+    timezone: America/New_York
+    con_id: null
+collections:
+  derivatives:
+    instrument_ids:
+    - future
+    - option
+    primary: ibkr
+    frequency: 5m
+    start_date: 2026-09-01
+    end_date: 2026-09-05
+    chunk_days: 1
+    fields:
+    - open
+    - high
+    - low
+    - close
+    - volume
+    - wap
+    - bar_count
+    required_fields:
+    - open
+    - high
+    - low
+    - close
+schedule:
+  timezone: America/New_York
+  at: 06:00:00
+  reset: monthly

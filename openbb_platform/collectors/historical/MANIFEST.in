@@ -1,0 +1,7 @@
+include README.md CHANGELOG.md
+recursive-include examples *.yaml
+recursive-include configs *.yaml
+recursive-include deployment *.example
+recursive-include src *.py *.yaml
+recursive-include tests *.py
+global-exclude __pycache__ *.py[cod]

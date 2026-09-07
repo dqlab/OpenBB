@@ -2,6 +2,10 @@
 
 from openbb_core.provider.abstract.provider import Provider
 
+from openbb_ibkr.models.bounded_market_data import (
+    IbkrMarketHistoricalFetcher,
+    IbkrMarketQuoteFetcher,
+)
 from openbb_ibkr.models.market_data import (
     IbkrEquityHistoricalFetcher,
     IbkrEquityQuoteFetcher,
@@ -16,6 +20,8 @@ ibkr_provider = Provider(
     "Requires a running TWS or IB Gateway instance with API connections enabled.",
     credentials=["host", "port", "client_id"],
     fetcher_dict={
+        "MarketQuote": IbkrMarketQuoteFetcher,
+        "MarketHistorical": IbkrMarketHistoricalFetcher,
         "EquityQuote": IbkrEquityQuoteFetcher,
         "EquityHistorical": IbkrEquityHistoricalFetcher,
     },

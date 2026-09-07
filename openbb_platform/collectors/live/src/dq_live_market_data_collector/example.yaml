@@ -1,0 +1,137 @@
+# Configuration v2: provider/model dispatch with explicit parameter mappings.
+version: 2
+storage:
+  root: data/live_market_data
+  format: parquet
+  export_batch_size: 200
+reset:
+  period: weekly
+  timezone: UTC
+heartbeat_seconds: 1
+sources:
+  ibkr:
+    snapshot_wait_seconds: 4
+    parameters:
+      host: 127.0.0.1
+      port: 4002
+      client_id: 71
+    timeout_seconds: 20
+    min_interval_seconds: 1
+    retries: 1
+    timestamp_field: timestamp
+    timestamp_semantics: provider_receive
+    adjustment: unadjusted
+    size_unit: provider_defined
+    entitlement_reference: null
+    provider: ibkr
+    model: MarketQuote
+    parameter_map:
+      symbol: symbol
+      asset_type: asset_type
+      currency: currency
+      exchange: exchange
+      primary_exchange: primary_exchange
+      con_id: con_id
+      feed_type: requested_feed_type
+      snapshot_wait_seconds: snapshot_wait_seconds
+    requested_feed_type: delayed
+    feed_type_field: market_data_type
+    feed_type_map:
+      "1": live
+      "2": frozen
+      "3": delayed
+      "4": delayed_frozen
+    field_map:
+      last_price: last
+  yahoo:
+    provider: yfinance
+    min_interval_seconds: 2
+    timeout_seconds: 20
+    retries: 0
+    timestamp_semantics: unknown
+    adjustment: provider_defined
+    size_unit: provider_defined
+    model: EquityQuote
+    parameter_map:
+      symbol: symbol
+instruments:
+  aapl:
+    symbol: AAPL
+    asset_type: stock
+    currency: USD
+    exchange: SMART
+    primary_exchange: NASDAQ
+  spy:
+    symbol: SPY
+    asset_type: etf
+    currency: USD
+    exchange: SMART
+  spx:
+    symbol: SPX
+    asset_type: index
+    currency: USD
+    exchange: CBOE
+collections:
+  equities:
+    instrument_ids:
+    - aapl
+    - spy
+    primary: ibkr
+    secondary:
+    - yahoo
+    frequency_seconds: 60
+    fields:
+    - last_price
+    - bid
+    - ask
+    - volume
+    required_fields:
+    - last_price
+    accepted_feed_types:
+    - live
+    - delayed
+    - delayed_frozen
+    - unknown
+    max_age_seconds: null
+    schedule: &id001
+      timezone: America/New_York
+      weekdays:
+      - 0
+      - 1
+      - 2
+      - 3
+      - 4
+      start: 09:30
+      end: '16:00'
+      holidays: []
+      overrides: {}
+  indexes:
+    instrument_ids:
+    - spx
+    primary: ibkr
+    secondary: []
+    frequency_seconds: 60
+    fields:
+    - last_price
+    required_fields:
+    - last_price
+    accepted_feed_types:
+    - live
+    - delayed
+    - delayed_frozen
+    - unknown
+    max_age_seconds: 60
+    schedule: *id001
+
+# Optional central delivery: fill actual deployment values before uncommenting.
+# See collectors/SESSION_DELIVERY.md. Local storage remains the collection spool.
+# delivery:
+#   collector_id: CHANGE-ME-UNIQUE-COLLECTOR-ID
+#   transport: sftp
+#   destination_root: /var/lib/dq-quant-invest-data
+#   ssh:
+#     host: master.example.internal
+#     user: collector-ingest
+#     known_hosts: /etc/dq-collector/known_hosts
+#     private_key: /etc/dq-collector/master_ed25519
+#   local_retention: 1w  # after_verification, 1d, 1w, 1mo, or forever

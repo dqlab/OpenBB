@@ -1,0 +1,22 @@
+[Unit]
+Description=DQ historical market data collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace account and installation paths for your deployment.
+User=dqdata
+WorkingDirectory=/opt/dq-historical-market-data-collector
+EnvironmentFile=-/etc/dq-historical-market-data-collector.env
+ExecStart=/opt/dq-historical-market-data-collector/.venv/bin/dq-historical-market-data-collector run --config /etc/dq-historical-market-data-collector.yaml
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=420
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

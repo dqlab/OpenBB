@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from packaging.requirements import Requirement
 from tomlkit import dumps, load, loads
 
 PLATFORM_PATH = Path(__file__).parent.resolve()
@@ -40,6 +41,11 @@ openbb-tiingo = { path = "./providers/tiingo", develop = true }
 openbb-tradingeconomics = { path = "./providers/tradingeconomics", develop = true }
 openbb-us-eia = { path = "./providers/eia", develop = true }
 openbb-yfinance = { path = "./providers/yfinance", develop = true }
+
+openbb-collector-core = { path = "./collectors/core", develop = true, markers = "python_version >= '3.11'" }
+dq-historical-market-data-collector = {path="./collectors/historical", develop=true, markers="python_version >= '3.11'"}
+dq-live-market-data-collector = { path = "./collectors/live", develop = true, markers = "python_version >= '3.11'" }
+openbb-collection = { path = "./extensions/collection", develop = true, markers = "python_version >= '3.11'" }
 
 openbb-commodity = { path = "./extensions/commodity", develop = true }
 openbb-crypto = { path = "./extensions/crypto", develop = true }
@@ -84,6 +90,21 @@ def extract_dependencies(local_dep_path, dev: bool = False):
     if package_pyproject_path.exists():
         with open(package_pyproject_path / "pyproject.toml") as f:
             package_pyproject_toml = load(f)
+        project = package_pyproject_toml.get("project")
+        if project is not None:
+            requirements = (
+                project.get("optional-dependencies", {}).get("dev", []) if dev else project.get("dependencies", [])
+            )
+            dependencies = {}
+            for value in requirements:
+                requirement = Requirement(value)
+                details = {"url": requirement.url} if requirement.url else {"version": str(requirement.specifier) or "*"}
+                if requirement.extras:
+                    details["extras"] = sorted(requirement.extras)
+                if requirement.marker:
+                    details["markers"] = str(requirement.marker)
+                dependencies[requirement.name] = details
+            return dependencies
         if dev:
             return (
                 package_pyproject_toml.get("tool", {})
@@ -92,11 +113,7 @@ def extract_dependencies(local_dep_path, dev: bool = False):
                 .get("dev", {})
                 .get("dependencies", {})
             )
-        return (
-            package_pyproject_toml.get("tool", {})
-            .get("poetry", {})
-            .get("dependencies", {})
-        )
+        return package_pyproject_toml.get("tool", {}).get("poetry", {}).get("dependencies", {})
     return {}
 
 
@@ -119,18 +136,14 @@ def install_platform_local(_extras: bool = False):
     local_deps = loads(LOCAL_DEPS).get("tool", {}).get("poetry", {})["dependencies"]
     with open(PYPROJECT) as f:
         pyproject_toml = load(f)
-    pyproject_toml.get("tool", {}).get("poetry", {}).get("dependencies", {}).update(
-        local_deps
-    )
+    pyproject_toml.get("tool", {}).get("poetry", {}).get("dependencies", {}).update(local_deps)
 
     if _extras:
         dev_dependencies = get_all_dev_dependencies()
-        pyproject_toml.get("tool", {}).get("poetry", {}).setdefault(
-            "group", {}
-        ).setdefault("dev", {}).setdefault("dependencies", {})
-        pyproject_toml.get("tool", {}).get("poetry", {})["group"]["dev"][
-            "dependencies"
-        ].update(dev_dependencies)
+        pyproject_toml.get("tool", {}).get("poetry", {}).setdefault("group", {}).setdefault("dev", {}).setdefault(
+            "dependencies", {}
+        )
+        pyproject_toml.get("tool", {}).get("poetry", {})["group"]["dev"]["dependencies"].update(dev_dependencies)
 
     TEMP_PYPROJECT = dumps(pyproject_toml)
 
@@ -174,9 +187,7 @@ def install_platform_cli():
         pyproject_toml = load(f)
 
     # remove "openbb" from dependencies
-    pyproject_toml.get("tool", {}).get("poetry", {}).get("dependencies", {}).pop(
-        "openbb", None
-    )
+    pyproject_toml.get("tool", {}).get("poetry", {}).get("dependencies", {}).pop("openbb", None)
 
     TEMP_PYPROJECT = dumps(pyproject_toml)
 

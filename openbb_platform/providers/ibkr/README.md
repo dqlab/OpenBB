@@ -457,3 +457,42 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+
+## Bounded collection models
+
+The provider registry also exposes `MarketHistorical` and `MarketQuote`. These
+models support explicit asset type/currency/exchange/qualified-contract inputs
+for the sibling [OpenBB collectors](../../collectors/README.md). They are separate
+from the existing equity convenience endpoints.
+
+`MarketHistorical` requires start/end dates and an aware `end_datetime`, requests
+that explicit gateway end, uses `formatDate=2`, and includes one overlap day for
+subsequent date/calendar filtering. One-minute requests are limited to one day;
+other supported intervals to seven days. Options require intraday bars;
+`ADJUSTED_LAST` is rejected because this adapter requires a bounded end.
+
+`MarketQuote` waits `snapshot_wait_seconds` (0.7–30 seconds, default 4) before
+normalizing the snapshot and cancelling its subscription. Both fetchers configure
+a read-only connection, explicitly select live or delayed mode, require `con_id`
+for derivative contracts, validate the qualified returned identity, and return
+safe gateway diagnostics using `AnnotatedResult`. Error message text is excluded.
+Providers do not import collector packages.
+
+Run offline contract tests with:
+
+```bash
+python -m pytest openbb_platform/providers/ibkr/tests/test_bounded_market_data.py
+```
+
+These tests do not connect to TWS/Gateway or verify subscriptions and market coverage.
+
+
+The bounded quote model records observed `market_data_type` / `feed_type` from
+Gateway callbacks independently of the requested `delayed` flag. Missing callback
+evidence remains unknown. IBKR's unavailable bid/ask sentinel is exposed as null
+while `raw_quote` preserves the original decoded values and sizes; valid negative
+futures prices with positive quoted size remain prices. Quote metadata reports
+schema version 2, the feed-type evidence basis and unavailable fields. Volumes
+are preserved without inferred rescaling and retain provider-defined units.
+The live collector examples now explicitly request and accept delayed data.

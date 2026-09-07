@@ -1,0 +1,25 @@
+[Unit]
+Description=DQ live market quote collector through OpenBB
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=dqdata
+Group=dqdata
+WorkingDirectory=/opt/dq-live-market-data-collector
+EnvironmentFile=-/etc/dq-live-market-data-collector/collector.env
+ExecStart=/opt/dq-live-market-data-collector/.venv/bin/dq-live-market-data-collector run --config /etc/dq-live-market-data-collector/collector.yaml
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=420
+StateDirectory=dq-live-market-data-collector
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

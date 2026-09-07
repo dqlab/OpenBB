@@ -1,0 +1,148 @@
+# Configuration v2: provider/model dispatch with explicit parameter mappings.
+version: 2
+storage:
+  root: ../data/historical_market_data
+  format: jsonl
+  export_batch_size: 500
+sources:
+  yahoo:
+    provider: yfinance
+    adjustment: splits_only
+    volume_unit: shares
+    timeout_seconds: 60
+    min_interval_seconds: 2
+    model: EquityHistorical
+    parameter_map:
+      symbol: symbol
+      start_date: start_date
+      end_date: end_date
+      interval: frequency
+      adjustment: adjustment
+  ibkr:
+    parameters:
+      host: 127.0.0.1
+      port: 4002
+      client_id: 13801
+    timeout_seconds: 60
+    min_interval_seconds: 11
+    max_chunk_days: 7
+    provider: ibkr
+    model: MarketHistorical
+    parameter_map:
+      symbol: symbol
+      start_date: start_date
+      end_date: end_date
+      interval: frequency
+      asset_type: asset_type
+      currency: currency
+      exchange: exchange
+      primary_exchange: primary_exchange
+      con_id: con_id
+      end_datetime: end_datetime
+      what_to_show: what_to_show
+      use_rth: use_rth
+      timeout: timeout
+  yahoo_index:
+    provider: yfinance
+    adjustment: provider_defined
+    volume_unit: shares
+    timeout_seconds: 60
+    min_interval_seconds: 2
+    model: IndexHistorical
+    parameter_map:
+      symbol: symbol
+      start_date: start_date
+      end_date: end_date
+      interval: frequency
+instruments:
+  aapl:
+    symbol: AAPL
+    asset_type: stock
+    currency: USD
+    con_id: 265598
+  spy:
+    symbol: SPY
+    asset_type: etf
+    currency: USD
+    con_id: 756733
+  spx:
+    symbol: SPX
+    asset_type: index
+    currency: USD
+    exchange: CBOE
+    con_id: 416904
+    source_symbols:
+      yahoo: ^GSPC
+      yahoo_index: ^GSPC
+collections:
+  us_daily:
+    instrument_ids:
+    - aapl
+    - spy
+    primary: yahoo
+    secondary:
+    - ibkr
+    start_date: 2026-09-01
+    frequency: 1d
+    fields:
+    - open
+    - high
+    - low
+    - close
+    - volume
+    required_fields:
+    - open
+    - high
+    - low
+    - close
+    chunk_days: 7
+    refresh_days: 3
+  us_daily_indexes:
+    instrument_ids:
+    - spx
+    primary: yahoo_index
+    secondary:
+    - ibkr
+    start_date: 2026-09-01
+    frequency: 1d
+    fields:
+    - open
+    - high
+    - low
+    - close
+    - volume
+    required_fields:
+    - open
+    - high
+    - low
+    - close
+    chunk_days: 7
+    refresh_days: 3
+schedule:
+  timezone: America/New_York
+  at: 06:00:00
+  weekdays:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  catch_up_days: 7
+  reset: weekly
+  retry_seconds: 300
+max_chunks_per_session: 100
+
+# Optional central delivery: fill actual deployment values before uncommenting.
+# See collectors/SESSION_DELIVERY.md. Local storage remains the collection spool.
+# delivery:
+#   collector_id: CHANGE-ME-UNIQUE-COLLECTOR-ID
+#   transport: sftp
+#   destination_root: /var/lib/dq-quant-invest-data
+#   ssh:
+#     host: master.example.internal
+#     user: collector-ingest
+#     known_hosts: /etc/dq-collector/known_hosts
+#     private_key: /etc/dq-collector/master_ed25519
+#   local_retention: 1w  # after_verification, 1d, 1w, 1mo, or forever
