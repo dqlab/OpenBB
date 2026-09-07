@@ -27,3 +27,11 @@ openbb_platform
 The models define the data structures that are used to query the provider endpoints and store the response data.
 
 See [CONTRIBUTING file](../CONTRIBUTING.md) for more details
+
+## Interactive Brokers
+
+The [IBKR provider](ibkr/README.md) includes standard equity quote/historical
+fetchers and the `obb.ibkr` account, portfolio, and market-data router.
+Install with `python -m pip install -e ./openbb_platform/providers/ibkr` from
+the repository root, then run `openbb-build`. A TWS/IB Gateway session is
+required for live calls.

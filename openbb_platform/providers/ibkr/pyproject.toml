@@ -1,0 +1,36 @@
+[tool.poetry]
+name = "openbb-ibkr"
+version = "0.2.0"
+description = "Interactive Brokers provider extension for OpenBB Platform"
+authors = ["Alwan Alkautsar"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/dqlab/OpenBB"
+packages = [{ include = "openbb_ibkr" }]
+include = ["LICENSE", "openbb_ibkr/workspace/*.json"]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4"
+openbb-core = "^1.6.13"
+ib-insync = ">=0.9.86"
+riskfolio-lib = { version = ">=6.0", optional = true }
+
+[tool.poetry.extras]
+riskfolio = ["riskfolio-lib"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+ruff = ">=0.4"
+
+[tool.poetry.plugins."openbb_provider_extension"]
+ibkr = "openbb_ibkr:ibkr_provider"
+
+[tool.poetry.plugins."openbb_core_extension"]
+ibkr = "openbb_ibkr.ibkr_router:router"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 120

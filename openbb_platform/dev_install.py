@@ -33,6 +33,7 @@ openbb-fred = { path = "./providers/fred", develop = true }
 openbb-government-us = { path = "./providers/government_us", develop = true }
 openbb-imf = { path = "./providers/imf", develop = true }
 openbb-intrinio = { path = "./providers/intrinio", develop = true }
+openbb-ibkr = { path = "./providers/ibkr", develop = true }
 openbb-oecd = { path = "./providers/oecd", develop = true }
 openbb-sec = { path = "./providers/sec", develop = true }
 openbb-tiingo = { path = "./providers/tiingo", develop = true }
