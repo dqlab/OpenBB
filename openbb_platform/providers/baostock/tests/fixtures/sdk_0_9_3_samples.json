@@ -1,0 +1,699 @@
+{
+  "sdk_version": "0.9.3",
+  "source": "BaoStock public TCP API via OpenBB source-preserving commands",
+  "sample_rule": "First at most two source records per successful command; total source row count is not sample size.",
+  "records": [
+    {
+      "command": "history_k_data_plus",
+      "params": {
+        "code": "sz.000651",
+        "start_date": "2024-01-02",
+        "end_date": "2024-01-05",
+        "fields": "date,code,open,high,low,close,volume,amount,adjustflag"
+      },
+      "retrieved_at": "2026-09-17T14:45:04.781256+00:00",
+      "status": "ok",
+      "row_count": 4,
+      "sample": [
+        {
+          "date": "2024-01-02",
+          "code": "sz.000651",
+          "open": "32.1700",
+          "high": "32.2000",
+          "low": "31.9600",
+          "close": "32.0300",
+          "volume": "25379730",
+          "amount": "814257174.5200",
+          "adjustflag": "3"
+        },
+        {
+          "date": "2024-01-03",
+          "code": "sz.000651",
+          "open": "32.0000",
+          "high": "32.0800",
+          "low": "31.7000",
+          "close": "31.8000",
+          "volume": "25446892",
+          "amount": "810315013.1500",
+          "adjustflag": "3"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "daily_history_k_astock",
+      "params": {
+        "date": "2026-09-16"
+      },
+      "retrieved_at": "2026-09-17T14:49:24.543520+00:00",
+      "status": "ok",
+      "row_count": 5220,
+      "sample": [
+        {
+          "code": "sh.600000",
+          "date": "2026-09-16",
+          "open": "9.1700",
+          "high": "9.2000",
+          "low": "9.0000",
+          "close": "9.1000",
+          "preclose": "9.1800",
+          "volume": "72340449",
+          "amount": "656348139.9200",
+          "adjustflag": "3",
+          "turn": "0.217200",
+          "tradestatus": "1",
+          "pctChg": "-0.871500",
+          "peTTM": "5.916010",
+          "pbMRQ": "0.402045",
+          "psTTM": "1.710575",
+          "pcfNcfTTM": "8.961124",
+          "isST": "0"
+        },
+        {
+          "code": "sh.600004",
+          "date": "2026-09-16",
+          "open": "7.7100",
+          "high": "7.7400",
+          "low": "7.6000",
+          "close": "7.6600",
+          "preclose": "7.7200",
+          "volume": "8151152",
+          "amount": "62293505.2700",
+          "adjustflag": "3",
+          "turn": "0.344400",
+          "tradestatus": "1",
+          "pctChg": "-0.777200",
+          "peTTM": "17.243984",
+          "pbMRQ": "0.953839",
+          "psTTM": "2.381800",
+          "pcfNcfTTM": "6.269097",
+          "isST": "0"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "daily_history_k_etf",
+      "params": {
+        "date": "2026-09-16"
+      },
+      "retrieved_at": "2026-09-17T14:49:52.438126+00:00",
+      "status": "ok",
+      "row_count": 1667,
+      "sample": [
+        {
+          "code": "sh.510010",
+          "date": "2026-09-16",
+          "open": "1.7360",
+          "high": "1.7490",
+          "low": "1.7320",
+          "close": "1.7490",
+          "preclose": "1.7540",
+          "volume": "12600",
+          "amount": "21852.0000",
+          "adjustflag": "3",
+          "turn": "0.009653",
+          "tradestatus": "1",
+          "pctChg": "-0.285100",
+          "peTTM": "",
+          "pbMRQ": "",
+          "psTTM": "",
+          "pcfNcfTTM": "",
+          "isST": "1"
+        },
+        {
+          "code": "sh.510020",
+          "date": "2026-09-16",
+          "open": "3.8360",
+          "high": "3.8620",
+          "low": "3.8300",
+          "close": "3.8560",
+          "preclose": "3.8420",
+          "volume": "1059500",
+          "amount": "4070859.0000",
+          "adjustflag": "3",
+          "turn": "2.955534",
+          "tradestatus": "1",
+          "pctChg": "0.364400",
+          "peTTM": "",
+          "pbMRQ": "",
+          "psTTM": "",
+          "pcfNcfTTM": "",
+          "isST": "1"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "stock_basic",
+      "params": {
+        "code": "sz.000651"
+      },
+      "retrieved_at": "2026-09-17T14:45:22.841888+00:00",
+      "status": "ok",
+      "row_count": 1,
+      "sample": [
+        {
+          "code": "sz.000651",
+          "code_name": "格力电器",
+          "ipoDate": "1996-11-18",
+          "outDate": "",
+          "type": "1",
+          "status": "1"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "trade_dates",
+      "params": {
+        "start_date": "2024-01-01",
+        "end_date": "2024-03-31"
+      },
+      "retrieved_at": "2026-09-17T14:45:28.268450+00:00",
+      "status": "ok",
+      "row_count": 91,
+      "sample": [
+        {
+          "calendar_date": "2024-01-01",
+          "is_trading_day": "0"
+        },
+        {
+          "calendar_date": "2024-01-02",
+          "is_trading_day": "1"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "all_stock",
+      "params": {
+        "day": "2024-01-02"
+      },
+      "retrieved_at": "2026-09-17T14:49:06.142810+00:00",
+      "status": "ok",
+      "row_count": 5638,
+      "sample": [
+        {
+          "code": "sh.000001",
+          "tradeStatus": "1",
+          "code_name": "上证综合指数"
+        },
+        {
+          "code": "sh.000002",
+          "tradeStatus": "1",
+          "code_name": "上证A股指数"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "stock_industry",
+      "params": {
+        "code": "sz.000651",
+        "date": "2024-01-02"
+      },
+      "retrieved_at": "2026-09-17T14:45:45.705009+00:00",
+      "status": "ok",
+      "row_count": 1,
+      "sample": [
+        {
+          "code": "sz.000651",
+          "updateDate": "2024-01-01",
+          "code_name": "格力电器",
+          "industry": "C38电气机械和器材制造业",
+          "industryClassification": "证监会行业分类"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "hs300_stocks",
+      "params": {
+        "date": "2024-01-02"
+      },
+      "retrieved_at": "2026-09-17T14:45:48.950684+00:00",
+      "status": "ok",
+      "row_count": 300,
+      "sample": [
+        {
+          "code": "sh.600000",
+          "updateDate": "2024-01-01",
+          "code_name": "浦发银行"
+        },
+        {
+          "code": "sh.600009",
+          "updateDate": "2024-01-01",
+          "code_name": "上海机场"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "sz50_stocks",
+      "params": {
+        "date": "2024-01-02"
+      },
+      "retrieved_at": "2026-09-17T14:45:57.082894+00:00",
+      "status": "ok",
+      "row_count": 50,
+      "sample": [
+        {
+          "code": "sh.600028",
+          "updateDate": "2024-01-01",
+          "code_name": "中国石化"
+        },
+        {
+          "code": "sh.600030",
+          "updateDate": "2024-01-01",
+          "code_name": "中信证券"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "zz500_stocks",
+      "params": {
+        "date": "2024-01-02"
+      },
+      "retrieved_at": "2026-09-17T14:46:03.018515+00:00",
+      "status": "ok",
+      "row_count": 500,
+      "sample": [
+        {
+          "code": "sh.600004",
+          "updateDate": "2024-01-01",
+          "code_name": "白云机场"
+        },
+        {
+          "code": "sh.600008",
+          "updateDate": "2024-01-01",
+          "code_name": "首创环保"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "dividend_data",
+      "params": {
+        "code": "sz.000651",
+        "year": 2023,
+        "year_type": "report"
+      },
+      "retrieved_at": "2026-09-17T14:46:07.000422+00:00",
+      "status": "ok",
+      "row_count": 1,
+      "sample": [
+        {
+          "code": "sz.000651",
+          "dividPreNoticeDate": "",
+          "dividAgmPumDate": "2023-07-01",
+          "dividPlanAnnounceDate": "2023-04-29",
+          "dividPlanDate": "2023-08-02",
+          "dividRegistDate": "2023-08-08",
+          "dividOperateDate": "2023-08-09",
+          "dividPayDate": "2023-08-09",
+          "dividStockMarketDate": "",
+          "dividCashPsBeforeTax": "1",
+          "dividCashPsAfterTax": "0.9或1",
+          "dividStocksPs": "0.000000",
+          "dividCashStock": "10派10元（含税，扣税后9或10元）",
+          "dividReserveToStockPs": ""
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "daily_adjust_factor",
+      "params": {
+        "date": "2024-01-02"
+      },
+      "retrieved_at": "2026-09-17T14:46:12.208285+00:00",
+      "status": "ok",
+      "row_count": 1,
+      "sample": [
+        {
+          "code": "sz.002937",
+          "dividOperateDate": "2024-01-02",
+          "foreAdjustFactor": "0.957406",
+          "backAdjustFactor": "1.695358",
+          "adjustFacto": "1.695358"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "profit_data",
+      "params": {
+        "code": "sz.000651",
+        "year": 2024,
+        "quarter": 1
+      },
+      "retrieved_at": "2026-09-17T14:46:14.846203+00:00",
+      "status": "ok",
+      "row_count": 1,
+      "sample": [
+        {
+          "code": "sz.000651",
+          "pubDate": "2024-04-30",
+          "statDate": "2024-03-31",
+          "roeAvg": "0.039234",
+          "npMargin": "0.127613",
+          "gpMargin": "0.294542",
+          "netProfit": "4640546489.680000",
+          "epsTTM": "5.253270",
+          "MBRevenue": "",
+          "totalShare": "5631405741.00",
+          "liqaShare": "5583149620.00"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "operation_data",
+      "params": {
+        "code": "sz.000651",
+        "year": 2024,
+        "quarter": 1
+      },
+      "retrieved_at": "2026-09-17T14:46:17.478952+00:00",
+      "status": "ok",
+      "row_count": 1,
+      "sample": [
+        {
+          "code": "sz.000651",
+          "pubDate": "2024-04-30",
+          "statDate": "2024-03-31",
+          "NRTurnRatio": "2.149903",
+          "NRTurnDays": "41.862353",
+          "INVTurnRatio": "0.749354",
+          "INVTurnDays": "120.096077",
+          "CATurnRatio": "0.157944",
+          "AssetTurnRatio": "0.097736"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "growth_data",
+      "params": {
+        "code": "sz.000651",
+        "year": 2024,
+        "quarter": 1
+      },
+      "retrieved_at": "2026-09-17T14:46:19.982904+00:00",
+      "status": "ok",
+      "row_count": 1,
+      "sample": [
+        {
+          "code": "sz.000651",
+          "pubDate": "2024-04-30",
+          "statDate": "2024-03-31",
+          "YOYEquity": "0.192156",
+          "YOYAsset": "-0.009871",
+          "YOYNI": "0.188733",
+          "YOYEPSBasic": "0.164384",
+          "YOYPNI": "0.137715"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "balance_data",
+      "params": {
+        "code": "sz.000651",
+        "year": 2024,
+        "quarter": 1
+      },
+      "retrieved_at": "2026-09-17T14:46:22.588794+00:00",
+      "status": "ok",
+      "row_count": 1,
+      "sample": [
+        {
+          "code": "sz.000651",
+          "pubDate": "2024-04-30",
+          "statDate": "2024-03-31",
+          "currentRatio": "1.125387",
+          "quickRatio": "0.961658",
+          "cashRatio": "0.635884",
+          "YOYLiability": "-0.080338",
+          "liabilityToAsset": "0.670792",
+          "assetToEquity": "3.037595"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "cash_flow_data",
+      "params": {
+        "code": "sz.000651",
+        "year": 2024,
+        "quarter": 1
+      },
+      "retrieved_at": "2026-09-17T14:46:25.258053+00:00",
+      "status": "ok",
+      "row_count": 1,
+      "sample": [
+        {
+          "code": "sz.000651",
+          "pubDate": "2024-04-30",
+          "statDate": "2024-03-31",
+          "CAToAsset": "0.617778",
+          "NCAToAsset": "0.382222",
+          "tangibleAssetToAsset": "0.242589",
+          "ebitToInterest": "",
+          "CFOToOR": "-0.080872",
+          "CFOToNP": "-0.633733",
+          "CFOToGr": "-0.080361"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "dupont_data",
+      "params": {
+        "code": "sz.000651",
+        "year": 2024,
+        "quarter": 1
+      },
+      "retrieved_at": "2026-09-17T14:46:27.686449+00:00",
+      "status": "ok",
+      "row_count": 1,
+      "sample": [
+        {
+          "code": "sz.000651",
+          "pubDate": "2024-04-30",
+          "statDate": "2024-03-31",
+          "dupontROE": "0.039234",
+          "dupontAssetStoEquity": "3.142227",
+          "dupontAssetTurn": "0.097736",
+          "dupontPnitoni": "1.007459",
+          "dupontNitogr": "0.126806",
+          "dupontTaxBurden": "0.872534",
+          "dupontIntburden": "1.184070",
+          "dupontEbittogr": "0.122739"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "deposit_rate_data",
+      "params": {
+        "start_date": "2015-01-01",
+        "end_date": "2015-12-31"
+      },
+      "retrieved_at": "2026-09-17T14:46:43.304860+00:00",
+      "status": "ok",
+      "row_count": 5,
+      "sample": [
+        {
+          "pubDate": "2015-03-01",
+          "demandDepositRate": "0.350000",
+          "fixedDepositRate3Month": "2.100000",
+          "fixedDepositRate6Month": "2.300000",
+          "fixedDepositRate1Year": "2.500000",
+          "fixedDepositRate2Year": "3.100000",
+          "fixedDepositRate3Year": "3.750000",
+          "fixedDepositRate5Year": "",
+          "installmentFixedDepositRate1Year": "2.100000",
+          "installmentFixedDepositRate3Year": "2.300000",
+          "installmentFixedDepositRate5Year": ""
+        },
+        {
+          "pubDate": "2015-05-11",
+          "demandDepositRate": "0.350000",
+          "fixedDepositRate3Month": "1.850000",
+          "fixedDepositRate6Month": "2.050000",
+          "fixedDepositRate1Year": "2.250000",
+          "fixedDepositRate2Year": "2.850000",
+          "fixedDepositRate3Year": "3.500000",
+          "fixedDepositRate5Year": "",
+          "installmentFixedDepositRate1Year": "1.850000",
+          "installmentFixedDepositRate3Year": "2.050000",
+          "installmentFixedDepositRate5Year": ""
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "loan_rate_data",
+      "params": {
+        "start_date": "2015-01-01",
+        "end_date": "2015-12-31"
+      },
+      "retrieved_at": "2026-09-17T14:46:45.846934+00:00",
+      "status": "ok",
+      "row_count": 5,
+      "sample": [
+        {
+          "pubDate": "2015-03-01",
+          "loanRate6Month": "5.350000",
+          "loanRate6MonthTo1Year": "5.350000",
+          "loanRate1YearTo3Year": "5.750000",
+          "loanRate3YearTo5Year": "5.750000",
+          "loanRateAbove5Year": "5.900000",
+          "mortgateRateBelow5Year": "3.500000",
+          "mortgateRateAbove5Year": "4.000000"
+        },
+        {
+          "pubDate": "2015-05-11",
+          "loanRate6Month": "5.100000",
+          "loanRate6MonthTo1Year": "5.100000",
+          "loanRate1YearTo3Year": "5.500000",
+          "loanRate3YearTo5Year": "5.500000",
+          "loanRateAbove5Year": "5.650000",
+          "mortgateRateBelow5Year": "3.250000",
+          "mortgateRateAbove5Year": "3.750000"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "money_supply_data_month",
+      "params": {
+        "start_date": "2024-01",
+        "end_date": "2024-03"
+      },
+      "retrieved_at": "2026-09-17T14:46:51.127444+00:00",
+      "status": "ok",
+      "row_count": 3,
+      "sample": [
+        {
+          "statYear": "2024",
+          "statMonth": "01",
+          "m0Month": "121398.540000",
+          "m0YOY": "5.900000",
+          "m0ChainRelative": "7.011261",
+          "m1Month": "1120120.000000",
+          "m1YOY": "5.900000",
+          "m1ChainRelative": "64.592214",
+          "m2Month": "2976250.200000",
+          "m2YOY": "8.700000",
+          "m2ChainRelative": "1.831752"
+        },
+        {
+          "statYear": "2024",
+          "statMonth": "02",
+          "m0Month": "121009.930000",
+          "m0YOY": "12.500000",
+          "m0ChainRelative": "-0.320111",
+          "m1Month": "1093158.000000",
+          "m1YOY": "1.200000",
+          "m1ChainRelative": "-2.407064",
+          "m2Month": "2995572.970000",
+          "m2YOY": "8.700000",
+          "m2ChainRelative": "0.649232"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "money_supply_data_year",
+      "params": {
+        "start_date": "2023",
+        "end_date": "2023"
+      },
+      "retrieved_at": "2026-09-17T14:46:53.981663+00:00",
+      "status": "ok",
+      "row_count": 1,
+      "sample": [
+        {
+          "statYear": "2023",
+          "m0Year": "113444.640000",
+          "m0YearYOY": "8.300000",
+          "m1Year": "680542.520000",
+          "m1YearYOY": "1.300000",
+          "m2Year": "2922713.330000",
+          "m2YearYOY": "9.700000"
+        }
+      ],
+      "sdk_public": true
+    },
+    {
+      "command": "terminated_stocks",
+      "params": {
+        "date": "2024-01-02"
+      },
+      "retrieved_at": "2026-09-17T14:46:56.502369+00:00",
+      "status": "ok",
+      "row_count": 234,
+      "sample": [
+        {
+          "code": "sh.600001",
+          "updateDate": "2024-01-01",
+          "code_name": "邯郸钢铁"
+        },
+        {
+          "code": "sh.600002",
+          "updateDate": "2024-01-01",
+          "code_name": "齐鲁石化"
+        }
+      ],
+      "sdk_public": false
+    },
+    {
+      "command": "st_stocks",
+      "params": {
+        "date": "2024-01-02"
+      },
+      "retrieved_at": "2026-09-17T14:47:02.151971+00:00",
+      "status": "ok",
+      "row_count": 64,
+      "sample": [
+        {
+          "code": "sh.600070",
+          "updateDate": "2024-01-01",
+          "code_name": "ST富润"
+        },
+        {
+          "code": "sh.600078",
+          "updateDate": "2024-01-01",
+          "code_name": "ST澄星"
+        }
+      ],
+      "sdk_public": false
+    },
+    {
+      "command": "starst_stocks",
+      "params": {
+        "date": "2024-01-02"
+      },
+      "retrieved_at": "2026-09-17T14:47:05.787494+00:00",
+      "status": "ok",
+      "row_count": 52,
+      "sample": [
+        {
+          "code": "sh.600117",
+          "updateDate": "2024-01-01",
+          "code_name": "*ST西钢"
+        },
+        {
+          "code": "sh.600136",
+          "updateDate": "2024-01-01",
+          "code_name": "*ST明诚"
+        }
+      ],
+      "sdk_public": false
+    }
+  ]
+}
