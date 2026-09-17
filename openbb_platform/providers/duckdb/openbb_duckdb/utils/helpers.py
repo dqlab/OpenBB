@@ -1,6 +1,9 @@
 """Helpers for querying historical data from DuckDB."""
 
+import os
 import re
+import time
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -19,6 +22,41 @@ STANDARD_COLUMNS = {
     "volume",
     "vwap",
 }
+
+
+@contextmanager
+def market_read_lock(database_path: str, timeout: float = 30):
+    """Honor the data platform's existing catalog lock without adding a dependency."""
+    path = Path(database_path).with_suffix(".market.lock")
+    if not path.exists():
+        yield
+        return
+    with path.open("r+b") as stream:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline:
+                    raise OpenBBError("DuckDB market catalog is busy; retry the query.") from None
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def quote_identifier(identifier: str) -> str:
@@ -65,6 +103,7 @@ def query_historical_data(
     end_date: date | None,
     credentials: dict[str, str] | None,
     required_columns: set[str],
+    limit: int = 100000,
 ) -> list[dict[str, Any]]:
     """Read standardized historical records from a DuckDB table or view."""
     # pylint: disable=import-outside-toplevel
@@ -77,8 +116,13 @@ def query_historical_data(
         raise OpenBBError("At least one symbol is required for a DuckDB query.")
 
     try:
-        with duckdb.connect(database=path, read_only=True) as connection:
-            described = connection.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()  # noqa: S608
+        with (
+            market_read_lock(path),
+            duckdb.connect(database=path, read_only=True) as connection,
+        ):
+            described = connection.execute(
+                f"DESCRIBE SELECT * FROM {relation}"  # noqa: S608 - quoted identifier
+            ).fetchall()
             columns = {str(row[0]).casefold(): str(row[0]) for row in described}
             missing = sorted((required_columns | {"symbol", "date"}) - columns.keys())
             if missing:
@@ -98,11 +142,14 @@ def query_historical_data(
                 parameters.append(end_date)
 
             cursor = connection.execute(
-                f"SELECT * FROM {relation} WHERE {' AND '.join(conditions)} ORDER BY {date_column}, {symbol_column}",  # noqa: S608
-                parameters,
+                f"SELECT * FROM {relation} WHERE {' AND '.join(conditions)} "  # noqa: S608
+                f"ORDER BY {date_column}, {symbol_column} LIMIT ?",
+                [*parameters, limit + 1],
             )
             result_columns = [_normalize_column(item[0]) for item in cursor.description]
             records = [dict(zip(result_columns, row)) for row in cursor.fetchall()]
+            if len(records) > limit:
+                raise OpenBBError("DuckDB result exceeds limit; narrow the date range or raise limit.")
     except OpenBBError:
         raise
     except duckdb.Error as exc:

@@ -144,6 +144,9 @@ def quote_record(row: dict[str, Any], ticker: Any) -> dict[str, Any]:
         if raw.get(name) == -1 and (row.get("sec_type") not in {"FUT", "FOP", "CMDTY"} or raw[name + "_size"] == 0):
             result[name] = None
             unavailable.append(name)
+    if raw.get("last") == -1 and row.get("sec_type") not in {"FUT", "FOP", "CMDTY"}:
+        result["last"] = None
+        unavailable.append("last")
     observed = getattr(ticker, "marketDataType", None)
     if type(observed) is not int or observed not in MARKET_DATA_TYPES:
         observed = None
@@ -154,6 +157,16 @@ def quote_record(row: dict[str, Any], ticker: Any) -> dict[str, Any]:
         "feed_type": MARKET_DATA_TYPES.get(observed, "unknown"),
         "unavailable_fields": unavailable,
     }
+
+
+def quote_ready(row: dict[str, Any]) -> bool:
+    if row["market_data_type"] is None:
+        return False
+    fields = ("bid", "ask") if row.get("sec_type") in {"FUT", "FOP", "CMDTY"} else ("last",)
+    return all(
+        type(row.get(field)) in (int, float) and isfinite(row[field]) and (fields != ("last",) or row[field] > 0)
+        for field in fields
+    )
 
 
 def bounded_quote(client: Any, request: dict[str, Any], wait_seconds: float) -> Response:
@@ -191,8 +204,14 @@ def bounded_quote(client: Any, request: dict[str, Any], wait_seconds: float) -> 
             # reqMktData sends the request synchronously; callbacks are pumped
             # by sleep below. Clear the library's default or cached feed type.
             ticker.marketDataType = 0
-            ib.sleep(wait_seconds)
-            row = quote_record(client._normalise_quote(contract, ticker, delayed), ticker)
+            waited = 0.0
+            while waited < wait_seconds:
+                interval = min(0.25, wait_seconds - waited)
+                ib.sleep(interval)
+                waited += interval
+                row = quote_record(client._normalise_quote(contract, ticker, delayed), ticker)
+                if waited >= 0.7 and quote_ready(row):
+                    break
             return Response(
                 rows=[row],
                 metadata={
@@ -200,6 +219,7 @@ def bounded_quote(client: Any, request: dict[str, Any], wait_seconds: float) -> 
                     "gateway_error_scope": "provider_call_interval",
                     "adapter": "dqlab_client_bounded_quote",
                     "snapshot_wait_seconds": wait_seconds,
+                    "actual_wait_seconds": waited,
                     "quote_schema_version": 2,
                     "feed_type_basis": "gateway_callback" if row["market_data_type"] else "unknown",
                     "unavailable_fields": row["unavailable_fields"],

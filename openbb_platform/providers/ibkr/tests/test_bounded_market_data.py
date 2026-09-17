@@ -178,7 +178,7 @@ def test_ibkr_waits_for_data_and_cancels_and_detaches_on_success_or_failure():
     assert row["unavailable_fields"] == ["bid", "ask"]
     assert result.metadata["feed_type_basis"] == "gateway_callback"
     assert result.metadata["gateway_error_codes"] == [10167]
-    assert client.ib.waits == [4]
+    assert 0.7 <= sum(client.ib.waits) < 4
     assert client.ib.requested_type == 3
     assert client.ib.cancelled == [{"symbol": "AAPL"}]
     assert client.ib.errorEvent.handlers == []
@@ -187,6 +187,44 @@ def test_ibkr_waits_for_data_and_cancels_and_detaches_on_success_or_failure():
         bounded_quote(client, request, 4)
     assert len(client.ib.cancelled) == 2
     assert client.ib.errorEvent.handlers == []
+
+
+def test_unavailable_equity_last_is_null_and_quote_wait_is_bounded():
+    client = fake_ibkr_client()
+    client.configure(read_only=True)
+
+    def unavailable(seconds):
+        client.ib.waits.append(seconds)
+        client.ib.ticker.marketDataType = 3
+        client.ib.ticker.last = -1
+
+    client.ib.sleep = unavailable
+    result = bounded_quote(client, {"symbol": "AAPL", "sec_type": "STK", "delayed": True}, 2)
+    assert result.rows[0]["last"] is None
+    assert result.rows[0]["raw_quote"]["last"] == -1
+    assert "last" in result.rows[0]["unavailable_fields"]
+    assert sum(client.ib.waits) == 2
+    assert client.ib.errorEvent.handlers == [] and len(client.ib.cancelled) == 1
+
+
+def test_late_quote_fields_are_awaited_and_valid_negative_futures_survive():
+    client = fake_ibkr_client()
+    client.configure(read_only=True)
+
+    def arrive_later(seconds):
+        client.ib.waits.append(seconds)
+        client.ib.ticker.marketDataType = 3
+        if sum(client.ib.waits) >= 1.5:
+            client.ib.ticker.bid = -2
+            client.ib.ticker.ask = -1
+            client.ib.ticker.bidSize = 1
+            client.ib.ticker.askSize = 1
+            client.ib.ticker.last = -1
+
+    client.ib.sleep = arrive_later
+    result = bounded_quote(client, {"symbol": "CL", "sec_type": "FUT", "delayed": True}, 4)
+    assert sum(client.ib.waits) == 1.5
+    assert (result.rows[0]["bid"], result.rows[0]["ask"], result.rows[0]["last"]) == (-2, -1, -1)
 
 
 @pytest.mark.parametrize("asset_type", ["future", "option", "future_option"])
@@ -246,7 +284,7 @@ def test_quote_fetcher_preserves_wait_readonly_identity_and_metadata(monkeypatch
     result = models.IbkrMarketQuoteFetcher.transform_data(query, raw)
     assert client.settings["read_only"] is True and client.settings["delayed"] is False
     assert client.settings["port"] == "4002"
-    assert client.ib.waits == [3] and client.ib.requested_type == 1
+    assert sum(client.ib.waits) == 3 and client.ib.requested_type == 1
     assert client.ib.errorEvent.handlers == [] and len(client.ib.cancelled) == 1
     row = result.result[0]
     assert row.symbol == "ES" and row.con_id == 123 and row.sec_type == "FUT"

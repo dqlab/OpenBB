@@ -129,6 +129,7 @@ class YFinanceEquityProfileFetcher(
         fields = [
             "symbol",
             "longName",
+            "shortName",
             "exchange",
             "timeZoneFullName",
             "quoteType",

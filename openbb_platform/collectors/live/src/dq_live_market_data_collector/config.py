@@ -48,6 +48,9 @@ def valid_timezone(value: str) -> str:
 class Source(StrictModel):
     provider: Name
     model: FieldName
+    record_type: Literal["quote", "option_chain"] = "quote"
+    option_chain_roots: list[Name] = Field(default_factory=list, max_length=20)
+    underlying_symbol_map: dict[Name, Name] = Field(default_factory=dict, max_length=20)
     parameter_map: dict[FieldName, FieldName] = Field(default_factory=lambda: {"symbol": "symbol"})
     requested_feed_type: Literal[
         "live", "delayed", "frozen", "delayed_frozen", "provider_default"
@@ -60,9 +63,10 @@ class Source(StrictModel):
     min_interval_seconds: float = Field(default=1, ge=0.1, le=3600)
     snapshot_wait_seconds: float = Field(default=4, ge=0.7, le=30)
     retries: int = Field(default=1, ge=0, le=5)
-    max_rows: int = Field(default=10, ge=1, le=1000)
-    max_response_bytes: int = Field(default=1_000_000, ge=1024, le=10_000_000)
+    max_rows: int = Field(default=10, ge=1, le=100000)
+    max_response_bytes: int = Field(default=1_000_000, ge=1024, le=50_000_000)
     field_map: dict[FieldName, FieldName] = Field(default_factory=dict)
+    asset_type_map: dict[Name, AssetType] = Field(default_factory=dict, max_length=32)
     timestamp_field: FieldName | None = None
     timestamp_timezone: str | None = None
     timestamp_unit: Literal["seconds", "milliseconds"] = "seconds"
@@ -83,6 +87,15 @@ class Source(StrictModel):
 
     @model_validator(mode="after")
     def check_provider(self) -> Source:
+        if self.record_type == "option_chain":
+            if self.model != "OptionsChains" or not self.option_chain_roots:
+                raise ValueError(
+                    "Option chains require OptionsChains and explicit allowed OCC roots"
+                )
+            if len(self.option_chain_roots) != len(set(self.option_chain_roots)):
+                raise ValueError("Option chain roots must be unique")
+        elif self.option_chain_roots or self.underlying_symbol_map or self.max_rows > 1000:
+            raise ValueError("Quote sources cannot declare option roots or exceed 1000 rows")
         if "symbol" not in self.parameter_map.values():
             raise ValueError("Map the configured source symbol explicitly")
         if set(self.parameters) & set(self.parameter_map):
@@ -147,6 +160,9 @@ class Schedule(SessionHours):
     weekdays: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4], min_length=1)
     holidays: set[date] = Field(default_factory=set)
     overrides: dict[date, SessionHours | None] = Field(default_factory=dict)
+    # Bounds apply to the local session-start date, including overnight sessions.
+    valid_from: date | None = None
+    valid_through: date | None = None
 
     _timezone = field_validator("timezone")(valid_timezone)
 
@@ -156,6 +172,20 @@ class Schedule(SessionHours):
         if len(set(value)) != len(value) or any(day not in range(7) for day in value):
             raise ValueError("weekdays must be unique integers 0 (Monday) to 6 (Sunday)")
         return value
+
+    @model_validator(mode="after")
+    def calendar_bounds(self) -> Schedule:
+        if (self.valid_from is None) != (self.valid_through is None):
+            raise ValueError("Calendar validity requires both valid_from and valid_through")
+        if self.valid_from is not None and self.valid_from > self.valid_through:
+            raise ValueError("Calendar valid_from must not follow valid_through")
+        return self
+
+
+class QuoteRetry(StrictModel):
+    max_attempts: int = Field(default=3, ge=2, le=5)
+    delay_seconds: float = Field(default=60, ge=1, le=3600)
+    opening_delay_seconds: float = Field(default=1200, ge=0, le=3600)
 
 
 class Collection(StrictModel):
@@ -170,6 +200,7 @@ class Collection(StrictModel):
     accepted_feed_types: list[FeedType] = Field(default_factory=lambda: ["live", "unknown"])
     reject_crossed_quotes: bool = True
     schedule: Schedule
+    quote_retry: QuoteRetry | None = None
 
     @model_validator(mode="after")
     def unique_fields(self) -> Collection:
@@ -222,6 +253,25 @@ class CollectorConfig(StrictModel):
                 raise ValueError("Collection references an unknown instrument")
             for source_id in source_ids:
                 source = self.sources[source_id]
+                if source.record_type == "option_chain":
+                    if collection.quote_retry is not None:
+                        raise ValueError("Deferred quote retries cannot collect option chains")
+                    if any(
+                        self.instruments[name].asset_type not in {"stock", "etf", "index"}
+                        for name in collection.instrument_ids
+                    ):
+                        raise ValueError(
+                            "Option chain instruments identify the equity or index underlying"
+                        )
+                    required = {
+                        "contract_symbol",
+                        "underlying_symbol",
+                        "expiration",
+                        "strike",
+                        "option_type",
+                    }
+                    if not required <= set(collection.required_fields):
+                        raise ValueError("Option chain contract identity fields must be required")
                 if source.requested_feed_type in {"delayed", "delayed_frozen"} and not (
                     {"delayed", "delayed_frozen"} & set(collection.accepted_feed_types)
                 ):
@@ -234,7 +284,13 @@ class CollectorConfig(StrictModel):
         payload.pop("storage")
         payload.pop("delivery")
         for collection in payload["collections"].values():
+            if collection["quote_retry"] is None:
+                collection.pop("quote_retry")
             collection["schedule"]["holidays"].sort()
+            # Preserve fingerprints of existing profiles without bounded calendars.
+            for key in ("valid_from", "valid_through"):
+                if collection["schedule"][key] is None:
+                    collection["schedule"].pop(key)
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()

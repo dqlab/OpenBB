@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "openbb-ibkr"
-version = "0.2.0"
+version = "0.2.1"
 description = "Interactive Brokers provider extension for OpenBB Platform"
 authors = ["Alwan Alkautsar"]
 license = "MIT"

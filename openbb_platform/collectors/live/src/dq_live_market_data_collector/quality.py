@@ -60,7 +60,7 @@ def parse_timestamp(value: Any, source: Source) -> datetime | None:
     return timestamp.astimezone(UTC)
 
 
-def normalize(
+def _normalize_quote(
     row: dict[str, Any],
     *,
     source_id: str,
@@ -80,8 +80,15 @@ def normalize(
         reasons.append("symbol_mismatch")
     if row.get("currency") and row["currency"] != instrument.currency:
         reasons.append("currency_mismatch")
-    if row.get("asset_type") and row["asset_type"] != instrument.asset_type:
-        reasons.append("security_type_mismatch")
+    observed_asset = row.get("asset_type")
+    if observed_asset:
+        mapped_asset = (
+            source.asset_type_map.get(observed_asset, observed_asset)
+            if isinstance(observed_asset, str)
+            else observed_asset
+        )
+        if mapped_asset != instrument.asset_type:
+            reasons.append("security_type_mismatch")
     if instrument.con_id is not None:
         con_id = row.get("con_id")
         if isinstance(con_id, bool) or not isinstance(con_id, int) or con_id <= 0:
@@ -179,6 +186,15 @@ def normalize(
             "field_map": source.field_map,
             "adjustment": source.adjustment,
             "size_unit": source.size_unit,
+            **({"asset_type_map": source.asset_type_map} if source.asset_type_map else {}),
+            **(
+                {
+                    "option_chain_roots": source.option_chain_roots,
+                    "underlying_symbol_map": source.underlying_symbol_map,
+                }
+                if source.record_type == "option_chain"
+                else {}
+            ),
         }
     )
     key = digest([mapping_hash, collection_id, instrument_id, source_id, identity_time])
@@ -234,3 +250,14 @@ def normalize(
         "raw_hash": raw_hash,
         "values": fields,
     }, []
+
+
+def normalize(
+    row: dict[str, Any], *, source: Source, **context: Any
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Normalize one quote or one explicitly configured option-chain contract."""
+    if source.record_type == "option_chain":
+        from .option_chain import normalize_option
+
+        return normalize_option(row, source=source, **context)
+    return _normalize_quote(row, source=source, **context)

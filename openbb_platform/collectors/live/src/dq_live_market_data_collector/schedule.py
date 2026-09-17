@@ -18,6 +18,10 @@ class Window:
 
 
 def window_on(schedule: Schedule, day: date) -> Window | None:
+    if schedule.valid_from is not None and not (
+        schedule.valid_from <= day <= schedule.valid_through
+    ):
+        return None
     if day in schedule.overrides:
         hours = schedule.overrides[day]
         if hours is None:

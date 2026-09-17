@@ -4,17 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dq-live-market-data-collector"
-version = "0.1.0"
+version = "0.1.6"
 description = "Independent live market-data collection engine for OpenBB."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["openbb-collector-core>=0.1.0,<0.2", "pydantic>=2.7,<3", "PyYAML>=6,<7", "tzdata>=2024.1"]
+dependencies = ["openbb-collector-core>=0.1.2,<0.2", "pydantic>=2.7,<3", "PyYAML>=6,<7", "tzdata>=2024.1"]
 
 [project.scripts]
 dq-live-market-data-collector = "dq_live_market_data_collector.cli:main"
 
 [project.optional-dependencies]
-ssh = ["openbb-collector-core[ssh]>=0.1.0,<0.2"]
+ssh = ["openbb-collector-core[ssh]>=0.1.1,<0.2"]
 parquet = ["pyarrow>=15"]
 duckdb = ["duckdb>=1"]
 openbb = ["openbb-core>=1.6.13,<2"]

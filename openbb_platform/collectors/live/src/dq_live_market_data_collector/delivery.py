@@ -3,14 +3,20 @@
 import json
 
 from openbb_collector_core.delivery import deliver_sessions, file_hash, local_path
+from openbb_collector_core.incremental import incremental_sessions
 
 
-def _sessions(journal, store):
+def _sessions(journal, store, config):
+    yield from incremental_sessions(config, journal, store, "live")
     for session in journal.db.execute(
         "SELECT id,config_hash,status,report_path FROM sessions WHERE status<>'running' "
         "AND report_pending=0 AND report_path IS NOT NULL ORDER BY start"
     ):
         sid = session["id"]
+        if journal.db.execute(
+            "SELECT 1 FROM quote_retries WHERE session_id=? LIMIT 1", (sid,)
+        ).fetchone():
+            continue
         if journal.db.execute(
             "SELECT 1 FROM observations WHERE session_id=? AND exported=0 LIMIT 1", (sid,)
         ).fetchone():
@@ -81,13 +87,15 @@ def deliver(config, journal, *, force=False, send=True, limit=10):
     result = deliver_sessions(
         config,
         journal,
-        lambda store: _sessions(journal, store),
+        lambda store: _sessions(journal, store, config),
         force=force,
         send=send,
         limit=limit,
     )
     result["pending_output_sessions"] = journal.db.execute(
         "SELECT COUNT(*) FROM sessions s WHERE status<>'running' AND EXISTS "
-        "(SELECT 1 FROM observations o WHERE o.session_id=s.id AND o.exported=0)"
+        "(SELECT 1 FROM observations o WHERE o.session_id=s.id AND o.exported=0) "
+        "OR (status<>'running' AND EXISTS "
+        "(SELECT 1 FROM quote_retries q WHERE q.session_id=s.id))"
     ).fetchone()[0]
     return result

@@ -11,7 +11,7 @@ from openbb_ibkr.models.market_data import (
     IbkrEquityQuoteFetcher,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 ibkr_provider = Provider(
     name="ibkr",

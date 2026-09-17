@@ -208,11 +208,15 @@ def normalize(
             )
             rejected.append({"raw_row": row_index, "reason": safe, "raw_hash": raw_hash})
     actual = {record["event_time"] for record in accepted}
-    missing = sorted(expected - actual) if expected is not None else []
+    enforce_coverage = not collection.calendar or collection.calendar.require_all_bars
+    coverage_expected = expected if enforce_coverage else None
+    missing = sorted(coverage_expected - actual) if coverage_expected is not None else []
     coverage = {
-        "status": "unknown" if expected is None else ("gaps" if missing else "complete"),
-        "expected": len(expected) if expected is not None else None,
+        "status": "unknown" if coverage_expected is None else ("gaps" if missing else "complete"),
+        "expected": len(coverage_expected) if coverage_expected is not None else None,
         "missing": len(missing),
         "missing_sample": missing[:20],
     }
+    if expected is not None and not enforce_coverage:
+        coverage["basis"] = "session_filter_only"
     return accepted, rejected, outside, coverage

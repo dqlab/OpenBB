@@ -342,3 +342,56 @@ def test_delayed_quotes_with_missing_optional_sides_are_archived_labeled_and_exp
     )
     service.step()
     assert len(provider.calls) == 2 and len(observations(journal)) == 2
+
+
+def test_long_universe_exports_and_heartbeats_before_next_instrument(rig):
+    config, clock, provider, journal, service = rig
+    config.heartbeat_seconds = 10
+
+    def handler(source_id, source, instrument):
+        if instrument.symbol == "SPY":
+            assert journal.db.execute(
+                "SELECT COUNT(*) FROM observations WHERE exported=1"
+            ).fetchone()[0] == 1
+            assert journal.get_meta("heartbeat") == clock().isoformat()
+        clock.advance(11)
+        return Response([quote(instrument.symbol, clock())])
+
+    provider.handler = handler
+    service.step()
+    assert len(observations(journal)) == 2
+    assert journal.db.execute(
+        "SELECT COUNT(*) FROM observations WHERE exported=0"
+    ).fetchone()[0] == 0
+
+
+def test_explicit_provider_asset_mapping_keeps_identity_checks(rig):
+    config, clock, provider, journal, service = rig
+    config.sources["primary"].asset_type_map = {"EQUITY": "stock"}
+    config.collections["quotes"].secondary = []
+    provider.handler = lambda sid, source, inst: Response([
+        quote(inst.symbol, clock(), asset_type="EQUITY")
+    ])
+    service.step()
+    rows = observations(journal)
+    assert len(rows) == 1 and rows[0]["instrument_id"] == "apple"
+    assert rows[0]["asset_type"] == "stock"
+    attempts = json.loads(journal.db.execute(
+        "SELECT attempts FROM polls WHERE instrument_id='spy'"
+    ).fetchone()[0])
+    assert attempts[0]["quarantine"][0]["reasons"] == ["security_type_mismatch"]
+
+
+def test_asset_mapping_changes_are_versioned_in_observation_identity(rig):
+    config, clock, provider, journal, service = rig
+    stamp = clock()
+    provider.handler = lambda sid, source, inst: Response([
+        quote(inst.symbol, stamp, asset_type=inst.asset_type)
+    ])
+    service.step()
+    initial = {row["mapping_hash"] for row in observations(journal)}
+    config.sources["primary"].asset_type_map = {"EQUITY": "stock"}
+    clock.advance(10)
+    service.step()
+    assert len(observations(journal)) == 4
+    assert len({row["mapping_hash"] for row in observations(journal)} - initial) == 2

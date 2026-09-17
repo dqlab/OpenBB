@@ -101,7 +101,7 @@ class Journal:
                 CREATE TABLE IF NOT EXISTS sessions (
                     id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT,
                     config_hash TEXT NOT NULL, scheduled_day TEXT, status TEXT NOT NULL,
-                    report TEXT, report_pending INTEGER NOT NULL DEFAULT 0
+                    report TEXT, report_pending INTEGER NOT NULL DEFAULT 0, refresh_cycle TEXT
                 );
                 CREATE INDEX IF NOT EXISTS scheduled_sessions
                     ON sessions(config_hash, scheduled_day, status);
@@ -120,7 +120,15 @@ class Journal:
                 );
                 CREATE INDEX IF NOT EXISTS observed_asof
                     ON observations(observation_key, available_at, seq);
+                CREATE INDEX IF NOT EXISTS observations_instrument_available
+                    ON observations(instrument_id, available_at);
                 CREATE INDEX IF NOT EXISTS pending_output ON observations(exported, seq);
+                CREATE INDEX IF NOT EXISTS delivery_session_rows
+                    ON observations(session_id, seq);
+                CREATE INDEX IF NOT EXISTS delivery_session_exports
+                    ON observations(session_id, exported, export_batch);
+                CREATE INDEX IF NOT EXISTS delivery_batch_sessions
+                    ON observations(export_batch, session_id);
                 CREATE TABLE IF NOT EXISTS attempts (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
                     chunk_key TEXT NOT NULL, collection_id TEXT NOT NULL,
@@ -131,10 +139,14 @@ class Journal:
                     outside INTEGER NOT NULL, detail TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS session_attempts ON attempts(session_id);
+                CREATE INDEX IF NOT EXISTS chunk_attempts ON attempts(chunk_key, session_id);
                 CREATE TABLE IF NOT EXISTS batches (
                     id TEXT PRIMARY KEY, completed INTEGER NOT NULL DEFAULT 0
                 );
             """)
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(sessions)")}
+            if "refresh_cycle" not in columns:
+                self.db.execute("ALTER TABLE sessions ADD COLUMN refresh_cycle TEXT")
             previous = self.get_meta("format")
             if previous and previous != config.format:
                 raise ValueError("Use a new storage root to change output format")
@@ -167,15 +179,34 @@ class Journal:
                 (key, value),
             )
 
-    def start(self, config_hash: str, scheduled_day: str | None = None) -> str:
+    def start(
+        self, config_hash: str, scheduled_day: str | None = None, refresh_cycle: str | None = None
+    ) -> str:
         session_id = uuid.uuid4().hex
         with self.db:
             self.db.execute(
-                "INSERT INTO sessions(id,started_at,config_hash,scheduled_day,status) "
-                "VALUES (?,?,?,?, 'running')",
-                (session_id, datetime.now(UTC).isoformat(), config_hash, scheduled_day),
+                "INSERT INTO sessions(id,started_at,config_hash,scheduled_day,"
+                "status,refresh_cycle) "
+                "VALUES (?,?,?,?, 'running',?)",
+                (
+                    session_id,
+                    datetime.now(UTC).isoformat(),
+                    config_hash,
+                    scheduled_day,
+                    refresh_cycle,
+                ),
             )
         return session_id
+
+    def attempted_in_cycle(self, chunk_key: str, refresh_cycle: str) -> bool:
+        return (
+            self.db.execute(
+                "SELECT 1 FROM attempts a JOIN sessions s ON a.session_id=s.id "
+                "WHERE a.chunk_key=? AND s.refresh_cycle=? LIMIT 1",
+                (chunk_key, refresh_cycle),
+            ).fetchone()
+            is not None
+        )
 
     def completed(self, chunk_key: str) -> bool:
         return (
@@ -489,6 +520,7 @@ class Journal:
             "ended_at": datetime.now(UTC).isoformat(),
             "config_hash": session["config_hash"],
             "scheduled_day": session["scheduled_day"],
+            "refresh_cycle": session["refresh_cycle"],
             **summary,
             "reconciliation": totals,
             "sources": sources,

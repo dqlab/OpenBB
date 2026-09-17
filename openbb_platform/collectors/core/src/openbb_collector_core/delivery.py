@@ -58,6 +58,9 @@ class DeliveryConfig(BaseModel):
     ssh: SSHConfig | None = None
     remove_local_after_verification: bool = False
     local_retention: str | None = Field(default=None, max_length=32)
+    incremental: bool = False
+    incremental_max_attempts: int = Field(default=500, ge=1, le=10000)
+    incremental_max_records: int = Field(default=100000, ge=1, le=1000000)
     retry_seconds: float = Field(default=60, ge=1, le=86400)
     timeout_seconds: float = Field(default=20, ge=0.1, le=300)
     max_attempt_seconds: float = Field(default=300, ge=1, le=86400)
@@ -106,6 +109,8 @@ class DeliveryConfig(BaseModel):
     def connection_contract(self) -> DeliveryConfig:
         if self.local_retention is not None and self.remove_local_after_verification:
             raise ValueError("Use local_retention instead of remove_local_after_verification")
+        if self.incremental and self.retention_policy() != "forever":
+            raise ValueError("Incremental delivery requires local_retention=forever")
         if (self.transport == "sftp") != (self.ssh is not None):
             raise ValueError("SFTP requires SSH settings; local delivery does not use them")
         if any(ord(c) < 32 for c in self.destination_root):
@@ -410,6 +415,10 @@ class DeliveryStore:
                 target TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT NOT NULL,
                 size INTEGER NOT NULL, verified INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(target,path));
+            CREATE TABLE IF NOT EXISTS incremental_cursors (
+                target TEXT NOT NULL, engine TEXT NOT NULL, session_id TEXT NOT NULL,
+                attempt_cursor INTEGER NOT NULL, observation_cursor INTEGER NOT NULL,
+                PRIMARY KEY(target,engine,session_id));
             CREATE TABLE IF NOT EXISTS staged_sessions (
                 target TEXT NOT NULL, engine TEXT NOT NULL, session_id TEXT NOT NULL,
                 revision TEXT NOT NULL, job_id TEXT NOT NULL,
@@ -525,8 +534,11 @@ class DeliveryStore:
                     "INSERT OR IGNORE INTO files(target,path,sha256,size) VALUES(?,?,?,?)",
                     (self.target, name, sha, size),
                 )
+        is_batch = metadata.get("delivery_kind") == "batch"
+        if is_batch and metadata.get("batch_complete") is not True:
+            raise DeliveryError("incomplete_batch_manifest")
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2 if is_batch else 1,
             "collector_id": self.config.collector_id,
             "destination_id": self.target,
             "engine": engine,
@@ -549,6 +561,20 @@ class DeliveryStore:
                 "INSERT OR IGNORE INTO staged_sessions VALUES(?,?,?,?,?)",
                 (self.target, engine, session_id, metadata["revision"], identifier),
             )
+            if is_batch:
+                cursor = metadata["incremental_cursor"]
+                if any(
+                    type(cursor.get(key)) is not int or cursor[key] < 0
+                    for key in ("attempt", "observation")
+                ):
+                    raise DeliveryError("invalid_batch_cursor")
+                self.db.execute(
+                    "INSERT INTO incremental_cursors VALUES(?,?,?,?,?) "
+                    "ON CONFLICT(target,engine,session_id) DO UPDATE SET "
+                    "attempt_cursor=MAX(attempt_cursor,excluded.attempt_cursor),"
+                    "observation_cursor=MAX(observation_cursor,excluded.observation_cursor)",
+                    (self.target, engine, session_id, cursor["attempt"], cursor["observation"]),
+                )
         atomic_local(local_path(self.root, f"delivery/manifests/{identifier}.json"), encoded)
         return identifier
 
@@ -619,7 +645,8 @@ class DeliveryStore:
     def _send(self, job, deadline: float) -> dict[str, Any]:
         manifest = json.loads(job["manifest"])
         prefix = f"remote_collectors/{self.config.collector_id}"
-        session_prefix = f"{prefix}/sessions/{job['engine']}/{job['session_id']}/{job['id']}"
+        namespace = "batches" if manifest["schema_version"] == 2 else "sessions"
+        session_prefix = f"{prefix}/{namespace}/{job['engine']}/{job['session_id']}/{job['id']}"
         backend = destination(self.config, self.root)
         try:
             for item in manifest["files"]:
@@ -645,7 +672,7 @@ class DeliveryStore:
                     raise DeliveryError("invalid_central_receipt")
                 receipt = json.loads(encoded_receipt)
                 expected = {
-                    "schema_version": 1,
+                    "schema_version": manifest["schema_version"],
                     "manifest_sha256": job["id"],
                     "collector_id": self.config.collector_id,
                     "engine": job["engine"],
@@ -659,7 +686,7 @@ class DeliveryStore:
                     raise DeliveryError("invalid_central_receipt")
             else:
                 receipt = {
-                    "schema_version": 1,
+                    "schema_version": manifest["schema_version"],
                     "manifest_sha256": job["id"],
                     "collector_id": self.config.collector_id,
                     "engine": job["engine"],
@@ -824,7 +851,7 @@ def read_received_session(
     if (
         len(parts) != 6
         or parts[0] != "remote_collectors"
-        or parts[2] != "sessions"
+        or parts[2] not in {"sessions", "batches"}
         or any(not re.fullmatch(_IDENTIFIER, value) for value in (parts[1], parts[3], parts[4]))
         or not re.fullmatch(r"[0-9a-f]{64}\.manifest\.json", parts[5])
     ):
@@ -840,7 +867,7 @@ def read_received_session(
     manifest = json.loads(encoded)
     if (
         not isinstance(manifest, dict)
-        or manifest.get("schema_version") != 1
+        or manifest.get("schema_version") != (2 if parts[2] == "batches" else 1)
         or manifest.get("collector_id") != parts[1]
         or manifest.get("engine") != parts[3]
         or manifest.get("session_id") != parts[4]
@@ -856,7 +883,7 @@ def read_received_session(
         raise DeliveryError("invalid_central_receipt")
     receipt = json.loads(encoded_receipt)
     expected = {
-        "schema_version": 1,
+        "schema_version": manifest["schema_version"],
         "manifest_sha256": identifier,
         "collector_id": parts[1],
         "engine": parts[3],

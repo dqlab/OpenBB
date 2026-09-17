@@ -80,4 +80,7 @@ def test_duckdb_provider_registration():
         "EquityHistorical",
         "EtfHistorical",
         "IndexHistorical",
+        "OptionsChains",
+        "FuturesHistorical",
+        "FuturesCurve",
     }

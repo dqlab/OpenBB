@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+
+from openbb_collector_core.incremental import heartbeat
 
 from .config import CollectorConfig, load_config
 from .delivery import deliver
@@ -54,6 +57,7 @@ class Collector:
             result = deliver(self.config, self.journal)
             for event in result["events"]:
                 self.emit(event)
+            heartbeat(self.config, self.journal, "historical", self.clock())
         except Exception:
             self.emit({"event": "session_delivery_pending", "error": "delivery_queue_error"})
 
@@ -91,6 +95,7 @@ class Collector:
         refresh: bool = False,
         scheduled_day: date | None = None,
         refresh_recent: bool = False,
+        refresh_cycle: str | None = None,
     ) -> dict[str, Any]:
         today = self.clock().astimezone(ZoneInfo(self.config.schedule.timezone)).date()
         as_of = as_of or today
@@ -106,6 +111,7 @@ class Collector:
         session_id = self.journal.start(
             fingerprint,
             scheduled_day.isoformat() if scheduled_day else None,
+            refresh_cycle,
         )
         summary: dict[str, Any] = {
             "completed_chunks": 0,
@@ -124,11 +130,15 @@ class Collector:
                 self.reset_if_due()
                 key = digest([fingerprint, chunk.payload()])
                 collection = self.config.collections[chunk.collection_id]
+                if refresh_cycle and self.journal.attempted_in_cycle(key, refresh_cycle):
+                    summary["resumed_chunks"] += 1
+                    continue
                 recent = (
                     refresh_recent
                     and chunk.end > as_of - timedelta(days=collection.refresh_days)
                     and not (
                         scheduled_day
+                        and not refresh_cycle
                         and self.journal.completed_for_day(key, scheduled_day.isoformat())
                     )
                 )
@@ -146,6 +156,7 @@ class Collector:
                     summary["failed_chunks"] += 1
                     status = "partial"
                 self.journal.export_pending()
+                self.deliver_pending()
             if self.stop.is_set():
                 status = "interrupted"
             self.journal.export_pending()
@@ -266,6 +277,82 @@ class Collector:
                         return False
         return False
 
+    def _repeat_day(self, day: date, now: datetime) -> None:
+        schedule = self.config.schedule
+        fingerprint = self.config.fingerprint()
+        saved = self.journal.get_meta("repeat_cycle")
+        state = json.loads(saved) if saved else {}
+        if state.get("day") != day.isoformat() or state.get("config_hash") != fingerprint:
+            state = {}
+        local = now.astimezone(ZoneInfo(schedule.timezone))
+        if state.get("finished_at"):
+            if schedule.repeat_until and local.time() >= schedule.repeat_until:
+                return
+            elapsed = (now - datetime.fromisoformat(state["finished_at"])).total_seconds()
+            if elapsed < schedule.repeat_seconds:
+                return
+            state = {}
+        if not state:
+            state = {
+                "id": uuid.uuid4().hex,
+                "day": day.isoformat(),
+                "config_hash": fingerprint,
+                "started_at": now.astimezone(UTC).isoformat(),
+                "failed_chunks": 0,
+            }
+        if state.get("last_attempt_at"):
+            elapsed = (now - datetime.fromisoformat(state["last_attempt_at"])).total_seconds()
+            if elapsed < schedule.retry_seconds:
+                return
+        state["last_attempt_at"] = now.astimezone(UTC).isoformat()
+        self.journal.set_meta("repeat_cycle", json.dumps(state))
+        report = self.collect(
+            as_of=day + timedelta(days=1),
+            scheduled_day=day,
+            refresh_recent=True,
+            refresh_cycle=state["id"],
+        )
+        state["failed_chunks"] += report["failed_chunks"]
+        if not report["deferred"] and report["status"] in {"complete", "partial"}:
+            state["finished_at"] = self.clock().astimezone(UTC).isoformat()
+            state["outcome"] = "partial" if state["failed_chunks"] else "complete"
+            self.emit({"event": "refresh_cycle_finished", **state})
+        self.journal.set_meta("repeat_cycle", json.dumps(state))
+
+    def run_due(self, now: datetime) -> None:
+        """Run due daily jobs or resume one durable bounded intraday refresh cycle."""
+        for day in due_days(self.config.schedule, now):
+            fingerprint = self.config.fingerprint()
+            if (
+                self.config.schedule.repeat_seconds is not None
+                and day == now.astimezone(ZoneInfo(self.config.schedule.timezone)).date()
+            ):
+                self._repeat_day(day, now)
+                if self.stop.is_set():
+                    break
+                continue
+            token = f"{fingerprint}:{day.isoformat()}"
+            if self.journal.scheduled_complete(fingerprint, day.isoformat()):
+                continue
+            if time.monotonic() - self._last_scheduled.get(token, -float("inf")) < (
+                self.config.schedule.retry_seconds
+            ):
+                continue
+            self._last_scheduled[token] = time.monotonic()
+            report = self.collect(
+                as_of=day + timedelta(days=int(self.config.schedule.include_current_session)),
+                scheduled_day=day,
+                refresh_recent=True,
+            )
+            if report["status"] != "complete":
+                self.emit({"event": "scheduled_session_incomplete", "day": str(day)})
+            if self.stop.is_set():
+                break
+        valid = {
+            f"{self.config.fingerprint()}:{d}" for d in due_days(self.config.schedule, self.clock())
+        }
+        self._last_scheduled = {k: v for k, v in self._last_scheduled.items() if k in valid}
+
     def run(self, max_seconds: float | None = None) -> None:
         if max_seconds is not None and max_seconds <= 0:
             raise ValueError("max_seconds must be positive")
@@ -279,39 +366,7 @@ class Collector:
                     self.reset_if_due()
                     self.reload_if_pending()
                     self.deliver_pending()
-                    now = self.clock()
-                    for day in due_days(self.config.schedule, now):
-                        fingerprint = self.config.fingerprint()
-                        token = f"{fingerprint}:{day.isoformat()}"
-                        if self.journal.scheduled_complete(fingerprint, day.isoformat()):
-                            continue
-                        if time.monotonic() - self._last_scheduled.get(token, -float("inf")) < (
-                            self.config.schedule.retry_seconds
-                        ):
-                            continue
-                        self._last_scheduled[token] = time.monotonic()
-                        # as_of is exclusive: the morning schedule collects completed prior days.
-                        report = self.collect(
-                            as_of=day
-                            + timedelta(days=int(self.config.schedule.include_current_session)),
-                            scheduled_day=day,
-                            refresh_recent=True,
-                        )
-                        if report["status"] != "complete":
-                            self.emit({"event": "scheduled_session_incomplete", "day": str(day)})
-                        if self.stop.is_set():
-                            break
-                    # Keep scheduler bookkeeping bounded across continuous operation.
-                    valid = {
-                        f"{self.config.fingerprint()}:{d}"
-                        for d in due_days(
-                            self.config.schedule,
-                            self.clock(),
-                        )
-                    }
-                    self._last_scheduled = {
-                        k: v for k, v in self._last_scheduled.items() if k in valid
-                    }
+                    self.run_due(self.clock())
                 except Exception:
                     self.emit({"event": "scheduler_error", "code": "runtime_or_reload_failed"})
                     if self.stop.wait(self.config.schedule.retry_seconds):

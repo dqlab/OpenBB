@@ -1,13 +1,23 @@
 ﻿---
 name: develop_extension
-description: This is a complete guide for creating a new OpenBB Platform extension from scratch. Follow every phase in order. When the user says "build me an application that does X", use this guide to scaffold, implement, install, and verify the extension.
+description: Create or modify an OpenBB Platform extension, provider, router, or OBBject accessor. Use when the requested integration targets OpenBB; generic application-building requests do not trigger this skill.
 ---
 
 # Build an OpenBB Platform Extension
 
-This is a complete guide for creating a new OpenBB Platform extension from scratch.
-Follow every phase in order. When the user says "build me an application that does X",
-use this guide to scaffold, implement, install, and verify the extension.
+Choose the sections that match the requested OpenBB change:
+
+- **New extension:** scaffold only when no suitable project exists, then implement
+  the required provider/router pieces, install, and verify the exposed interface.
+- **Existing extension:** inspect its package, registration, and affected tests;
+  skip scaffolding and preserve existing structure and entry points.
+- **Provider addition or fix:** use the QueryParams/Data/Fetcher and registration
+  sections. Verify provider semantics and normalization with bounded fixtures.
+
+Read only the relevant sections below. Rebuild static Python assets when the
+public schema or registrations change; API-only and internal-logic changes follow
+the narrower guidance in the build section. After affected checks pass, stop
+unless a new change or unresolved issue justifies more validation.
 
 ---
 
@@ -49,7 +59,7 @@ openbb-cookiecutter \
 ```
 
 Add more `--extra-context KEY=VALUE` pairs to override individual variables.
-Use `-f` to overwrite an existing directory.
+The `-f` option overwrites an existing directory; use it only when replacing that scaffold is part of the request. Existing-extension work skips scaffolding.
 
 ---
 
@@ -593,25 +603,15 @@ test environment setup.
 
 ---
 
-## Workflow Summary
+## Completion
 
-When a user asks "Build me an application that does X":
+For a new extension, complete the requested data/model/router implementation,
+required entry points and dependencies, installation, and relevant interface
+checks. Remove generated examples only when they have been replaced or are
+outside the requested extension's scope.
 
-1. **Analyze** — Determine what data sources are needed, what endpoints to expose,
-   and whether to use standard models or custom schemas.
-2. **Scaffold** — Run `openbb-cookiecutter` with a meaningful `project_name`.
-3. **Delete examples** — Remove `example.py` and `ohlc_example.py` from the models
-   directory. Clean up the example router commands.
-4. **Implement models** — Create `QueryParams` + `Data` + `Fetcher` classes for each
-   data source in `providers/<name>/models/`.
-5. **Register fetchers** — Update `providers/<name>/__init__.py` with the `fetcher_dict`.
-6. **Implement router** — Create `@router.command(model="...")` endpoints in
-   `routers/<name>.py`.
-7. **Update entry points** — Ensure `pyproject.toml` entry points match your actual
-   module paths and variable names.
-8. **Add dependencies** — Add any third-party packages to `[tool.poetry.dependencies]`
-   in `pyproject.toml`.
-9. **Install** — Run `pip install -e ".[dev]"` from the project root.
-10. **Build** — Run `openbb-build` to regenerate static assets for the Python
-    interface. Skip this step if only using the API server.
-11. **Test** — Verify the commands work, then write tests.
+For an existing extension, change and test the affected behavior without
+recreating the project. A focused provider change should use its tests and
+saved/synthetic provider responses; credentialed live checks are separate.
+Report the exposed commands, verification results, and unavailable integrations.
+Do not require a full reinstall or static build for a documentation-only change.

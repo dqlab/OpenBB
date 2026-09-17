@@ -131,7 +131,22 @@ class Journal:
                 CREATE INDEX IF NOT EXISTS observations_pending
                     ON observations(exported, export_batch, seq);
                 CREATE INDEX IF NOT EXISTS observations_session ON observations(session_id);
+                CREATE INDEX IF NOT EXISTS observations_export_batch
+                    ON observations(export_batch, seq);
+                CREATE INDEX IF NOT EXISTS observations_session_exported
+                    ON observations(session_id, exported);
+                CREATE INDEX IF NOT EXISTS observations_collection_available
+                    ON observations(collection_id, available_at);
                 CREATE INDEX IF NOT EXISTS polls_session ON polls(session_id);
+                CREATE TABLE IF NOT EXISTS quote_retries (
+                    poll_id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
+                    collection_id TEXT NOT NULL, instrument_id TEXT NOT NULL, slot INTEGER NOT NULL,
+                    first_attempted_at TEXT NOT NULL, next_attempt_at TEXT NOT NULL,
+                    rounds INTEGER NOT NULL, attempts TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS quote_retries_instrument
+                    ON quote_retries(session_id, instrument_id);
+                CREATE INDEX IF NOT EXISTS quote_retries_due ON quote_retries(next_attempt_at);
             """)
             previous_format = self.get_meta("format")
             if previous_format and previous_format != config.format:
@@ -218,6 +233,77 @@ class Journal:
             is not None
         )
 
+    def retry_state(self, poll_id: str) -> dict[str, Any] | None:
+        row = self.db.execute("SELECT * FROM quote_retries WHERE poll_id=?", (poll_id,)).fetchone()
+        return dict(row) if row else None
+
+    def has_pending_retry(self, session_id: str, instrument_id: str) -> bool:
+        return (
+            self.db.execute(
+                "SELECT 1 FROM quote_retries WHERE session_id=? AND instrument_id=? LIMIT 1",
+                (session_id, instrument_id),
+            ).fetchone()
+            is not None
+        )
+
+    def defer_retry(
+        self,
+        *,
+        poll_id: str,
+        session_id: str,
+        collection_id: str,
+        instrument_id: str,
+        slot: int,
+        first_attempted_at: datetime,
+        next_attempt_at: datetime,
+        rounds: int,
+        attempts: list[dict[str, Any]],
+    ) -> None:
+        # A pending poll has no accepted observations. Keep its complete failed
+        # attempts durable until one final poll can be committed atomically.
+        with self.db:
+            self.db.execute(
+                "INSERT INTO quote_retries VALUES (?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(poll_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at,"
+                "rounds=excluded.rounds,attempts=excluded.attempts",
+                (
+                    poll_id,
+                    session_id,
+                    collection_id,
+                    instrument_id,
+                    slot,
+                    first_attempted_at.isoformat(),
+                    next_attempt_at.isoformat(),
+                    rounds,
+                    json_text(attempts),
+                ),
+            )
+
+    def due_retries(self, now: datetime, config_hash: str, limit: int = 10) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.db.execute(
+                "SELECT q.*,s.config_hash,s.end FROM quote_retries q "
+                "JOIN sessions s ON s.id=q.session_id "
+                "WHERE q.next_attempt_at<=? OR s.end<=? OR s.config_hash<>? "
+                "ORDER BY q.next_attempt_at LIMIT ?",
+                (now.isoformat(), now.isoformat(), config_hash, limit),
+            )
+        ]
+
+    def finish_retry(self, state: dict[str, Any]) -> None:
+        self.commit_poll(
+            poll_id=state["poll_id"],
+            session_id=state["session_id"],
+            instrument_id=state["instrument_id"],
+            slot=state["slot"],
+            attempted_at=datetime.fromisoformat(state["first_attempted_at"]),
+            source_id=None,
+            fallback=False,
+            attempts=json.loads(state["attempts"]),
+            records=[],
+        )
+
     def archive(self, payload: dict[str, Any]) -> str:
         raw_hash = digest(payload)
         atomic_json(
@@ -260,6 +346,7 @@ class Journal:
         accepted = duplicates = 0
         with self.db:
             if self.db.execute("SELECT 1 FROM polls WHERE id=?", (poll_id,)).fetchone():
+                self.db.execute("DELETE FROM quote_retries WHERE poll_id=?", (poll_id,))
                 return
             for record in records:
                 inserted = self.db.execute(
@@ -306,6 +393,11 @@ class Journal:
                     rejected,
                     json_text(attempts),
                 ),
+            )
+            self.db.execute("DELETE FROM quote_retries WHERE poll_id=?", (poll_id,))
+            self.db.execute(
+                "UPDATE sessions SET report_pending=1 WHERE id=? AND status<>'running'",
+                (session_id,),
             )
 
     def _next_batch(self) -> sqlite3.Row | None:

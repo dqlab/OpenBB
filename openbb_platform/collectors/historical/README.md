@@ -77,3 +77,24 @@ while retaining the acquisition journal. Use `delivery.local_retention` to choos
 immediate cleanup after verification, a duration such as `1d`, `1w`, or `1mo`, or
 `forever`. See [session delivery](../SESSION_DELIVERY.md)
 for configuration and the `deliver` / `delivery-status` commands.
+
+## Repeated intraday refresh (0.1.1)
+
+Set `schedule.include_current_session: true` and `schedule.repeat_seconds: 900`
+to refresh the recent part of a current session after each completed pass. The
+optional `repeat_until` wall time must follow `schedule.at` and stops new cycles
+after that time; an already-started cycle finishes. `repeat_seconds` measures the
+wait after a pass, so provider pacing and the instrument count can make observed
+cadence longer. Daily scheduling remains the default.
+
+A durable cycle ID records which chunks were attempted. Partial passes respect
+`max_chunks_per_session`, resume after `retry_seconds` and across process restarts,
+and do not let persistent no-data responses starve later instruments. Failed
+chunks remain failed in reconciliation and retry during the next cycle. Existing
+bars are idempotent and corrections retain their first-observed availability.
+The session journal receives an additive nullable `refresh_cycle` column; old
+observations, checkpoints, and date labels are retained.
+
+Historical journals index session observations and export-batch ownership so
+central archive delivery does not repeatedly scan the full observations table.
+The additive indexes are created automatically when a journal opens.

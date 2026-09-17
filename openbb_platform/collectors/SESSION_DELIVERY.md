@@ -261,3 +261,42 @@ should process only committed manifests, retain lineage to their manifest hashes
 and apply the data platform's normal ingestion and publication gates. The platform's
 existing rsync pull workflow remains separate; it does not automatically ingest
 this session inbox format.
+
+## Incremental delivery during active sessions
+
+Collector core 0.1.1, live 0.1.4 and historical 0.1.3 support completed-attempt batches:
+
+```yaml
+delivery:
+  collector_id: quotes-edge-01
+  transport: local
+  destination_root: /var/lib/dq-quant-invest-data/bronze/market-data
+  local_retention: forever
+  incremental: true
+  incremental_max_attempts: 500
+  incremental_max_records: 100000
+```
+
+A durable journal cursor advances with the staged outbox entry. Only completed
+attempts are selected, and a response is not split to satisfy the record bound.
+An oversized response fails explicitly. Existing full-session delivery remains;
+its overlap with batches must be deduplicated by original observation identity.
+Local exports, raw files and journals remain in place. Incremental delivery requires
+`local_retention: forever` and rejects cleanup policies.
+
+Batch manifests and receipts use schema version 2 under
+`batches/<engine>/<session_id>/`, alongside the version-1 `sessions/` namespace.
+The metadata declares `delivery_kind: batch`, `batch_complete`, exact observation
+and attempt counts, and cursor bounds. Do not treat a batch as a closed session.
+`read_received_session` validates either namespace in core 0.1.1.
+
+A verified mutable `status/heartbeat.json` is updated at most every 30 seconds,
+reporting per-collection observation watermarks and session state. Its timestamp
+is a collector status timestamp, not market quote time or central publication.
+For SFTP collector transport, atomic heartbeat replacement requires the server's
+POSIX rename extension. The deployed collectors currently use local transport;
+the central store's separate SFTP backup adapter does not change their local paths.
+
+The data platform's `dq-data-market sync` ingests these verified receipts and
+publishes versioned market files. See [the database design](MARKET_DATA_DATABASE_DESIGN.md)
+and the data owner's `docs/market-store.md` for availability and query contracts.

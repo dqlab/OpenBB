@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openbb-dq-quant-data"
+version = "0.1.5"
+description = "DQ canonical data provider and governed market-store routers for OpenBB."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = ["openbb-core>=1.6.13,<2", "pydantic>=2.7"]
+
+[project.optional-dependencies]
+local = ["dq-quant-invest-data>=0.1.5,<0.2"]
+dev = ["pytest>=8", "ruff>=0.9"]
+
+[project.urls]
+Repository = "https://github.com/dqlab/OpenBB"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openbb_dq_quant_data"]
+
+[project.entry-points.openbb_provider_extension]
+dq_quant_data = "openbb_dq_quant_data:dq_quant_data_provider"
+
+[project.entry-points.openbb_core_extension]
+dq_data = "openbb_dq_quant_data.router:router"
+dq_market = "openbb_dq_quant_data.market_router:router"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

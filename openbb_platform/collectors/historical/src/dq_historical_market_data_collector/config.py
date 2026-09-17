@@ -147,6 +147,9 @@ class Calendar(Hours):
     weekdays: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4], min_length=1)
     holidays: set[date] = Field(default_factory=set)
     overrides: dict[date, Hours | None] = Field(default_factory=dict)
+    # TRADES bars can be sparse or still forming during the current session.
+    # Session filtering does not imply one published bar for every minute.
+    require_all_bars: bool = True
 
     @field_validator("weekdays")
     @classmethod
@@ -211,10 +214,23 @@ class Schedule(Model):
     heartbeat_seconds: float = Field(default=1, ge=0.1, le=60)
     reset: Literal["never", "weekly", "monthly"] = "weekly"
     include_current_session: bool = False
+    repeat_seconds: float | None = Field(default=None, ge=60, le=86400)
+    repeat_until: time | None = None
 
     _tz = field_validator("timezone")(valid_timezone)
     _days = field_validator("weekdays")(Calendar.weekdays_valid.__func__)
-    _at = field_validator("at")(Hours.wall_time.__func__)
+    _at = field_validator("at", "repeat_until")(
+        lambda value: Hours.wall_time(value) if value else value
+    )
+
+    @model_validator(mode="after")
+    def repeat_policy(self) -> Schedule:
+        if self.repeat_seconds is not None and not self.include_current_session:
+            raise ValueError("Repeated intraday refresh requires include_current_session")
+        if self.repeat_until is not None:
+            if self.repeat_seconds is None or self.repeat_until <= self.at:
+                raise ValueError("repeat_until requires a repeat interval and must follow at")
+        return self
 
 
 class CollectorConfig(Model):
@@ -262,6 +278,8 @@ class CollectorConfig(Model):
         for collection in payload["collections"].values():
             if collection["calendar"]:
                 collection["calendar"]["holidays"].sort()
+                if collection["calendar"]["require_all_bars"]:
+                    collection["calendar"].pop("require_all_bars")
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 

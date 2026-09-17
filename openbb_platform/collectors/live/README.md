@@ -91,3 +91,31 @@ while retaining the acquisition journal. Use `delivery.local_retention` to choos
 immediate cleanup after verification, a duration such as `1d`, `1w`, or `1mo`, or
 `forever`. See [session delivery](../SESSION_DELIVERY.md)
 for configuration and the `deliver` / `delivery-status` commands.
+
+## Full option-chain snapshots (0.1.1)
+
+An `OptionsChains` source can declare `record_type: option_chain`, with explicit
+`option_chain_roots: [SPX, SPXW]`. The configured instrument identifies the
+underlying. Where a provider uses a trading root in its underlying column, declare
+`underlying_symbol_map: {SPXW: SPX}` explicitly. Require `contract_symbol`,
+`underlying_symbol`, `expiration`, `strike`, and `option_type`, in addition to the
+required quote fields. Each row's OCC symbol is checked against its date, strike,
+right, allowed root, and mapped underlying. Accepted records retain the
+configured instrument ID, their own option symbol and asset type, the canonical
+underlying and the original provider underlying label. Invalid contracts and
+crossed quotes are quarantined per row. Raw provider records are preserved.
+
+The standard model serializes chains into row records. Full chains require
+explicit budgets up to 100,000 rows and 50 MB; there is no truncation. Unknown
+source event times and actual feed types remain unknown. A delayed public
+endpoint can be documented in `entitlement_reference` without claiming a
+gateway-confirmed feed type.
+
+Long instrument sweeps flush pending output and update the journal heartbeat after
+polls at the configured heartbeat interval. A single provider request or large
+chain conversion can exceed that interval; committed observations remain durable.
+
+Use an explicit source `asset_type_map` when a provider uses a different taxonomy,
+for example `{EQUITY: stock, ETF: etf}` for Yahoo quote responses. Unmapped or
+incompatible security types remain rejected, and mapping changes alter observation
+identity. Provider responses remain unchanged in raw archives.

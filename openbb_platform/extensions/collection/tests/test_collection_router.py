@@ -9,13 +9,13 @@ import yaml
 
 pytest.importorskip("openbb_core")
 
+from dq_historical_market_data_collector.cli import main  # noqa: E402
+from dq_historical_market_data_collector.config import load_config  # noqa: E402
+from dq_historical_market_data_collector.runtime import Collector  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from openbb_core.app.model.abstract.error import OpenBBError  # noqa: E402
 
-from dq_historical_market_data_collector.cli import main  # noqa: E402
-from dq_historical_market_data_collector.config import load_config  # noqa: E402
-from dq_historical_market_data_collector.runtime import Collector  # noqa: E402
 from openbb_collection import collection_router as commands  # noqa: E402
 
 
