@@ -73,5 +73,10 @@ class DuckDBOptionsChainsFetcher(Fetcher[DuckDBOptionsChainsQueryParams, DuckDBO
                     dateType.fromisoformat(str(row["expiration"])[:10])
                     - dateType.fromisoformat(str(row["eod_date"])[:10])
                 ).days
+            # read_derivatives filters on the stored "underlying" column but returns
+            # raw column names; surface it through the standard field so the symbol
+            # round-trips to the DataFrame instead of being dropped as an extra.
+            if row.get("underlying_symbol") is None and row.get("underlying") is not None:
+                row["underlying_symbol"] = row["underlying"]
         columns = set(DuckDBOptionsChainsData.model_fields) | {key for row in data for key in row}
         return DuckDBOptionsChainsData.model_validate({col: [row.get(col) for row in data] for col in columns})

@@ -139,7 +139,7 @@ def test_installed_derivatives_commands(market):
 
 
 def test_options_missing_identifiers(market):
-    """Filter through the source underlying while leaving absent identifiers null."""
+    """Surface the source underlying through the standard field when it is renamed."""
     with duckdb.connect(market) as con:
         con.execute("""
             CREATE VIEW local_option_chain AS
@@ -149,9 +149,10 @@ def test_options_missing_identifiers(market):
         """)
     chain = fetch(Options, market, symbol="SPX", table="local_option_chain")
     assert chain.contract_symbol == [None] * 3
-    assert chain.underlying_symbol == [None] * 3
+    assert chain.underlying_symbol == ["SPX"] * 3
     assert chain.underlying == ["SPX"] * 3
     assert len(chain.dataframe) == 3
+    assert "underlying_symbol" in chain.dataframe.columns
     assert chain.bid == [12, None, 20]
 
 
