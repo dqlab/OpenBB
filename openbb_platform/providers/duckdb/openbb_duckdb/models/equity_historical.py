@@ -34,9 +34,11 @@ class DuckDBEquityHistoricalQueryParams(EquityHistoricalQueryParams):
         description="Qualified DuckDB table or view containing equity prices.",
     )
     interval: Literal["1d"] = Field(default="1d", description="Daily bars; stored sessions are not resampled.")
-    adjustment: Literal["splits_only", "splits_and_dividends"] = Field(
+    adjustment: Literal["splits_only", "splits_and_dividends", "unadjusted", "forward", "backward"] = Field(
         default="splits_only",
-        description="Select stored split-only or split-and-dividend-adjusted OHLC.",
+        description=(
+            "Select stored split-only, total-adjusted, unadjusted, forward or backward OHLC; source basis must match."
+        ),
     )
     include_actions: bool = Field(default=True, description="Include stored dividends and split ratios.")
     extended_hours: Literal[False] = Field(default=False, description="Daily regular-session bars only.")
@@ -55,6 +57,12 @@ class DuckDBEquityHistoricalData(EquityHistoricalData):
         default=None,
         description=DATA_DESCRIPTIONS.get("symbol", ""),
     )
+    open: float | None = Field(default=None, description="Source opening price; may be absent during a suspension.")
+    high: float | None = Field(default=None, description="Source high price; may be absent during a suspension.")
+    low: float | None = Field(default=None, description="Source low price; may be absent during a suspension.")
+    close: float | None = Field(default=None, description="Source close price; may be absent during a suspension.")
+    prev_close: float | None = Field(default=None, description="Previous close in the selected source price basis.")
+    trade_status: Literal[0, 1] | None = Field(default=None, description="Source flag: 0 suspended, 1 trading.")
     dividend: float | None = Field(
         default=None,
         description="Stored dividend amount, with source adjustment basis preserved.",
@@ -126,13 +134,33 @@ class DuckDBEquityHistoricalFetcher(
             if key in seen:
                 raise OpenBBError("Daily relation has duplicate symbol/date rows; select a single revision upstream.")
             seen.add(key)
-            if query.adjustment == "splits_and_dividends":
+            if item.get("trade_status") != 0 and any(item.get(f) is None for f in ("open", "high", "low", "close")):
+                raise OpenBBError("Missing OHLC without an explicit source suspension flag.")
+            item["prev_close"] = item.get("prev_close", item.get("preclose"))
+            base = item.get("base_adjustment")
+            if query.adjustment == "unadjusted" and base != "unadjusted":
+                raise OpenBBError("The stored relation does not declare unadjusted source prices.")
+            if query.adjustment == "splits_only" and base not in {None, "splits_only"}:
+                raise OpenBBError("The stored relation is not split-only; choose its explicit source adjustment.")
+            if query.adjustment in {"splits_and_dividends", "forward", "backward"}:
+                prefix = "adjusted" if query.adjustment == "splits_and_dividends" else query.adjustment
                 for field in ["open", "high", "low", "close"]:
-                    value = item.get("adjusted_" + field, item.get("adj_" + field))
-                    if value is None or not isfinite(float(value)) or float(value) <= 0:
+                    column = prefix + "_" + field
+                    value = item.get(column)
+                    if prefix == "adjusted":
+                        value = item.get(column, item.get("adj_" + field))
+                    suspended_missing = (
+                        prefix in {"forward", "backward"}
+                        and column in item
+                        and item.get("trade_status") == 0
+                        and value is None
+                    )
+                    if not suspended_missing and (value is None or not isfinite(float(value)) or float(value) <= 0):
                         raise OpenBBError("Requested adjusted OHLC is unavailable; collect adjusted daily prices first.")
                     item[field] = value
-                item["vwap"] = None  # Stored ordinary VWAP cannot be labeled dividend-adjusted.
+                if prefix in {"forward", "backward"}:
+                    item["prev_close"] = item.get(prefix + "_preclose")
+                item["vwap"] = None  # A stored ordinary VWAP cannot inherit a different price adjustment.
             item["price_adjustment"] = query.adjustment
             if not query.include_actions:
                 for name in [

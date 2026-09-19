@@ -217,3 +217,14 @@ FROM futures_historical;
 
 Validation uses synthetic local snapshots; vendor ingestion, snapshot completeness
 and credentialed/live market feeds are outside this provider's offline checks.
+
+### BaoStock A-share prices
+
+Version 1.2.0 adds explicit `adjustment="unadjusted"`, `"forward"`, and `"backward"`
+for stored BaoStock series. The data platform exposes these through
+`table="a_share.equity_historical"` with symbols such as `SH.600000` and
+`SZ.000001`. Unadjusted reads require the relation's `base_adjustment` declaration;
+forward/backward reads require the corresponding saved OHLC columns. Missing
+prices remain null only for source-marked suspensions. Existing U.S. split-only
+and split-and-dividend modes retain their contracts. BaoStock adjustment factors
+are not inferred cash dividends or split events.
