@@ -496,8 +496,29 @@ class ImportDefinition:
 
         hint_type_list: list = []
 
+        def add_parameter_types(annotation):
+            # Provider parameters are injected as dataclasses. Their fields are
+            # flattened into the generated signature, so nested body model types
+            # need imports too (not just the dependency dataclass itself).
+            fields = getattr(annotation, "__dataclass_fields__", None)
+            if fields is not None:
+                for field in fields.values():
+                    add_parameter_types(field.type)
+            elif get_origin(annotation) is Annotated:
+                add_parameter_types(get_args(annotation)[0])
+            elif get_origin(annotation) is not None:
+                for argument in get_args(annotation):
+                    if isinstance(argument, type) or get_origin(argument) is not None:
+                        add_parameter_types(argument)
+            elif isinstance(annotation, type) and hasattr(annotation, "model_fields"):
+                # Scalar annotations already use the builder's qualified names.
+                # Importing datetime.datetime here would shadow the datetime
+                # module used by generated datetime.date annotations.
+                hint_type_list.append(annotation)
+
         for parameter in parameter_map.values():
             hint_type_list.append(parameter.annotation)
+            add_parameter_types(parameter.annotation)
 
             # Extract dependencies from Annotated metadata
             if isinstance(parameter.annotation, _AnnotatedAlias):
@@ -506,6 +527,7 @@ class ImportDefinition:
                     if hasattr(meta, "dependency"):
                         # Add the dependency function to hint_type_list
                         hint_type_list.append(meta.dependency)
+                        add_parameter_types(meta.dependency)
 
         if return_type:
             hint_type = (

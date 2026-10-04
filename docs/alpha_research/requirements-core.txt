@@ -1,0 +1,9 @@
+-c constraints-py312.txt
+-e ./openbb_platform/core
+-e ./openbb_platform/extensions/alpha
+-e ./openbb_platform/extensions/research
+-e ./openbb_platform/providers/alpha_reference
+-e ./openbb_platform/providers/polars_ta
+-e ./openbb_platform/providers/alphalens
+pytest
+httpx

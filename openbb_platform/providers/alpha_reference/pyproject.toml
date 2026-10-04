@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openbb-alpha-reference"
+version = "0.1.0"
+description = "OpenBB alpha research alpha_reference adapter."
+requires-python = ">=3.11,<3.14"
+dependencies = ["openbb-alpha==0.1.0"]
+
+[project.entry-points.openbb_provider_extension]
+alpha_reference = "openbb_alpha_reference:provider"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openbb_alpha_reference"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

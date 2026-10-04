@@ -1,0 +1,37 @@
+[
+  {
+    "file": "openbb_alpha-0.1.0-py3-none-any.whl",
+    "sha256": "9f1cb612cb946d1fb0ec350b9b2c48d0bf94f568e219a0dd8dc1f63b9ef20f60",
+    "bytes": 11067
+  },
+  {
+    "file": "openbb_alpha_reference-0.1.0-py3-none-any.whl",
+    "sha256": "da155ba04d36dec663e56e45b0f236945a6dabfbcadb2c737509409e2b748ab3",
+    "bytes": 3699
+  },
+  {
+    "file": "openbb_alphalens-0.1.0-py3-none-any.whl",
+    "sha256": "593424ce6132e1f8d2cba29357fec27ebd3920456cd56256162603b33f012c01",
+    "bytes": 4777
+  },
+  {
+    "file": "openbb_bt-0.1.0-py3-none-any.whl",
+    "sha256": "7dc57c6dfda8c10f7cc4fcae6de26ba3161fec351e5c0e2bc31760ae17551aa2",
+    "bytes": 4240
+  },
+  {
+    "file": "openbb_polars_ta-0.1.0-py3-none-any.whl",
+    "sha256": "eb74a86a36d79d924ff18672b4387c126a119201ac6512c8a30626578bee77a2",
+    "bytes": 3601
+  },
+  {
+    "file": "openbb_qlib-0.1.0-py3-none-any.whl",
+    "sha256": "dcf270520db57a9b7ce02de4cd4ad13b7c4f0c23f605507043b65dcf8a904803",
+    "bytes": 3461
+  },
+  {
+    "file": "openbb_research-0.1.0-py3-none-any.whl",
+    "sha256": "3b756bb82ec24c09b65ae427701cbc766bad9bbd62aa5db2b670b895f5e478cd",
+    "bytes": 6669
+  }
+]

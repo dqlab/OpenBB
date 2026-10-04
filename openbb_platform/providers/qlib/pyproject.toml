@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openbb-qlib"
+version = "0.1.0"
+description = "Separately installable qlib research workflow adapter."
+requires-python = ">=3.11,<3.14"
+dependencies = ["openbb-research==0.1.0", "pyqlib==0.9.7"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["openbb_qlib"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

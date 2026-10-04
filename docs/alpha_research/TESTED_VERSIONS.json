@@ -1,0 +1,28 @@
+{
+  "python": "3.12.3",
+  "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "packages": {
+    "openbb-core": "1.6.13",
+    "openbb-alpha": "0.1.0",
+    "openbb-research": "0.1.0",
+    "openbb-alpha-reference": "0.1.0",
+    "openbb-polars-ta": "0.1.0",
+    "openbb-alphalens": "0.1.0",
+    "openbb-qlib": "0.1.0",
+    "openbb-bt": "0.1.0",
+    "polars-ta": "0.5.17",
+    "polars": "1.44.2",
+    "alphalens-reloaded": "0.4.6",
+    "pyqlib": "0.9.7",
+    "bt": "1.3.0",
+    "pandas": "2.3.3",
+    "pyarrow": "25.0.1",
+    "numpy": "2.5.3",
+    "fastapi": "0.136.3",
+    "pydantic": "2.13.5",
+    "openbb-dq-quant-data": "0.1.5",
+    "openbb-duckdb": "1.2.1",
+    "openbb-stooq": "1.0.0",
+    "openbb-collection": "0.1.0"
+  }
+}

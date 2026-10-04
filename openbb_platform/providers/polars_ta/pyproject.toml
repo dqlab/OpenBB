@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openbb-polars-ta"
+version = "0.1.0"
+description = "OpenBB alpha research polars_ta adapter."
+requires-python = ">=3.11,<3.14"
+dependencies = ["openbb-alpha==0.1.0", "polars-ta>=0.5.17,<0.6", "polars>=1.30,<2"]
+
+[project.entry-points.openbb_provider_extension]
+polars_ta = "openbb_polars_ta:provider"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openbb_polars_ta"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

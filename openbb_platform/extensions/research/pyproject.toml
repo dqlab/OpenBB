@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openbb-research"
+version = "0.1.0"
+description = "Reproducible bounded OpenBB alpha workflows and self-contained reports."
+requires-python = ">=3.11,<3.14"
+dependencies = ["openbb-alpha==0.1.0"]
+
+[project.entry-points.openbb_core_extension]
+research = "openbb_research.router:router"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openbb_research"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,0 +1,32 @@
+[
+  {
+    "provider": "alpha_reference",
+    "engine_version": "0.1.0",
+    "manifest_id": "596c44404edad6d8cad54877bfe420edbab55a4e8673ca8932eb7b9d79d19b4e",
+    "report_artifact_id": "3e8f98e6970a7bffc87220c4cb4b29cfd772d0b57f950de123fa03ddf1d3f99a",
+    "report": "/tmp/openbb-alpha-demo-final/alpha_reference.html",
+    "dataset_id": "a3b2a0f56ea0c0ac3d3872928f4088b08bc7f17636680210c773682737006551",
+    "input_rows": 3200,
+    "input_columns": 13,
+    "factor_rows": 19200,
+    "factor_columns": 11,
+    "pipeline_wall_seconds": 17.15099652400022,
+    "process_peak_rss_kib": 566416,
+    "rss_scope": "cumulative process high-water mark, includes all prior stages"
+  },
+  {
+    "provider": "polars_ta",
+    "engine_version": "polars-ta=0.5.17;polars=1.44.2",
+    "manifest_id": "4dc1db90b66f64b735387b2b026208c4e02b3a5120edabc1628bbcc76683b21b",
+    "report_artifact_id": "487338a1c6149b2739003d1d2ccb19987330d6aa55fa971aa048b09126a1666d",
+    "report": "/tmp/openbb-alpha-demo-final/polars_ta.html",
+    "dataset_id": "a3b2a0f56ea0c0ac3d3872928f4088b08bc7f17636680210c773682737006551",
+    "input_rows": 3200,
+    "input_columns": 13,
+    "factor_rows": 19200,
+    "factor_columns": 11,
+    "pipeline_wall_seconds": 14.082506078999359,
+    "process_peak_rss_kib": 727508,
+    "rss_scope": "cumulative process high-water mark, includes all prior stages"
+  }
+]

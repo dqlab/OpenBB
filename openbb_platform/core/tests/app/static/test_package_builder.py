@@ -25,6 +25,42 @@ from openbb_core.env import Env
 from pydantic import BaseModel, Field
 
 
+def test_provider_dataclass_body_model_import():
+    """Flattened provider body models must be importable in generated Python."""
+    from dataclasses import make_dataclass
+    from types import SimpleNamespace
+
+    from openbb_core.provider.standard_models.alpha_research import ComputeRequest
+
+    parameters = make_dataclass("TypedProviderParams", [("request", ComputeRequest)])
+
+    def endpoint(standard: Annotated[parameters, Depends(parameters)]) -> dict:
+        return {}
+
+    hints = ImportDefinition.get_function_hint_type_list(
+        SimpleNamespace(endpoint=endpoint, openapi_extra={})
+    )
+    assert ComputeRequest in hints
+
+
+def test_provider_scalar_types_do_not_shadow_modules():
+    """Keep qualified scalar annotations distinct from imported body models."""
+    import datetime
+    from dataclasses import make_dataclass
+    from types import SimpleNamespace
+
+    parameters = make_dataclass("DateProviderParams", [("date", datetime.date | datetime.datetime)])
+
+    def endpoint(standard: Annotated[parameters, Depends(parameters)]) -> dict:
+        return {}
+
+    hints = ImportDefinition.get_function_hint_type_list(
+        SimpleNamespace(endpoint=endpoint, openapi_extra={})
+    )
+    assert datetime.datetime not in hints
+    assert datetime.date not in hints
+
+
 @pytest.fixture(scope="module")
 def tmp_openbb_dir(tmp_path_factory):
     """Return a temporary openbb directory."""

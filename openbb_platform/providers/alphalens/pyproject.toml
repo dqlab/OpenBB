@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openbb-alphalens"
+version = "0.1.0"
+description = "OpenBB alpha research alphalens adapter."
+requires-python = ">=3.11,<3.14"
+dependencies = ["openbb-alpha==0.1.0", "alphalens-reloaded>=0.4.6,<0.5", "pandas>=2.2,<3"]
+
+[project.entry-points.openbb_provider_extension]
+alphalens = "openbb_alphalens:provider"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openbb_alphalens"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

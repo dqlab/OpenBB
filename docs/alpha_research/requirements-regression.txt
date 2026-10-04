@@ -1,0 +1,14 @@
+-r requirements-core.txt
+-e ./openbb_platform/providers/dq_quant_data
+-e ./openbb_platform/providers/duckdb
+-e ./openbb_platform/providers/stooq
+-e ./openbb_platform/providers/fmp
+-e ./openbb_platform/extensions/equity
+-e ./openbb_platform/extensions/derivatives
+-e ./openbb_platform/extensions/news
+-e ./openbb_platform/collectors/core
+-e ./openbb_platform/collectors/historical
+-e ./openbb_platform/collectors/live
+-e ./openbb_platform/extensions/collection
+-e ./openbb_platform/providers/yfinance
+-e ./openbb_platform/providers/ibkr
