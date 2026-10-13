@@ -30,6 +30,11 @@ CASES = (
     ("AkshareCffexRankTable", NATIVE_FETCHERS["AkshareCffexRankTable"], {"date": "2026-09-18", "vars_list": "IF"}),
     ("AkshareFuturesZhDailySina", NATIVE_FETCHERS["AkshareFuturesZhDailySina"], {"symbol": "IF0"}),
     ("AkshareFuturesZhMinuteSina", NATIVE_FETCHERS["AkshareFuturesZhMinuteSina"], {"symbol": "IF0", "period": "5"}),
+    ("AkshareStockZhIndexDaily", NATIVE_FETCHERS["AkshareStockZhIndexDaily"], {"symbol": "sh000300"}),
+    ("AkshareFuturesMainSina", NATIVE_FETCHERS["AkshareFuturesMainSina"], {
+        "symbol": "IF0", "start_date": "2026-09-01", "end_date": "2026-10-13",
+    }),
+    ("AkshareBondZhUsRate", NATIVE_FETCHERS["AkshareBondZhUsRate"], {"start_date": "2026-10-01"}),
 )
 
 

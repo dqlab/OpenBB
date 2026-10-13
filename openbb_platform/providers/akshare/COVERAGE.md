@@ -1,9 +1,10 @@
 # AKShare Provider Coverage
 
-Scope of this provider: **mainland China futures**. Symbol normalization,
-identifier handling, and the parameter contract are built around the exchange
-and Sina futures conventions, so non-futures AKShare datasets are deliberately
-out of scope until their own conventions are modelled.
+Scope of this provider: **mainland China futures, index, and sovereign-rate**
+datasets whose symbol, date, and column conventions have been modelled
+explicitly. Symbol normalization, identifier handling, and the parameter
+contract are per-family, so AKShare datasets outside these families stay out
+of scope until their own conventions are modelled.
 
 ## Standard endpoints
 
@@ -29,9 +30,19 @@ Source-shaped rows, one command per catalogued interface, exposed under the
 | `cffex_rank_table` | `get_cffex_rank_table` | `date`, `vars_list` | verified live (per-contract mapping flattened) |
 | `futures_zh_daily_sina` | `futures_zh_daily_sina` | `symbol` | verified live |
 | `futures_zh_minute_sina` | `futures_zh_minute_sina` | `symbol`, `period` | verified live |
+| `stock_zh_index_daily` | `stock_zh_index_daily` | `symbol` | verified live |
+| `futures_main_sina` | `futures_main_sina` | `symbol`, `start_date`, `end_date` | verified live |
+| `bond_zh_us_rate` | `bond_zh_us_rate` | `start_date` | verified live |
 
 Notes:
 
+- **Symbol case is per-family.** Futures roots are upper-cased (`if2610` -> `IF2610`),
+  but Sina index symbols are lower-case and exchange-qualified (`sh000300`), so they
+  use a separate normalizer. Routing an index symbol through the futures normalizer
+  would corrupt it.
+- **Chinese-column sources keep their own identifier.** `futures_main_sina` and
+  `bond_zh_us_rate` expose `日期` as the identifier column, matching the source
+  rather than inventing an English alias.
 - `get_cffex_rank_table` returns a mapping of contract to dataframe; the
   provider flattens it into one row list, each row carrying its own `symbol`.
 - `date` is required on exchange-wide datasets because AKShare's own default is
@@ -43,15 +54,26 @@ Notes:
 - `get_cffex_daily` returns futures only. For index options (IO/HO/MO) use the
   CFFEX daily XML or a different interface.
 
+## Date handling
+
+`to_df()` defaults to `index="date"`, so a column literally named `date` becomes the
+DataFrame index — call `.to_df(index=None)` to keep it as a column. Native datasets
+preserve the source's own date representation rather than parsing it:
+
+- `stock_zh_index_daily`, `futures_zh_daily_sina` — `datetime.date` values.
+- `cffex_daily`, `futures_hist_daily_cffex` — the source string form `YYYYMMDD`.
+- `futures_main_sina`, `bond_zh_us_rate` — `日期`, which is not the default index
+  name, so it stays a column.
+
+For a parsed `DatetimeIndex` on the CFFEX datasets, convert explicitly:
+`pd.to_datetime(df.index, format="%Y%m%d")`.
+
 ## Not covered
 
-Verified as callable but intentionally excluded until their conventions are
-modelled:
-
-- `stock_zh_index_daily` — uses lower-case Sina index symbols (`sh000300`),
-  which the futures symbol normalizer would corrupt.
-- `futures_main_sina` — source columns are Chinese (`日期`, `开盘价`, ...).
-- `bond_zh_us_rate` — Chinese columns plus a slow paginated fetch.
+- Other AKShare families (equities, funds, options, macro, news) are not modelled
+  yet; each needs its own symbol and column conventions.
+- `bond_zh_us_rate` fetches roughly 19 pages and emits a tqdm progress bar on
+  stderr, so a full-history call takes about 25 seconds.
 
 Cannot be verified without credentials or a brokerage connection: real-time
 tick/level-2 sources and anything requiring an authenticated session.

@@ -6,10 +6,11 @@ from typing import Any, Literal
 from openbb_core.provider.abstract.data import Data
 from openbb_core.provider.abstract.fetcher import Fetcher
 from openbb_core.provider.abstract.query_params import QueryParams
-from pydantic import ConfigDict, Field, create_model
+from pydantic import ConfigDict, Field, create_model, model_validator
 
 from openbb_akshare.utils.catalog import DATASETS, Dataset
 from openbb_akshare.utils.helpers import (
+    normalize_index_symbol,
     normalize_period,
     normalize_symbol,
     normalize_vars_list,
@@ -17,11 +18,23 @@ from openbb_akshare.utils.helpers import (
     source_date,
 )
 
+# Parameter families whose dates must be serialized to ``YYYYMMDD``.
+_DATE_PARAMETERS = ("date", "start_date", "end_date")
+
 
 class AkshareNativeQuery(QueryParams):
     """Shared validation without assigning one dataset's fields to another."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "AkshareNativeQuery":
+        """Reject a reversed date window before a request is made."""
+        start = getattr(self, "start_date", None)
+        end = getattr(self, "end_date", None)
+        if start is not None and end is not None and start > end:
+            raise ValueError("start_date must be on or before end_date.")
+        return self
 
 
 class AkshareNativeData(Data):
@@ -76,16 +89,42 @@ def query_fields(kind: str) -> dict[str, Any]:
             Literal["1", "5", "15", "30", "60"],
             Field(default="5", description="Intraday bar frequency in minutes."),
         )
+    if kind == "index_symbol":
+        fields["symbol"] = (
+            str,
+            Field(description="Sina index symbol such as sh000300, sz399001, or sh000001."),
+        )
+    if kind == "symbol_range":
+        fields["symbol"] = (
+            str,
+            Field(description="China futures root such as IF0 or RB0."),
+        )
+    if kind in {"symbol_range", "start_date"}:
+        fields["start_date"] = (
+            dateType | None,
+            Field(default=None, description="First inclusive date in YYYY-MM-DD. Omit to use the source default."),
+        )
+    if kind == "symbol_range":
+        fields["end_date"] = (
+            dateType | None,
+            Field(default=None, description="Last inclusive date in YYYY-MM-DD. Omit to use the source default."),
+        )
     return fields
 
 
-def source_parameters(query: Any) -> dict[str, Any]:
-    """Serialize a validated query into AKShare call arguments."""
+def source_parameters(query: Any, dataset: Dataset) -> dict[str, Any]:
+    """Serialize a validated query into AKShare call arguments.
+
+    Symbol case is dataset-specific: futures roots are upper-cased, while Sina
+    index symbols are lower-case and must be preserved as such.
+    """
     params = query.model_dump(exclude_none=True)
-    if "date" in params:
-        params["date"] = source_date(params["date"])
+    for key in _DATE_PARAMETERS:
+        if key in params:
+            params[key] = source_date(params[key])
     if "symbol" in params:
-        params["symbol"] = normalize_symbol(params["symbol"])
+        normalizer = normalize_index_symbol if dataset.parameters == "index_symbol" else normalize_symbol
+        params["symbol"] = normalizer(params["symbol"])
     if "period" in params:
         params["period"] = normalize_period(params["period"])
     if "vars_list" in params:
@@ -133,7 +172,7 @@ def make_fetcher(dataset: Dataset) -> type[Fetcher]:
         @staticmethod
         async def aextract_data(query: Any, credentials: dict[str, str] | None, **kwargs: Any) -> list[dict[str, Any]]:
             """Read every row; a successful empty dataset remains an empty list."""
-            return await query_frame(dataset.method, source_parameters(query))
+            return await query_frame(dataset.method, source_parameters(query, dataset))
 
         @staticmethod
         def transform_data(query: Any, data: list[dict[str, Any]], **kwargs: Any) -> list[Any]:

@@ -55,6 +55,24 @@ DATASETS = (
         "symbol_period",
         identifiers=("datetime",),
     ),
+    Dataset(
+        "stock_zh_index_daily",
+        "Daily bars for one Chinese index, addressed with a Sina index symbol.",
+        "index_symbol",
+        identifiers=("date",),
+    ),
+    Dataset(
+        "futures_main_sina",
+        "Daily bars for one China futures main/continuous contract over a date range.",
+        "symbol_range",
+        identifiers=("日期",),
+    ),
+    Dataset(
+        "bond_zh_us_rate",
+        "China and US government bond yields by tenor plus GDP growth, from a start date.",
+        "start_date",
+        identifiers=("日期",),
+    ),
 )
 
 DATASET_BY_METHOD = {dataset.method: dataset for dataset in DATASETS}

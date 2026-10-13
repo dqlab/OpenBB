@@ -16,6 +16,7 @@ from openbb_core.app.model.abstract.error import OpenBBError
 from openbb_akshare.utils.catalog import resolve_method
 
 _SYMBOL = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,15}$")
+_INDEX_SYMBOL = re.compile(r"^(sh|sz|bj)[0-9]{6}$")
 _PERIODS = {"1", "5", "15", "30", "60"}
 
 
@@ -24,6 +25,18 @@ def normalize_symbol(value: str) -> str:
     symbol = str(value).strip().upper()
     if not _SYMBOL.fullmatch(symbol):
         raise ValueError("Use an AKShare China futures symbol such as IF0, IF2610, or RB0.")
+    return symbol
+
+
+def normalize_index_symbol(value: str) -> str:
+    """Validate and lower-case a Sina index symbol.
+
+    Sina index symbols are lower-case and exchange-qualified (``sh000300``),
+    so they must NOT go through the futures normalizer, which upper-cases.
+    """
+    symbol = str(value).strip().lower()
+    if not _INDEX_SYMBOL.fullmatch(symbol):
+        raise ValueError("Use a Sina index symbol such as sh000300, sz399001, or sh000001.")
     return symbol
 
 

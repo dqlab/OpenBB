@@ -15,6 +15,7 @@ from openbb_akshare.utils.catalog import DATASET_BY_METHOD, DATASETS, resolve_me
 from openbb_akshare.utils.helpers import (
     clip_dates,
     frame_to_records,
+    normalize_index_symbol,
     normalize_period,
     normalize_symbol,
     normalize_vars_list,
@@ -49,6 +50,38 @@ SINA_DAILY = pd.DataFrame(
         "volume": [55056, 78395],
         "hold": [171368, 178602],
         "settle": [0.0, 0.0],
+    }
+)
+
+INDEX_FRAME = pd.DataFrame(
+    {
+        "date": [date(2026, 10, 13)],
+        "open": [4236.949],
+        "high": [4310.333],
+        "low": [4216.860],
+        "close": [4275.68],
+        "volume": [18043410300],
+    }
+)
+
+MAIN_FRAME = pd.DataFrame(
+    {
+        "日期": [date(2026, 10, 13)],
+        "开盘价": [4183.2],
+        "最高价": [4257.4],
+        "最低价": [4151.0],
+        "收盘价": [4217.6],
+        "成交量": [78395],
+        "持仓量": [178602],
+        "动态结算价": [0.0],
+    }
+)
+
+RATE_FRAME = pd.DataFrame(
+    {
+        "日期": [date(2026, 10, 13)],
+        "中国国债收益率10年": [1.6654],
+        "美国国债收益率10年": [None],
     }
 )
 
@@ -245,3 +278,84 @@ def test_futures_historical_raises_on_empty_window(monkeypatch):
     data = asyncio.run(AkshareFuturesHistoricalFetcher.aextract_data(query, None))
     with pytest.raises(EmptyDataError):
         AkshareFuturesHistoricalFetcher.transform_data(query, data)
+
+
+# --------------------------------------------------------------------------- extended datasets
+
+
+def test_normalize_index_symbol_preserves_lower_case():
+    """Sina index symbols stay lower-case and exchange-qualified."""
+    assert normalize_index_symbol(" SH000300 ") == "sh000300"
+    assert normalize_index_symbol("sz399001") == "sz399001"
+    for bad in ("", "000300", "sh00030", "sh0003000", "us000300", "sh000300;DROP"):
+        with pytest.raises(ValueError):
+            normalize_index_symbol(bad)
+
+
+def test_extended_datasets_declare_their_own_identifiers():
+    """Chinese-column sources expose 日期 rather than a fabricated identifier."""
+    assert DATASET_BY_METHOD["stock_zh_index_daily"].identifiers == ("date",)
+    assert DATASET_BY_METHOD["futures_main_sina"].identifiers == ("日期",)
+    assert DATASET_BY_METHOD["bond_zh_us_rate"].identifiers == ("日期",)
+    assert DATASET_BY_METHOD["futures_main_sina"].model == "AkshareFuturesMainSina"
+    assert DATASET_BY_METHOD["bond_zh_us_rate"].command == "bond_zh_us_rate"
+
+
+def test_index_fetcher_does_not_upper_case_the_symbol(monkeypatch):
+    """The index path must use the lower-case Sina symbol unchanged."""
+    captured = {}
+
+    async def fake_query_frame(method, params):
+        captured["method"] = method
+        captured["params"] = params
+        return frame_to_records(INDEX_FRAME)
+
+    monkeypatch.setattr(native_module, "query_frame", fake_query_frame)
+    model = NATIVE_FETCHERS["AkshareStockZhIndexDaily"]
+    query = model.transform_query({"symbol": "SH000300"})
+    rows = model.transform_data(query, asyncio.run(model.aextract_data(query, None)))
+    assert captured == {"method": "stock_zh_index_daily", "params": {"symbol": "sh000300"}}
+    assert rows[0].date == "2026-10-13"
+    assert rows[0].close == 4275.68
+
+
+def test_symbol_range_fetcher_serializes_both_dates(monkeypatch):
+    """A bounded main-contract request forwards both dates as YYYYMMDD."""
+    captured = {}
+
+    async def fake_query_frame(method, params):
+        captured["params"] = params
+        return frame_to_records(MAIN_FRAME)
+
+    monkeypatch.setattr(native_module, "query_frame", fake_query_frame)
+    model = NATIVE_FETCHERS["AkshareFuturesMainSina"]
+    query = model.transform_query({"symbol": "if0", "start_date": "2026-09-01", "end_date": "2026-10-13"})
+    rows = model.transform_data(query, asyncio.run(model.aextract_data(query, None)))
+    assert captured["params"] == {"symbol": "IF0", "start_date": "20260901", "end_date": "20261013"}
+    assert getattr(rows[0], "日期") == "2026-10-13"
+
+
+def test_symbol_range_fetcher_rejects_reversed_dates():
+    """A reversed main-contract window is rejected during query validation."""
+    model = NATIVE_FETCHERS["AkshareFuturesMainSina"]
+    with pytest.raises(Exception):
+        model.transform_query({"symbol": "IF0", "start_date": "2026-10-13", "end_date": "2026-10-01"})
+
+
+def test_start_date_fetcher_serializes_start_date(monkeypatch):
+    """The yield-curve dataset accepts a start date and preserves null yields."""
+    captured = {}
+
+    async def fake_query_frame(method, params):
+        captured["method"] = method
+        captured["params"] = params
+        return frame_to_records(RATE_FRAME)
+
+    monkeypatch.setattr(native_module, "query_frame", fake_query_frame)
+    model = NATIVE_FETCHERS["AkshareBondZhUsRate"]
+    query = model.transform_query({"start_date": "2026-10-01"})
+    rows = model.transform_data(query, asyncio.run(model.aextract_data(query, None)))
+    assert captured == {"method": "bond_zh_us_rate", "params": {"start_date": "20261001"}}
+    assert getattr(rows[0], "日期") == "2026-10-13"
+    assert getattr(rows[0], "中国国债收益率10年") == 1.6654
+    assert getattr(rows[0], "美国国债收益率10年") is None
