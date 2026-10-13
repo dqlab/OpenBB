@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "openbb-akshare"
+version = "1.0.0"
+description = "AKShare data provider extension for the OpenBB Platform"
+authors = ["OpenBB Team <hello@openbb.co>"]
+readme = "README.md"
+license = "AGPL-3.0-only"
+packages = [{ include = "openbb_akshare" }]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4"
+openbb-core = "^1.6.13"
+akshare = ">=1.19,<1.20"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.plugins."openbb_provider_extension"]
+akshare = "openbb_akshare:akshare_provider"
+
+[tool.poetry.plugins."openbb_core_extension"]
+akshare = "openbb_akshare.router:router"
