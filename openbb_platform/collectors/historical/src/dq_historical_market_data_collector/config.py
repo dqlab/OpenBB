@@ -164,6 +164,7 @@ class Collection(Model):
     primary: Name
     secondary: list[Name] = Field(default_factory=list, max_length=5)
     start_date: date
+    current_day_only: bool = False
     end_date: date | None = None
     frequency: Frequency = "1d"
     fields: list[FieldName] = Field(

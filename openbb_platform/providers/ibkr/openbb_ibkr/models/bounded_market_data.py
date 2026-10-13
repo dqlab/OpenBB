@@ -10,6 +10,7 @@ from openbb_core.provider.abstract.query_params import QueryParams
 from pydantic import AwareDatetime, ConfigDict, Field, StrictInt, model_validator
 
 from openbb_ibkr.utils.bounded import bounded_history, bounded_quote
+from openbb_ibkr.utils.batch_quote import bounded_quotes_batch
 from openbb_ibkr.utils.client import IbkrClient
 
 SEC_TYPES = {
@@ -151,6 +152,27 @@ class IbkrMarketQuoteFetcher(Fetcher[IbkrMarketQuoteQueryParams, list[IbkrMarket
 
     require_credentials = False
     close_collection = staticmethod(IbkrClient.disconnect)
+    collection_batch_limit = 40
+
+    @staticmethod
+    def collect_batch(params: list[dict], credentials: dict | None):
+        queries = [IbkrMarketQuoteQueryParams(**item) for item in params]
+        if not 1 <= len(queries) <= 40:
+            raise ValueError("batch_request_limit")
+        settings = ("host", "port", "client_id", "feed_type", "snapshot_wait_seconds")
+        if any(
+            any(getattr(query, key) != getattr(queries[0], key) for key in settings)
+            for query in queries
+        ):
+            raise ValueError("inconsistent_batch_settings")
+        queries[0].configure(credentials)
+        responses = bounded_quotes_batch(
+            IbkrClient,
+            [{**query.contract_parameters(), "delayed": query.feed_type == "delayed"}
+             for query in queries],
+            queries[0].snapshot_wait_seconds,
+        )
+        return [_transform(query, response) for query, response in zip(queries, responses, strict=True)]
 
     @staticmethod
     def transform_query(params: dict) -> IbkrMarketQuoteQueryParams:

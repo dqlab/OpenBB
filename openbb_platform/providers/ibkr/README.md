@@ -496,3 +496,15 @@ futures prices with positive quoted size remain prices. Quote metadata reports
 schema version 2, the feed-type evidence basis and unavailable fields. Volumes
 are preserved without inferred rescaling and retain provider-defined units.
 The live collector examples now explicitly request and accept delayed data.
+
+
+### Bounded collector quote batches (0.2.2)
+
+`MarketQuote` supports the optional collector `collect_batch` hook for up to 40
+contracts on one connection/event loop. Contracts are qualified before paced
+subscriptions, all observations use a common cutoff, and every subscription is
+cancelled on exit. Raw metadata retains batch identity, request-scoped error
+codes, actual feed type and per-field provider receipt timestamps. Incomplete
+quotes and disconnects cannot reuse cached values. Single quote/history commands
+and public query schemas are unchanged. See the live collector README for the
+opt-in configuration and timestamp semantics.

@@ -42,6 +42,8 @@ class DQAPIClient:
             raise OpenBBError("DQ API URL must be an HTTP(S) base URL without credentials.")
         api_key = _credential(credentials, "dq_quant_data_api_key", "api_key")
         self.headers = {"X-API-Key": api_key} if api_key else {}
+        ca_file = _credential(credentials, "dq_quant_data_api_ca_file", "api_ca_file")
+        self.request_options = {"verify": ca_file} if ca_file else {}
 
     def get_result(self, path: str, params: dict | None = None) -> dict:
         """Read at most 100 pages / 100,000 rows, preserving page provenance."""
@@ -54,6 +56,7 @@ class DQAPIClient:
                 headers=self.headers.copy(),
                 timeout=30,
                 allow_redirects=False,
+                **self.request_options,
             )
             if response.status_code != 200:
                 raise OpenBBError(f"DQ API request failed (HTTP {response.status_code}).")
@@ -86,3 +89,72 @@ class DQAPIClient:
     def get(self, path: str, params: dict | None = None) -> list[dict]:
         """Return records from a complete bounded query."""
         return self.get_result(path, params)["data"]
+
+    def get_market_result(self, method: str, params: dict | None = None) -> dict:
+        """Read one bounded market-store response, retaining its exact provenance.
+
+        History cursors and instrument-listing has_more remain visible to callers;
+        a chain is a complete capture and cannot be silently paged or truncated.
+        """
+        paths = {
+            "daily-bars": "/api/v1/market/daily-bars",
+            "futures-curve": "/api/v1/market/futures/curve",
+        }
+        if method not in {
+            "status",
+            "instruments",
+            "captures",
+            "chain",
+            "history",
+            "basket",
+            *paths,
+        }:
+            raise OpenBBError("Unsupported market-data read.")
+        values = clean_params(params or {})
+        if isinstance(values.get("instruments"), list):
+            values["instruments"] = ",".join(values["instruments"])
+        response = make_request(
+            self.base_url + paths.get(method, f"/api/v1/market-store/{method}"),
+            params=values,
+            headers=self.headers.copy(),
+            timeout=180,
+            allow_redirects=False,
+            **self.request_options,
+        )
+        if response.status_code != 200:
+            raise OpenBBError(f"DQ market API request failed (HTTP {response.status_code}).")
+        try:
+            payload = response.json()
+        except ValueError:
+            raise OpenBBError("DQ market API returned invalid JSON.") from None
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(payload.get("data"), list)
+            or any(not isinstance(row, dict) for row in payload["data"])
+            or not isinstance(payload.get("meta"), dict)
+        ):
+            raise OpenBBError("DQ market API returned an invalid data envelope.")
+        rows, meta = payload["data"], payload["meta"]
+        maximum = values.get("max_rows", values.get("limit", 100000))
+        if len(rows) > maximum:
+            raise OpenBBError("DQ market API exceeded the requested row bound.")
+        if method == "chain":
+            if meta.get("next_cursor") or meta.get("rows") != len(rows):
+                raise OpenBBError("DQ market API returned a partial chain.")
+            if not values.get("allow_incomplete") and meta.get("response_complete") is not True:
+                raise OpenBBError("DQ market API returned an incomplete capture.")
+            if (
+                not values.get("expiration")
+                and not values.get("option_type")
+                and meta.get("capture_rows") != len(rows)
+            ):
+                raise OpenBBError("DQ market API capture membership is incomplete.")
+        if method in {"daily-bars", "futures-curve"}:
+            if meta.get("rows") != len(rows) or meta.get("response_complete") is not True:
+                raise OpenBBError("DQ market API returned a partial data product.")
+            if method == "futures-curve":
+                if len(rows) > values.get("max_contracts", 1000):
+                    raise OpenBBError("DQ market API exceeded the contract bound.")
+                if not values.get("allow_incomplete") and meta.get("complete") is not True:
+                    raise OpenBBError("DQ market API returned an incomplete futures curve.")
+        return payload

@@ -411,6 +411,9 @@ class DeliveryStore:
                 status TEXT NOT NULL, local_removed INTEGER NOT NULL DEFAULT 0,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 next_attempt REAL NOT NULL DEFAULT 0, error TEXT, receipt TEXT);
+            CREATE INDEX IF NOT EXISTS jobs_pending_target ON jobs(target)
+                WHERE status<>'delivered';
+            CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);
             CREATE TABLE IF NOT EXISTS files (
                 target TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT NOT NULL,
                 size INTEGER NOT NULL, verified INTEGER NOT NULL DEFAULT 0,
@@ -584,20 +587,29 @@ class DeliveryStore:
     def send_pending(self, *, force: bool = False, limit: int = 1) -> list[dict[str, Any]]:
         if not 1 <= limit <= 100:
             raise ValueError("Delivery attempt limit must be 1..100")
-        rows = self.db.execute(
-            "SELECT * FROM jobs WHERE target=? "
-            "AND (status<>'delivered' OR (? AND local_removed=0 "
-            "AND (first_verified_at IS NULL OR cleanup_after(first_verified_at)<=?))) "
-            "AND (? OR next_attempt<=?) ORDER BY rowid LIMIT ?",
-            (
-                self.target,
-                self.config.retention_policy() != "forever",
-                time.time(),
-                force,
-                time.time(),
-                limit,
-            ),
-        ).fetchall()
+        if self.config.retention_policy() == "forever":
+            # This predicate matches the partial index. An OR with a bound
+            # false cleanup flag still scans retained manifest rows in SQLite.
+            rows = self.db.execute(
+                "SELECT * FROM jobs WHERE target=? AND status<>'delivered' "
+                "AND (? OR next_attempt<=?) ORDER BY rowid LIMIT ?",
+                (self.target, force, time.time(), limit),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM jobs WHERE target=? "
+                "AND (status<>'delivered' OR (? AND local_removed=0 "
+                "AND (first_verified_at IS NULL OR cleanup_after(first_verified_at)<=?))) "
+                "AND (? OR next_attempt<=?) ORDER BY rowid LIMIT ?",
+                (
+                    self.target,
+                    self.config.retention_policy() != "forever",
+                    time.time(),
+                    force,
+                    time.time(),
+                    limit,
+                ),
+            ).fetchall()
         results = []
         deadline = time.monotonic() + self.config.max_attempt_seconds
         for job in rows:

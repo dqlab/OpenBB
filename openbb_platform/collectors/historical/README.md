@@ -98,3 +98,15 @@ observations, checkpoints, and date labels are retained.
 Historical journals index session observations and export-batch ownership so
 central archive delivery does not repeatedly scan the full observations table.
 The additive indexes are created automatically when a journal opens.
+
+### Separate current-day collection from backfill
+
+Set `current_day_only: true` on recurring intraday collections, together with
+`schedule.include_current_session: true` and `schedule.catch_up_days: 1`. The
+scheduler plans only the current date in its configured timezone; the original
+`start_date` remains a lower bound. Old failed chunks are not replayed, and
+requests for yesterday are skipped if a cycle crosses midnight.
+
+Use a separate configuration and journal with `current_day_only: false` and an
+explicit exclusive `end_date` for standalone historical backfill. Existing
+collections default to the original historical-range behavior.

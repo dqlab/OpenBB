@@ -210,3 +210,30 @@ def test_installed_engine_entrypoints():
         engine = get_collector(name)
         assert engine.name == name
         assert callable(engine.factory) and callable(engine.load_config)
+
+
+def test_worker_error_diagnostic_excludes_vendor_message(monkeypatch):
+    import io
+    import sys
+
+    from openbb_collector_core import process
+
+    def fail(request):
+        raise RuntimeError("PRIVATE_VENDOR_MESSAGE_AND_TOKEN")
+
+    monkeypatch.setattr(process, "ProviderDispatcher", lambda source: SimpleNamespace(
+        fetch=fail, close=lambda: None
+    ))
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "__stderr__", output)
+    requests = iter([{}, None])
+    sent = []
+    connection = SimpleNamespace(
+        recv=lambda: next(requests), send_bytes=sent.append, close=lambda: None
+    )
+    _worker(connection, {})
+    assert sent == [b'{"error":"provider_error"}']
+    diagnostic = json.loads(output.getvalue())
+    assert diagnostic["error_type"] == "RuntimeError"
+    assert diagnostic["frames"][-1][2] == "fail"
+    assert "PRIVATE_VENDOR" not in output.getvalue()

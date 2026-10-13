@@ -15,7 +15,7 @@ from openbb_collector_core.incremental import heartbeat
 
 from .config import CollectorConfig
 from .delivery import deliver
-from .providers import OpenBBClient, ProviderClient, ProviderFailure, validate_providers
+from .providers import OpenBBClient, ProviderClient, ProviderFailure, Response, validate_providers
 from .quality import digest, normalize
 from .schedule import active_window, reset_period, slot_number, window_on
 from .storage import Journal, atomic_json
@@ -141,6 +141,11 @@ class Collector:
         reports.extend(self._flush(self.clock().astimezone(UTC)))
         last_flush = self.clock().astimezone(UTC)
         for collection_id, collection in self.config.collections.items():
+            if self.config.sources[collection.primary].batch_size > 1:
+                reports.extend(self._poll_batches(collection_id, generation))
+                reports.extend(self._flush(self.clock().astimezone(UTC)))
+                last_flush = self.clock().astimezone(UTC)
+                continue
             for instrument_id in collection.instrument_ids:
                 if self.stop.is_set():
                     break
@@ -164,6 +169,62 @@ class Collector:
                     last_flush = self.clock().astimezone(UTC)
         finished_at = self.clock().astimezone(UTC)
         reports.extend(self._flush(finished_at))
+        return reports
+
+    def _poll_batches(self, collection_id: str, generation: int) -> list[dict[str, Any]]:
+        reports = []
+        last_flush = self.clock().astimezone(UTC)
+        collection = self.config.collections[collection_id]
+        source = self.config.sources[collection.primary]
+        ids = collection.instrument_ids
+        for offset in range(0, len(ids), source.batch_size):
+            if self.stop.is_set():
+                break
+            requested_at = self.clock().astimezone(UTC)
+            window = active_window(collection.schedule, requested_at)
+            if window is None:
+                break
+            session_id = self.journal.ensure_session(
+                collection_id, collection, self.config_hash, window, generation
+            )
+            slot = slot_number(window, requested_at, collection.frequency_seconds)
+            due = [
+                instrument_id
+                for instrument_id in ids[offset : offset + source.batch_size]
+                if not self.journal.poll_exists(session_id, instrument_id, slot)
+                and not self.journal.has_pending_retry(session_id, instrument_id)
+            ]
+            if not due:
+                continue
+            try:
+                responses = self.provider.fetch_batch(
+                    collection.primary, source, [self.config.instruments[key] for key in due]
+                )
+                if len(responses) != len(due) or not all(
+                    isinstance(response, Response) for response in responses
+                ):
+                    raise ProviderFailure("invalid_batch_response")
+            except ProviderFailure as exc:
+                responses = [exc] * len(due)
+            except Exception:
+                responses = [ProviderFailure("provider_error")] * len(due)
+            # Acquisition completes once for the entire envelope. Preserve this
+            # conservative availability time even while journal writes proceed.
+            received_at = self.clock().astimezone(UTC)
+            for instrument_id, response in zip(due, responses, strict=True):
+                self._poll(
+                    collection_id,
+                    instrument_id,
+                    session_id,
+                    slot,
+                    requested_at,
+                    window.end,
+                    prefetched=(response, received_at),
+                )
+            now = self.clock().astimezone(UTC)
+            if (now - last_flush).total_seconds() >= self.config.heartbeat_seconds:
+                reports.extend(self._flush(now))
+                last_flush = self.clock().astimezone(UTC)
         return reports
 
     def _retry_due(self, generation: int) -> list[dict[str, Any]]:
@@ -232,6 +293,8 @@ class Collector:
         slot: int,
         attempted_at: datetime,
         session_end: datetime,
+        *,
+        prefetched: tuple[Response | ProviderFailure, datetime] | None = None,
     ) -> None:
         collection = self.config.collections[collection_id]
         instrument = self.config.instruments[instrument_id]
@@ -249,7 +312,10 @@ class Collector:
         for priority, source_id in enumerate([collection.primary, *collection.secondary]):
             source = self.config.sources[source_id]
             for attempt_number in range(source.retries + 1):
-                if self.stop.is_set() or self.clock().astimezone(UTC) >= session_end:
+                use_prefetched = prefetched is not None and priority == 0 and attempt_number == 0
+                if not use_prefetched and (
+                    self.stop.is_set() or self.clock().astimezone(UTC) >= session_end
+                ):
                     break
                 attempt: dict[str, Any] = {
                     "source": source_id,
@@ -264,14 +330,22 @@ class Collector:
                     attempt["retry_round"] = rounds
                 attempts.append(attempt)
                 try:
-                    response = self.provider.fetch(source_id, source, instrument)
+                    request_started_at = (
+                        attempted_at if use_prefetched else self.clock().astimezone(UTC)
+                    )
+                    if use_prefetched:
+                        response, received_at = prefetched
+                        if isinstance(response, ProviderFailure):
+                            raise response
+                    else:
+                        response = self.provider.fetch(source_id, source, instrument)
+                        received_at = self.clock().astimezone(UTC)
                 except ProviderFailure as exc:
                     attempt["status"] = exc.code
                     continue
                 except Exception:
                     attempt["status"] = "provider_error"
                     continue
-                received_at = self.clock().astimezone(UTC)
                 attempt["input_rows"] = len(response.rows)
                 attempt["warning_count"] = response.warning_count
                 codes = response.metadata.get("gateway_error_codes", [])
@@ -285,7 +359,7 @@ class Collector:
                         "session_id": session_id,
                         "source": source_id,
                         "instrument_id": instrument_id,
-                        "requested_at": attempted_at.isoformat(),
+                        "requested_at": request_started_at.isoformat(),
                         "received_at": received_at.isoformat(),
                         "provider_metadata": response.metadata,
                         "rows": response.rows,

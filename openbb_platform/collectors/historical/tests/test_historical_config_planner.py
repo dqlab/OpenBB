@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 from openbb_collector_core import ProviderFailure
@@ -151,3 +151,22 @@ def test_custom_query_field_names_and_explicit_fixed_frequency(config_dict):
     config_dict["collections"]["daily"]["frequency"] = "5m"
     with pytest.raises(ValidationError, match="fixed_frequency"):
         CollectorConfig.model_validate(config_dict)
+
+
+def test_current_day_window_rolls_without_backfill(config_dict):
+    item = config_dict['collections']['daily']
+    item.update(current_day_only=True, end_date=None)
+    config = CollectorConfig.model_validate(config_dict)
+    for cutoff in (date(2026, 10, 2), date(2026, 10, 3)):
+        planned = list(chunks(config, cutoff))
+        assert len(planned) == 1
+        assert planned[0].start == cutoff - timedelta(days=1)
+        assert planned[0].end == cutoff
+    item['end_date'] = '2026-09-04'
+    assert list(chunks(CollectorConfig.model_validate(config_dict), date(2026, 10, 2))) == []
+
+
+def test_backfill_default_keeps_historical_range(config_dict):
+    planned = list(chunks(CollectorConfig.model_validate(config_dict), date(2026, 10, 2)))
+    assert planned[0].start == date(2026, 9, 1)
+    assert planned[-1].end == date(2026, 9, 4)

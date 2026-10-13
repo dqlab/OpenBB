@@ -119,3 +119,37 @@ Use an explicit source `asset_type_map` when a provider uses a different taxonom
 for example `{EQUITY: stock, ETF: etf}` for Yahoo quote responses. Unmapped or
 incompatible security types remain rejected, and mapping changes alter observation
 identity. Provider responses remain unchanged in raw archives.
+
+
+### Batch quote acquisition
+
+Version 0.1.7 adds opt-in `sources.<name>.batch_size` (default 1, maximum 40).
+The selected provider fetcher must advertise `collection_batch_limit` and support
+`collect_batch`; unsupported models fail configuration validation. For IBKR
+`MarketQuote`, use `batch_size: 20` and keep `snapshot_wait_seconds: 4` for the
+20-contract SOFR universe. Existing configurations remain serial.
+
+The engine sends one bounded worker request for each due batch, then retains the
+existing normalization, quarantine, retry, fallback, immutable raw archive and
+receipt-based delivery path. One collector receipt time is assigned when the
+whole response envelope arrives, before per-contract journal writes. Per-item
+row limits and a total response byte limit apply. Retries and fallback requests
+remain separate acquisitions; they do not share the original batch cutoff.
+Several chunks of a larger universe are also separate batches.
+
+IBKR qualifies contracts before subscribing, paces subscription messages at no
+more than 20 per second under its existing client throttle, waits until a common
+monotonic deadline, freezes callbacks at that deadline and cancels subscriptions.
+Raw provider metadata contains `batch_id`, `batch_cutoff_at`, subscription request
+IDs, actual feed type, per-field local receipt times and ages at cutoff. Missing
+or partially initialized quotes remain empty responses with diagnostic evidence;
+a connection interruption invalidates the whole batch. Cached ticker values are
+cleared on every subscription. Error codes are assigned by request ID, with
+connection-level errors recorded separately.
+
+The cutoff is a local observation boundary, not a simultaneous exchange event.
+IBKR ticker timestamps remain `provider_receive`; `event_time` remains unknown.
+The existing `live_v1` observation and delivery schemas are unchanged, and
+`available_at` remains the collector's conservative response receipt time.
+Requesting delayed data does not imply actual delayed delivery: the gateway's
+`marketDataType` callback determines the stored feed type.

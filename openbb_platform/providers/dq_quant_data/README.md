@@ -12,10 +12,11 @@ classes; database governance operations need dedicated commands.
 
 | Interface | Purpose | Backend |
 | --- | --- | --- |
-| `provider="dq_quant_data"` | Equity/ETF history, equity search/info, dividends, splits, filings and FRED series | Canonical REST API |
-| `obb.derivatives.options.chains(provider="dq_quant_data", ...)` | Standard options-chain result with provenance | Local MarketReader |
-| `obb.derivatives.futures.curve(provider="dq_quant_data", ...)` | Maturity-ordered futures prices and contract/quality metadata | Local MarketReader |
-| `obb.dq_market.*` | Captures, publication/as-of queries, bounded histories, baskets, instruments and status | Local MarketReader |
+| `obb.equity.price.historical`, `obb.etf.historical`, `obb.index.price.historical` | Retained stock, ETF and index daily bars | Daily-bars REST API |
+| `provider="dq_quant_data"` | Equity search/info, dividends, splits, filings and FRED series | Canonical REST API |
+| `obb.derivatives.options.chains(provider="dq_quant_data", ...)` | Standard options-chain result with provenance | Market-store REST API |
+| `obb.derivatives.futures.curve(provider="dq_quant_data", ...)` | Server-built futures prices and contract/quality metadata | Futures-curve REST API |
+| `obb.dq_market.*` | Captures, publication/as-of queries, bounded histories, baskets, instruments and status | Market-store REST API |
 | `obb.dq_data.*` | Fundamental facts, quality and lineage | Canonical REST API |
 
 A provider-only conversion would obscure the governance operations; a router-only
@@ -37,7 +38,7 @@ python -m pip install ./openbb_platform/providers/dq_quant_data
 openbb-build
 ```
 
-API-only use requires no local database package. For local market queries, install
+API-only use requires no local database package. For explicit local diagnostics, install
 `dq-quant-invest-data>=0.1.5,<0.2` from your data-platform checkout/wheel (or use the
 `local` extra when that distribution is available on your package index). The
 optional import is delayed until a local command is called.
@@ -45,25 +46,26 @@ optional import is delayed until a local command is called.
 Do not install the older copy from `dq-quant-invest-data/integrations` over this
 package. The distribution name and Python import paths remain compatible.
 
-## Local options chain
+## REST options chain
 
 ```python
-import os
 from openbb import obb
 
-os.environ["DQ_MARKET_CONFIG"] = "/path/to/market-store.yaml"
-chain = obb.dq_market.chain()
-df = chain.to_df()
+obb.user.credentials.dq_quant_data_api_url = "https://data-host:8016"
+obb.user.credentials.dq_quant_data_api_key = "your-read-key"
+# For a private CA; omit when the service uses a publicly trusted certificate.
+obb.user.credentials.dq_quant_data_api_ca_file = "/path/to/server-ca.crt"
 
-standard = obb.derivatives.options.chains(
-    symbol="SPX", provider="dq_quant_data",
-    # config_path="/path/to/market-store.yaml",  # overrides environment setting
-)
-standard.to_df()
-standard.extra["results_metadata"]  # capture/publication IDs, quality and source metadata
+snapshot = obb.derivatives.options.chains(symbol="SPX", provider="dq_quant_data")
+df = snapshot.to_df()
+metadata = snapshot.extra["results_metadata"]
+
+# Governance operations use the same REST service and credentials.
+chain = obb.dq_market.chain(symbol="SPX")
+print(chain.extra)
 ```
 
-Both calls use the same reader, eligible Gold default, complete-capture requirement,
+Both calls use the platform REST API and its governed reader, eligible Gold default, complete-capture requirement,
 source units, and numeric projection. Missing values remain null. Prices become
 standard OpenBB floats; the underlying store retains its decimal precision.
 The source is a saved capture, potentially delayed, not a live quote request.
@@ -77,6 +79,31 @@ quality-blocked rows. Bounds fail explicitly instead of truncating a chain.
 
 `obb.dq_market` also exposes `status`, `instruments`, `captures`, `history`, and
 `basket`. These commands retain their existing names and parameters.
+
+## Client/server boundary
+
+OpenBB runs on the client (for example WSL). `dq-quant-invest-data` serves the
+versioned REST API and owns DuckDB, Parquet, capture selection and publication.
+`dq_quant_data` is the OpenBB provider identifier for this platform.
+
+All default market reads use `/api/v1/market-store/{method}` over HTTP(S), including
+`status`, `instruments`, `captures`, `chain`, `history` and `basket`. Standard stock/ETF/index daily bars use `/api/v1/market/daily-bars`, and the
+standard futures curve uses `/api/v1/market/futures/curve`. Reference data and
+fundamentals use the existing canonical `/api/v1` endpoints.
+Clients need no database package, NAS filesystem mount or SSH command execution.
+`DQ_MARKET_REMOTE_CONFIG` is no longer used. HTTP errors never fall back to files.
+
+The chain client requests the columns needed by the OpenBB model while retaining
+every contract and the original capture/publication metadata. The API serializes
+stored decimals as strings before OpenBB's documented float projection. Missing
+values, date offsets, completeness and explicit diagnostic flags are preserved.
+The client rejects truncated or incomplete default chains. History returns its
+publication-pinned cursor; it does not silently combine separate pages/captures.
+
+An explicit `config_path=` still permits local server-side diagnostics; only that
+mode imports the optional `dq-quant-invest-data` Python package. API URL/key/CA
+settings never get sent as query parameters. TLS certificate validation remains
+enabled, and redirects are rejected.
 
 ## Futures term structure
 
@@ -94,7 +121,7 @@ df = curve.to_df()
 metadata = curve.extra["results_metadata"]
 ```
 
-This reads the configured `sofr_futures_quotes` central dataset, resolves qualified
+The platform REST service reads the configured `sofr_futures_quotes` central dataset, resolves qualified
 IBKR identities, and sorts contracts by their source expiration/last-trade date.
 `contract_month` remains a separate field: an SR3 reference month is not replaced
 with its later last-trade month. Only unexpired contracts for the dataset's source
@@ -139,6 +166,29 @@ For repeatable queries, retain `as_of`, `publication_id`, root, date, layer and
 price/window settings from metadata. `curve_snapshot_id`, selected observation
 IDs and `reference_versions` record the result's identity and provenance.
 
+## Daily stock, ETF and index bars
+
+```python
+stocks = obb.equity.price.historical("AAPL", start_date="2026-09-08", provider="dq_quant_data")
+etfs = obb.etf.historical("SPY,QQQ,DIA", start_date="2026-09-08", provider="dq_quant_data")
+indices = obb.index.price.historical("SPX,NDX,DJIA", start_date="2026-09-08", provider="dq_quant_data")
+a_shares = obb.equity.price.historical("SH.600000", start_date="2026-09-01", provider="dq_quant_data")
+```
+
+These commands read retained daily snapshots through `/api/v1/market/daily-bars`.
+Only `interval="1d"` is supported. Dates are inclusive, up to 20 symbols and 100,000
+rows; overflow fails. `as_of` selects revisions known at the supplied UTC-offset
+timestamp. Omitted dates request one year. Result metadata reports actual date
+ranges, missing symbols and source snapshot IDs without inventing missing history.
+
+The default `adjustment="source"` returns U.S. split-adjusted prices, cash-index
+levels, or unadjusted A-share prices. U.S. `splits_and_dividends` and BaoStock
+`forward`/`backward` conventions are explicit and distinct. Unsupported adjustments
+fail. Volumes, nulls, units, quality and observation times remain visible. Use
+`.extra["results_metadata"]` for provenance. Source history collected later is not
+claimed to have been available before collection. ETF/index coverage starts at
+the configured collection date, not at instrument inception.
+
 ## Canonical API
 
 ```python
@@ -159,11 +209,10 @@ OpenBB proxy/TLS/timeout settings and reject redirects. Paged reads are bounded 
 100 pages / 100,000 rows, reject repeated cursors and changing snapshots, and fail
 on overflow. Narrow oversized queries. `dq_data` returns page metadata in `extra`.
 The existing canonical standard-model fetchers return their typed records; use
-`dq_data` for API lineage/quality. Local options do not need API credentials.
+`dq_data` for API lineage/quality. Explicit local diagnostics do not need API credentials.
 
-The canonical REST API and local market store are separate backends. Setting the
-API URL does not redirect local market reads. No HTTP fallback occurs if a local
-store is unavailable.
+The configured API URL applies to both canonical and market-store REST reads.
+Use explicit `config_path=` only when intentionally opening a local store.
 
 ## Validation
 

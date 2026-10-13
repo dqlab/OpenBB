@@ -1,10 +1,7 @@
 """Stored futures term structures with source identity and availability metadata."""
 
-import hashlib
-import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from datetime import date as dateType
-from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from openbb_core.app.model.abstract.error import OpenBBError
@@ -16,7 +13,7 @@ from openbb_core.provider.standard_models.futures_curve import (
 )
 from pydantic import Field, field_validator, model_validator
 
-from openbb_dq_quant_data.market import _query
+from openbb_dq_quant_data.client import DQAPIClient
 
 
 def _utc(value: datetime | str) -> datetime:
@@ -42,7 +39,8 @@ class DQFuturesCurveQueryParams(FuturesCurveQueryParams):
         default="sofr_futures_quotes", description="Configured futures quote dataset."
     )
     config_path: str | None = Field(
-        default=None, description="Market-store YAML; otherwise DQ_MARKET_CONFIG."
+        default=None,
+        description="Explicit local diagnostic override; otherwise use configured DQ REST API.",
     )
     as_of: datetime | str | None = Field(
         default=None, description="Knowledge cutoff with UTC offset; defaults to now."
@@ -176,49 +174,8 @@ class DQFuturesCurveData(FuturesCurveData):
     )
 
 
-def _window(query: DQFuturesCurveQueryParams) -> tuple[datetime, datetime, datetime, int]:
-    cutoff = _utc(query.as_of) if query.as_of else _now()
-    age = query.max_age_seconds or (86400 if query.date else 900)
-    end = cutoff + timedelta(microseconds=1)
-    if query.date:
-        day_start = datetime.combine(query.date, datetime.min.time(), UTC)
-        end = min(end, day_start + timedelta(days=1))
-        start = max(day_start, end - timedelta(seconds=age))
-        if end <= start:
-            raise OpenBBError("The observation date is after the as_of cutoff.")
-    else:
-        start = cutoff - timedelta(seconds=age)
-    return cutoff, start, end, age
-
-
-def _number(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        parsed = Decimal(str(value))
-        return parsed if parsed.is_finite() else None
-    except (InvalidOperation, ValueError):
-        return None
-
-
-def _select_latest(records: list[dict]) -> dict[str, dict]:
-    selected: dict[str, dict] = {}
-    for row in records:
-        uid = row["instrument_uid"]
-        previous = selected.get(uid)
-        at = _utc(row["collector_observed_at"])
-        if previous:
-            previous_at = _utc(previous["collector_observed_at"])
-            if at < previous_at:
-                continue
-            if at == previous_at and row["content_hash"] != previous["content_hash"]:
-                raise OpenBBError("Futures quote ordering is ambiguous at one observation time.")
-        selected[uid] = row
-    return selected
-
-
 class DQFuturesCurveFetcher(Fetcher[DQFuturesCurveQueryParams, list[DQFuturesCurveData]]):
-    """Project a bounded central-store futures basket onto FuturesCurve."""
+    """Fetch one term structure from the platform's bounded futures REST API."""
 
     require_credentials = False
 
@@ -230,184 +187,25 @@ class DQFuturesCurveFetcher(Fetcher[DQFuturesCurveQueryParams, list[DQFuturesCur
     def extract_data(
         query: DQFuturesCurveQueryParams, credentials: dict | None, **kwargs: Any
     ) -> dict:
-        cutoff, start, end, age = _window(query)
-        status = _query("status", query.config_path, dataset=query.dataset)["data"]
-        if len(status) != 1 or status[0]["kind"] != "quotes":
-            raise OpenBBError("Futures curves require a configured quote dataset.")
-        references = _query(
-            "instruments",
-            query.config_path,
-            query=query.symbol,
-            as_of=cutoff,
-            limit=query.max_contracts + 1,
-        )
-        if references["meta"]["has_more"]:
-            raise OpenBBError("Futures reference listing is truncated; narrow the root.")
-        contracts = []
-        for row in references["data"]:
-            if row["asset_class"] != "future" or row["provider"] != status[0]["provider"]:
-                continue
-            terms = json.loads(row.get("terms_json") or "{}")
-            if not terms.get("expiration") or not terms.get("local_symbol"):
+        params = query.model_dump(exclude={"config_path"}, exclude_none=True)
+        if query.config_path is not None:
+            # Optional server-side diagnostics share the same implementation.
+            try:
+                from dq_quant_invest_data.data.market.config import load_market_config
+                from dq_quant_invest_data.data.market.futures_curve import read_curve
+                from dq_quant_invest_data.data.market.reader import MarketReader
+            except ImportError:
                 raise OpenBBError(
-                    "Qualified futures reference terms lack expiration or local symbol."
-                )
-            expiry = dateType.fromisoformat(terms["expiration"])
-            if expiry < (end - timedelta(microseconds=1)).date():
-                continue
-            contracts.append({**row, "terms": terms})
-        if not contracts:
-            raise OpenBBError("No unexpired qualified futures contracts match the root and source.")
-        if len(contracts) > query.max_contracts:
-            raise OpenBBError("Futures contract limit exceeded; narrow the root.")
-        uids = [row["instrument_uid"] for row in contracts]
-        if len(uids) != len(set(uids)):
-            raise OpenBBError("Futures reference identities are duplicated.")
-        common = dict(
-            dataset=query.dataset,
-            instruments=uids,
-            as_of=cutoff,
-            availability=query.availability,
-            layer=query.layer,
-            publication_id=query.publication_id,
-        )
-        if query.date:
-            result = _query(
-                "history",
-                query.config_path,
-                **common,
-                start=start,
-                end=end,
-                revisions="all",
-                limit=100000,
-            )
-        else:
-            result = _query(
-                "basket",
-                query.config_path,
-                **common,
-                max_age_seconds=age,
-                max_skew_seconds=query.max_skew_seconds,
-            )
-        if result["meta"].get("next_cursor"):
-            raise OpenBBError("Futures quote candidate limit exceeded; narrow the age window.")
-        return {
-            "contracts": contracts,
-            "quotes": result,
-            "reference_meta": references["meta"],
-            "as_of": cutoff,
-            "start": start,
-            "end": end,
-            "age": age,
-        }
+                    "Local diagnostics require dq-quant-invest-data with futures support."
+                ) from None
+            return read_curve(MarketReader(load_market_config(query.config_path)), **params)
+        return DQAPIClient(credentials).get_market_result("futures-curve", params)
 
     @staticmethod
     def transform_data(
         query: DQFuturesCurveQueryParams, data: dict, **kwargs: Any
     ) -> AnnotatedResult[list[DQFuturesCurveData]]:
-        selected = _select_latest(data["quotes"]["data"])
-        reference_time = data["end"] - timedelta(microseconds=1)
-        output, missing, invalid, blocked, times = [], [], [], [], []
-        for contract in data["contracts"]:
-            uid, terms = contract["instrument_uid"], contract["terms"]
-            row = selected.get(uid)
-            flags = json.loads(row.get("quality_flags_json") or "[]") if row else ["missing_quote"]
-            bid, ask, last = [
-                _number(row.get(key)) if row else None for key in ("bid", "ask", "last_trade_price")
-            ]
-            price = {"bid": bid, "ask": ask, "last": last}.get(query.price_type)
-            if query.price_type == "midpoint":
-                price = (
-                    (bid + ask) / 2
-                    if bid is not None and ask is not None and 0 <= bid <= ask
-                    else None
-                )
-            if price is not None and price < 0:
-                price = None
-            if row is None:
-                missing.append(uid)
-            elif price is None:
-                invalid.append(uid)
-                flags = [*flags, "selected_price_unavailable"]
-            if row and not row["gold_eligible"]:
-                blocked.append(uid)
-            observed = _utc(row["collector_observed_at"]) if row else None
-            if observed:
-                times.append(observed)
-            source_currency = row.get("currency") if row else None
-            if source_currency and terms.get("currency") and source_currency != terms["currency"]:
-                raise OpenBBError("Futures quote currency conflicts with qualified contract terms.")
-            output.append(
-                DQFuturesCurveData(
-                    date=observed.date() if observed else None,
-                    expiration=terms["expiration"],
-                    price=price,
-                    symbol=query.symbol,
-                    contract_symbol=terms["local_symbol"],
-                    contract_month=terms.get("contract_month"),
-                    instrument_uid=uid,
-                    currency=source_currency or terms.get("currency"),
-                    bid=bid,
-                    ask=ask,
-                    last_trade_price=last,
-                    exchange=terms.get("exchange"),
-                    trading_class=terms.get("trading_class"),
-                    multiplier=str(terms["multiplier"])
-                    if terms.get("multiplier") is not None
-                    else None,
-                    bid_size=_number(row.get("bid_size")) if row else None,
-                    ask_size=_number(row.get("ask_size")) if row else None,
-                    volume=_number(row.get("volume")) if row else None,
-                    open_interest=_number(row.get("open_interest")) if row else None,
-                    size_unit=row.get("size_unit") if row else None,
-                    volume_unit=row.get("volume_unit") if row else None,
-                    price_type=query.price_type,
-                    collector_observed_at=observed,
-                    event_time=row.get("event_time") if row else None,
-                    age_seconds=(reference_time - observed).total_seconds() if observed else None,
-                    actual_feed_type=row.get("actual_feed_type") if row else None,
-                    gold_eligible=bool(row and row["gold_eligible"]),
-                    quality_flags=flags,
-                    observation_uid=row.get("observation_uid") if row else None,
-                    reference_version_id=contract.get("version_id"),
-                )
-            )
-        if (missing or invalid) and not query.allow_incomplete:
-            raise OpenBBError(
-                f"Incomplete futures curve: {len(missing)} missing "
-                f"and {len(invalid)} invalid selected prices. "
-                "Check layer/age bounds, or set allow_incomplete=True. Silver is diagnostic data."
-            )
-        output.sort(key=lambda row: (row.expiration, row.contract_symbol, row.instrument_uid))
-        skew = (max(times) - min(times)).total_seconds() if times else None
-        meta = {
-            **data["quotes"]["meta"],
-            "as_of": data["as_of"],
-            "observation_start": data["start"],
-            "observation_end_exclusive": data["end"],
-            "quote_age_reference": reference_time,
-            "price_type": query.price_type,
-            "requested_contracts": len(output),
-            "missing_instruments": sorted(missing),
-            "invalid_price_instruments": sorted(invalid),
-            "quality_blocked_instruments": sorted(blocked),
-            "observed_time_skew_seconds": skew,
-            "complete": not missing and not invalid,
-            "eligible": not missing
-            and not invalid
-            and not blocked
-            and skew is not None
-            and skew <= query.max_skew_seconds,
-            "max_age_seconds": data["age"],
-            "max_skew_seconds": query.max_skew_seconds,
-            "simultaneous_exchange_snapshot": False,
-            "timing_basis": "collector_observation",
-            "reference": data["reference_meta"],
-            "reference_versions": {row.instrument_uid: row.reference_version_id for row in output},
-        }
-        meta["curve_snapshot_id"] = hashlib.sha256(
-            json.dumps(
-                [meta, [row.observation_uid for row in output]], default=str, sort_keys=True
-            ).encode()
-        ).hexdigest()
-        return AnnotatedResult(result=output, metadata=meta)
+        return AnnotatedResult(
+            result=[DQFuturesCurveData.model_validate(row) for row in data["data"]],
+            metadata=data["meta"],
+        )

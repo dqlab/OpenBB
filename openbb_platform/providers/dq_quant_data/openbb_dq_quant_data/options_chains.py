@@ -1,4 +1,4 @@
-"""Standard options-chain provider backed by the same governed local reader."""
+"""Standard options-chain provider backed by the data platform REST API."""
 
 from datetime import datetime
 from typing import Any, Literal
@@ -16,7 +16,8 @@ class DQOptionsChainsQueryParams(OptionsChainsQueryParams):
 
     dataset: str = Field(default="spx_option_chains", description="Stored dataset identifier.")
     config_path: str | None = Field(
-        default=None, description="Local market-store YAML; otherwise DQ_MARKET_CONFIG."
+        default=None,
+        description="Explicit local diagnostic override; otherwise use configured DQ REST API.",
     )
     capture_id: str | None = Field(default=None, description="Pin a capture identifier.")
     publication_id: str | None = Field(default=None, description="Pin an immutable publication.")
@@ -46,7 +47,7 @@ class DQOptionsChainsQueryParams(OptionsChainsQueryParams):
 
 
 class DQOptionsChainsFetcher(Fetcher[DQOptionsChainsQueryParams, MarketOptionsChainsData]):
-    """Expose local captures on the standard OptionsChains command."""
+    """Expose stored captures on the standard OptionsChains command."""
 
     require_credentials = False
 
@@ -62,7 +63,7 @@ class DQOptionsChainsFetcher(Fetcher[DQOptionsChainsQueryParams, MarketOptionsCh
         """Use the same reader and defaults as obb.dq_market.chain()."""
         values = query.model_dump()
         config_path = values.pop("config_path")
-        return _query("chain", config_path, **values)
+        return _query("chain", config_path, credentials=credentials, **values)
 
     @staticmethod
     def transform_data(

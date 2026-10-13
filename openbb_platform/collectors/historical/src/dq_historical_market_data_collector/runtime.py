@@ -130,6 +130,10 @@ class Collector:
                 self.reset_if_due()
                 key = digest([fingerprint, chunk.payload()])
                 collection = self.config.collections[chunk.collection_id]
+                if collection.current_day_only and chunk.start != self.clock().astimezone(
+                    ZoneInfo(self.config.schedule.timezone)
+                ).date():
+                    continue
                 if refresh_cycle and self.journal.attempted_in_cycle(key, refresh_cycle):
                     summary["resumed_chunks"] += 1
                     continue

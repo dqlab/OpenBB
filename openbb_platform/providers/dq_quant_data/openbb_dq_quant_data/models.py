@@ -18,10 +18,6 @@ from openbb_core.provider.standard_models.company_filings import (
     CompanyFilingsData,
     CompanyFilingsQueryParams,
 )
-from openbb_core.provider.standard_models.equity_historical import (
-    EquityHistoricalData,
-    EquityHistoricalQueryParams,
-)
 from openbb_core.provider.standard_models.equity_info import (
     EquityInfoData,
     EquityInfoQueryParams,
@@ -30,16 +26,18 @@ from openbb_core.provider.standard_models.equity_search import (
     EquitySearchData,
     EquitySearchQueryParams,
 )
-from openbb_core.provider.standard_models.etf_historical import (
-    EtfHistoricalData,
-    EtfHistoricalQueryParams,
-)
 from openbb_core.provider.standard_models.fred_series import (
     SeriesData,
     SeriesQueryParams,
 )
 
 from openbb_dq_quant_data.client import DQAPIClient
+from openbb_dq_quant_data.daily_bars import (
+    DQEquityHistoricalFetcher as DQEquityHistoricalFetcher,
+)
+from openbb_dq_quant_data.daily_bars import (
+    DQEtfHistoricalFetcher as DQEtfHistoricalFetcher,
+)
 
 
 def _records(
@@ -88,134 +86,6 @@ def _date_value(row: dict[str, Any], *names: str) -> date | datetime | None:
         return None
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     return parsed if "T" in str(value) else parsed.date()
-
-
-class DQEquityHistoricalData(EquityHistoricalData):
-    """Historical equity data from a canonical platform snapshot."""
-
-    symbol: str | None = None
-    adj_close: float | None = None
-    dividend: float | None = None
-    split_ratio: float | None = None
-
-
-class DQEquityHistoricalFetcher(Fetcher[EquityHistoricalQueryParams, list[DQEquityHistoricalData]]):
-    """Fetch canonical equity bars."""
-
-    @staticmethod
-    def transform_query(params: dict[str, Any]) -> EquityHistoricalQueryParams:
-        return EquityHistoricalQueryParams(**params)
-
-    @staticmethod
-    def extract_data(
-        query: EquityHistoricalQueryParams,
-        credentials: dict[str, str] | None,
-        **kwargs: Any,
-    ) -> list[dict[str, Any]]:
-        del kwargs
-        return _records(
-            "/api/v1/market/bars",
-            {
-                "symbols": query.symbol,
-                "start_date": query.start_date,
-                "end_date": query.end_date,
-                "limit": 10000,
-            },
-            credentials,
-        )
-
-    @staticmethod
-    def transform_data(
-        query: EquityHistoricalQueryParams,
-        data: list[dict[str, Any]],
-        **kwargs: Any,
-    ) -> list[DQEquityHistoricalData]:
-        del query, kwargs
-        output = []
-        for row in data:
-            timestamp = _date_value(row, "date", "event_time", "timestamp")
-            required = (
-                timestamp,
-                row.get("open"),
-                row.get("high"),
-                row.get("low"),
-                row.get("close"),
-            )
-            if any(value is None for value in required):
-                continue
-            output.append(
-                DQEquityHistoricalData(
-                    **_provenance(row),
-                    date=timestamp,
-                    symbol=row.get("canonical_symbol") or row.get("symbol"),
-                    open=float(row["open"]),
-                    high=float(row["high"]),
-                    low=float(row["low"]),
-                    close=float(row["close"]),
-                    volume=row.get("volume"),
-                    vwap=row.get("vwap"),
-                    adj_close=_first(row, "adjusted_close", "adj_close"),
-                    dividend=row.get("dividend"),
-                    split_ratio=_first(row, "split_factor", "split_ratio"),
-                )
-            )
-        return output
-
-
-class DQEtfHistoricalData(EtfHistoricalData):
-    """Historical ETF data with canonical symbol lineage and source volume."""
-
-    symbol: str | None = None
-    volume: float | None = None
-
-
-class DQEtfHistoricalFetcher(Fetcher[EtfHistoricalQueryParams, list[DQEtfHistoricalData]]):
-    """Fetch canonical ETF bars."""
-
-    @staticmethod
-    def transform_query(params: dict[str, Any]) -> EtfHistoricalQueryParams:
-        return EtfHistoricalQueryParams(**params)
-
-    @staticmethod
-    def extract_data(
-        query: EtfHistoricalQueryParams,
-        credentials: dict[str, str] | None,
-        **kwargs: Any,
-    ) -> list[dict[str, Any]]:
-        del kwargs
-        return _records(
-            "/api/v1/market/bars",
-            {
-                "symbols": query.symbol,
-                "start_date": query.start_date,
-                "end_date": query.end_date,
-                "limit": 10000,
-            },
-            credentials,
-        )
-
-    @staticmethod
-    def transform_data(
-        query: EtfHistoricalQueryParams,
-        data: list[dict[str, Any]],
-        **kwargs: Any,
-    ) -> list[DQEtfHistoricalData]:
-        del query, kwargs
-        return [
-            DQEtfHistoricalData(
-                **_provenance(row),
-                date=_date_value(row, "date", "event_time", "timestamp"),
-                symbol=row.get("canonical_symbol") or row.get("symbol"),
-                open=float(row["open"]),
-                high=float(row["high"]),
-                low=float(row["low"]),
-                close=float(row["close"]),
-                volume=row.get("volume"),
-            )
-            for row in data
-            if _date_value(row, "date", "event_time", "timestamp") is not None
-            and all(row.get(field) is not None for field in ("open", "high", "low", "close"))
-        ]
 
 
 class DQEquitySearchData(EquitySearchData):

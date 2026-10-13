@@ -45,6 +45,8 @@ def chunks(config: CollectorConfig, as_of: date) -> Iterator[Chunk]:
         days = min(days, capacity)
         for instrument_id in collection.instrument_ids:
             start = collection.start_date
+            if collection.current_day_only:
+                start = max(start, as_of - timedelta(days=1))
             while start < end:
                 stop = min(start + timedelta(days=days), end)
                 yield Chunk(collection_id, instrument_id, start, stop)

@@ -2,6 +2,7 @@
 
 from openbb_core.provider.abstract.provider import Provider
 
+from openbb_dq_quant_data.daily_bars import DQIndexHistoricalFetcher
 from openbb_dq_quant_data.futures_curve import DQFuturesCurveFetcher
 from openbb_dq_quant_data.models import (
     DQCalendarDividendFetcher,
@@ -19,12 +20,13 @@ dq_quant_data_provider = Provider(
     name="dq_quant_data",
     website="https://github.com/dqlab/dq-quant-invest-data",
     description="Canonical point-in-time data from dq-quant-invest-data.",
-    credentials=["api_url", "api_key"],
+    credentials=["api_url", "api_key", "api_ca_file"],
     fetcher_dict={
         "OptionsChains": DQOptionsChainsFetcher,
         "FuturesCurve": DQFuturesCurveFetcher,
         "EquityHistorical": DQEquityHistoricalFetcher,
         "EtfHistorical": DQEtfHistoricalFetcher,
+        "IndexHistorical": DQIndexHistoricalFetcher,
         "EquitySearch": DQEquitySearchFetcher,
         "EquityInfo": DQEquityInfoFetcher,
         "CalendarDividend": DQCalendarDividendFetcher,

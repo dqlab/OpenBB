@@ -173,6 +173,30 @@ class ProviderDispatcher:
         metadata.update(provider=self.source["provider"], model=self.source["model"])
         return Response(json_value(result if result is not None else []), len(captured), metadata)
 
+    def fetch_batch(self, requests: list[dict[str, Any]]) -> list[Response]:
+        """Use an explicitly supported provider batch hook with filtered credentials."""
+        hook = getattr(self.fetcher, "collect_batch", None)
+        limit = getattr(self.fetcher, "collection_batch_limit", 0)
+        if not callable(hook) or not 1 <= len(requests) <= limit:
+            raise ProviderFailure("unsupported_provider_batch")
+        provider = self.executor.get_provider(self.source["provider"])
+        credentials = self.executor.filter_credentials(
+            self.credentials, provider, self.fetcher.require_credentials
+        )
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            results = hook(requests, credentials)
+        if not isinstance(results, list) or len(results) != len(requests):
+            raise ProviderFailure("invalid_batch_response")
+        return [
+            Response(
+                json_value(result.result),
+                len(captured),
+                {**self.metadata, **(result.metadata or {})},
+            )
+            for result in results
+        ]
+
     def close(self) -> None:
         cleanup = getattr(self.fetcher, "close_collection", None)
         if cleanup:

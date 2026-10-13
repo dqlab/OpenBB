@@ -26,6 +26,7 @@ def test_registrations():
         "FuturesCurve",
         "EquityHistorical",
         "EtfHistorical",
+        "IndexHistorical",
         "EquitySearch",
         "EquityInfo",
         "CalendarDividend",
@@ -113,8 +114,8 @@ def test_governance_router_uses_credentials_and_metadata(monkeypatch):
 
 def test_historical_values_preserve_null_and_zero():
     row = {
-        "timestamp": "2026-01-02T15:30:00+00:00",
-        "canonical_symbol": "SPY",
+        "date": "2026-01-02T15:30:00+00:00",
+        "symbol": "SPY",
         "open": 100,
         "high": 102,
         "low": 99,
@@ -124,11 +125,13 @@ def test_historical_values_preserve_null_and_zero():
         "adj_close": 50,
     }
     equity = models.DQEquityHistoricalFetcher.transform_data(
-        models.DQEquityHistoricalFetcher.transform_query({"symbol": "SPY"}), [row]
-    )[0]
+        models.DQEquityHistoricalFetcher.transform_query({"symbol": "SPY"}),
+        {"data": [row], "meta": {"snapshot_id": "test"}},
+    ).result[0]
     etf = models.DQEtfHistoricalFetcher.transform_data(
-        models.DQEtfHistoricalFetcher.transform_query({"symbol": "SPY"}), [row]
-    )[0]
+        models.DQEtfHistoricalFetcher.transform_query({"symbol": "SPY"}),
+        {"data": [row], "meta": {"snapshot_id": "test"}},
+    ).result[0]
     assert equity.adj_close == 0
     assert equity.volume is None and etf.volume is None
     assert equity.date.isoformat() == "2026-01-02T15:30:00+00:00"
@@ -232,7 +235,7 @@ def test_chain_bounds_and_semantics(values):
 @pytest.mark.parametrize("volume", [None, 0, 1.5])
 def test_etf_keeps_units_adjustment_and_source_metadata(volume):
     row = {
-        "timestamp": "2026-01-02",
+        "date": "2026-01-02",
         "symbol": "SPY",
         "open": 100,
         "high": 102,
@@ -246,8 +249,9 @@ def test_etf_keeps_units_adjustment_and_source_metadata(volume):
         "volume_unit": "provider_defined",
     }
     result = models.DQEtfHistoricalFetcher.transform_data(
-        models.DQEtfHistoricalFetcher.transform_query({"symbol": "SPY"}), [row]
-    )[0]
+        models.DQEtfHistoricalFetcher.transform_query({"symbol": "SPY"}),
+        {"data": [row], "meta": {"snapshot_id": "test"}},
+    ).result[0]
     assert result.volume == volume
     assert result.model_dump()["adjustment_status"] == "unadjusted"
     assert result.model_dump()["currency"] == "USD"
@@ -341,4 +345,4 @@ def test_optional_local_backend_error(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", blocked_import)
     with pytest.raises(OpenBBError, match="Install dq-quant-invest-data"):
-        market._query("status", None)
+        market._query("status", "/explicit/local-config.yaml")

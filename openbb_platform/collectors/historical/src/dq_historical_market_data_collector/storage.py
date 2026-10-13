@@ -202,7 +202,9 @@ class Journal:
         return (
             self.db.execute(
                 "SELECT 1 FROM attempts a JOIN sessions s ON a.session_id=s.id "
-                "WHERE a.chunk_key=? AND s.refresh_cycle=? LIMIT 1",
+                "WHERE a.chunk_key=? AND s.refresh_cycle=? "
+                "AND (a.success=1 OR COALESCE(json_extract(a.detail,'$.code'),'') "
+                "<> 'cancelled') LIMIT 1",
                 (chunk_key, refresh_cycle),
             ).fetchone()
             is not None

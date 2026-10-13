@@ -1,4 +1,4 @@
-"""OpenBB SDK access to the governed local market store."""
+"""OpenBB SDK access to the governed market-data REST API."""
 
 from datetime import datetime
 
@@ -19,7 +19,48 @@ class MarketOptionsChainsData(OptionsChainsData):
     currency: list[str | None] = Field(default_factory=list)
 
 
-def _query(method: str, config_path: str | None, **kwargs) -> dict:
+CHAIN_FIELDS = (
+    "underlying_symbol",
+    "underlying_price",
+    "symbol",
+    "expiration",
+    "dte",
+    "strike",
+    "option_type",
+    "open_interest",
+    "volume",
+    "theoretical_price",
+    "last_trade_price",
+    "bid",
+    "bid_size",
+    "ask",
+    "ask_size",
+    "implied_volatility",
+    "delta",
+    "gamma",
+    "theta",
+    "vega",
+    "rho",
+    "instrument_uid",
+    "observation_uid",
+    "collector_observed_at",
+    "event_time",
+    "raw_hash",
+    "actual_feed_type",
+    "currency",
+)
+
+
+def _query(
+    method: str, config_path: str | None, *, credentials: dict | None = None, **kwargs
+) -> dict:
+    if config_path is None:
+        from openbb_dq_quant_data.client import DQAPIClient
+
+        if method == "chain":
+            kwargs["fields"] = ",".join(CHAIN_FIELDS)
+        return DQAPIClient(credentials).get_market_result(method, kwargs)
+    # Explicit local access remains available for server-side diagnostics only.
     try:
         from dq_quant_invest_data.data.market.config import load_market_config
         from dq_quant_invest_data.data.market.reader import MarketReader

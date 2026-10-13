@@ -230,3 +230,21 @@ def test_conflicting_retention_settings_rejected():
             local_retention="1w",
             remove_local_after_verification=True,
         )
+
+
+def test_forever_outbox_uses_pending_index_and_preserves_delivered(tmp_path):
+    store, raw = make_store(tmp_path, "forever")
+    try:
+        plan = store.db.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM jobs "
+            "WHERE target=? AND status<>'delivered' "
+            "AND (? OR next_attempt<=?) ORDER BY rowid LIMIT ?",
+            (store.target, False, 0, 10),
+        ).fetchall()
+        assert any("jobs_pending_target" in row[3] for row in plan)
+        assert len(store.send_pending()) == 1
+        assert store.send_pending(force=True) == []
+        assert raw.exists()
+        assert store.db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+    finally:
+        store.close()

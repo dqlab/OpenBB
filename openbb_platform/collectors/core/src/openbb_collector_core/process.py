@@ -6,14 +6,30 @@ import contextlib
 import json
 import multiprocessing as mp
 import os
+import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from typing import Any
 
 from .models import ProviderFailure, Response
 from .providers import ProviderDispatcher, json_value
+
+
+def _response_payload(response: Response, source: dict[str, Any]) -> dict[str, Any]:
+    if source.get("_collector"):
+        response.metadata["collector"] = source["_collector"]
+    rows = json_value(response.rows)
+    if not isinstance(rows, list) or len(rows) > source["max_rows"]:
+        raise ProviderFailure("response_row_limit")
+    if not all(isinstance(row, dict) for row in rows):
+        raise ProviderFailure("invalid_response")
+    return {
+        "rows": rows, "warning_count": response.warning_count,
+        "metadata": json_value(response.metadata),
+    }
 
 
 def _worker(connection: Connection, source: dict[str, Any]) -> None:
@@ -30,28 +46,36 @@ def _worker(connection: Connection, source: dict[str, Any]) -> None:
                 if request is None:
                     return
                 try:
-                    response = dispatcher.fetch(request)
-                    if source.get("_collector"):
-                        response.metadata["collector"] = source["_collector"]
-                    rows = json_value(response.rows)
-                    if not isinstance(rows, list) or len(rows) > source["max_rows"]:
-                        raise ProviderFailure("response_row_limit")
-                    if not all(isinstance(row, dict) for row in rows):
-                        raise ProviderFailure("invalid_response")
-                    encoded = json.dumps(
-                        {
-                            "rows": rows,
-                            "warning_count": response.warning_count,
-                            "metadata": json_value(response.metadata),
-                        },
-                        allow_nan=False,
-                    ).encode()
+                    if isinstance(request, list):
+                        if not 1 <= len(request) <= source.get("batch_size", 1):
+                            raise ProviderFailure("batch_request_limit")
+                        responses = dispatcher.fetch_batch(request)
+                        payload = {"responses": [
+                            _response_payload(response, source) for response in responses
+                        ]}
+                    else:
+                        payload = _response_payload(dispatcher.fetch(request), source)
+                    encoded = json.dumps(payload, allow_nan=False).encode()
                     if len(encoded) > source["max_response_bytes"]:
                         raise ProviderFailure("response_byte_limit")
                     connection.send_bytes(encoded)
                 except ProviderFailure as exc:
                     connection.send_bytes(json.dumps({"error": exc.code}).encode())
-                except Exception:
+                except Exception as exc:
+                    # Preserve diagnostic code locations, never vendor messages,
+                    # request parameters, credentials or traceback local values.
+                    print(
+                        json.dumps({
+                            "event": "provider_request_failed",
+                            "error_type": type(exc).__name__,
+                            "frames": [
+                                [os.path.basename(frame.filename), frame.lineno, frame.name]
+                                for frame in traceback.extract_tb(exc.__traceback__)
+                            ],
+                        }),
+                        file=sys.__stderr__,
+                        flush=True,
+                    )
                     connection.send_bytes(b'{"error":"provider_error"}')
         except ProviderFailure as exc:
             connection.send_bytes(json.dumps({"error": exc.code}).encode())
@@ -110,6 +134,21 @@ class ProcessClient:
         source: Any,
         request: dict[str, Any],
     ) -> Response:
+        return Response(**self._request(source_id, source, request))
+
+    def fetch_batch(
+        self, source_id: str, source: Any, requests: list[dict[str, Any]],
+    ) -> list[Response]:
+        if not 1 <= len(requests) <= getattr(source, "batch_size", 1):
+            raise ProviderFailure("batch_request_limit")
+        result = self._request(source_id, source, requests)
+        responses = result.get("responses")
+        if not isinstance(responses, list) or len(responses) != len(requests):
+            self._stop(source_id)
+            raise ProviderFailure("invalid_batch_response")
+        return [Response(**response) for response in responses]
+
+    def _request(self, source_id: str, source: Any, request: Any) -> dict[str, Any]:
         delay = source.min_interval_seconds - (
             time.monotonic() - self._last_call.get(source_id, -float("inf"))
         )
@@ -143,7 +182,7 @@ class ProcessClient:
             result = json.loads(worker.connection.recv_bytes(source.max_response_bytes))
             if "error" in result:
                 raise ProviderFailure(result["error"])
-            return Response(**result)
+            return result
         except (EOFError, OSError, ValueError) as exc:
             self._stop(source_id)
             raise ProviderFailure("provider_process_failed") from exc

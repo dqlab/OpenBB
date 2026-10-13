@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openbb-dq-quant-data"
-version = "0.1.5"
+version = "0.1.8"
 description = "DQ canonical data provider and governed market-store routers for OpenBB."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"

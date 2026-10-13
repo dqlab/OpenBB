@@ -62,6 +62,8 @@ class Source(StrictModel):
     timeout_seconds: float = Field(default=20, ge=0.1, le=120)
     min_interval_seconds: float = Field(default=1, ge=0.1, le=3600)
     snapshot_wait_seconds: float = Field(default=4, ge=0.7, le=30)
+    # Opt-in: one provider call subscribes at most this many quote contracts.
+    batch_size: int = Field(default=1, ge=1, le=40)
     retries: int = Field(default=1, ge=0, le=5)
     max_rows: int = Field(default=10, ge=1, le=100000)
     max_response_bytes: int = Field(default=1_000_000, ge=1024, le=50_000_000)
@@ -87,6 +89,8 @@ class Source(StrictModel):
 
     @model_validator(mode="after")
     def check_provider(self) -> Source:
+        if self.batch_size > 1 and self.record_type != "quote":
+            raise ValueError("Batch subscriptions require quote records")
         if self.record_type == "option_chain":
             if self.model != "OptionsChains" or not self.option_chain_roots:
                 raise ValueError(
