@@ -8,6 +8,7 @@ from openbb_baostock.models.equity_search import BaostockEquitySearchFetcher
 from openbb_baostock.models.index_constituents import BaostockIndexConstituentsFetcher
 from openbb_baostock.models.index_historical import BaostockIndexHistoricalFetcher
 from openbb_baostock.models.native import NATIVE_FETCHERS
+from openbb_baostock.models.history_source import SOURCE_FETCHERS
 
 baostock_provider = Provider(
     name="baostock",
@@ -23,6 +24,7 @@ baostock_provider = Provider(
         "IndexHistorical": BaostockIndexHistoricalFetcher,
         "IndexConstituents": BaostockIndexConstituentsFetcher,
         **NATIVE_FETCHERS,
+        **SOURCE_FETCHERS,
     },
     repr_name="BaoStock",
 )
