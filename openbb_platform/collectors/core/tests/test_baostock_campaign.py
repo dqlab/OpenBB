@@ -85,6 +85,7 @@ if os.environ.get("CAMPAIGN_OFFLINE") == "1":
                         and x.get("params") == params for x in old)
             fail = (scenario == "always" or (scenario == "fail_first"
                     and params.get("adjustflag") == "2" and prior == 0)
+                    or (scenario == "flag2" and params.get("adjustflag") == "2")
                     or (scenario == "factor_fail" and method == "query_adjust_factor"
                         and prior == 0))
             result = Result("503" if fail else "0", [["FAILED_BODY_SENTINEL"]] if fail else None)
@@ -381,10 +382,20 @@ def test_restart_limits_persist(tmp_path, mode):
         backoff=86400 if mode == "backoff" else 0,
     )
     child, first = h.run("always")
-    assert child.returncode == 1
+    # A spent attempt cap closes the page with a declared failure instead of
+    # stalling it forever; the reservation is still never refunded or refetched.
+    expected = 0 if mode == "cap" else 1
+    assert child.returncode == expected
     child, second = h.run()
-    assert child.returncode == 1 and second["source_calls"] == 0 and len(h.queries()) == 1
+    assert child.returncode == expected and second["source_calls"] == 0
+    assert len(h.queries()) == 1
     assert first["reserved_requests"] == second["reserved_requests"] == 1
+    if mode == "cap":
+        document = campaign.verify_handoff(
+            h.private, h.state_path().with_name("handoff-000000.json"), first["handoff_sha256"]
+        )
+        assert document["outcome"] == "closed_with_failures"
+        assert [failure["index"] for failure in document["failures"]] == [0]
 
 
 def test_cancel_at_finalization_is_durable_veto(tmp_path):

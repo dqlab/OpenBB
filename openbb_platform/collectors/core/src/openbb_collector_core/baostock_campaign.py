@@ -3,6 +3,16 @@
 Compile literal plans once, then run with explicit run/slot identity. A call
 selects at most one page (eight tasks, two requests each). Same-run recovery is
 not a new polling cycle. A new explicit run is the only way to refresh.
+
+A page advances when every entry is terminal: either its last attempt succeeded,
+or it failed and its policy attempt cap is spent. Such a page is sealed as a
+dead letter (`closed_with_failures`) with the failed attempts listed by index, so
+one exhausted request can never block the pages behind it. Only a success counts
+as captured data; a failure is always declared, never inferred away.
+
+A source login refusal is treated as a run-wide throttle: the invocation stops
+immediately and records `backoff.json` beside the authority, so the next call
+returns without touching the source until it expires.
 """
 
 from __future__ import annotations
@@ -26,7 +36,15 @@ from .baostock_acquisition import MODELS
 LEGACY_VERSION = "baostock-campaign-v1"
 VERSION = "baostock-campaign-v2"
 OLD_HANDOFF_VERSION = "baostock-campaign-handoff-v2"
-HANDOFF_VERSION = "baostock-campaign-handoff-v3"
+HANDOFF_V3_VERSION = "baostock-campaign-handoff-v3"
+HANDOFF_VERSION = "baostock-campaign-handoff-v4"
+# Handoff generations a reader can still prove read-only, oldest readable first.
+HANDOFF_VERSIONS = (OLD_HANDOFF_VERSION, HANDOFF_V3_VERSION, HANDOFF_VERSION)
+# Sealed pages of these generations also require an independent admission.
+ADMISSION_VERSIONS = (HANDOFF_V3_VERSION, HANDOFF_VERSION)
+BACKOFF_VERSION = "baostock-campaign-backoff-v1"
+DEFAULT_LOGIN_BACKOFF_SECONDS = 300
+DEFAULT_PACE_SECONDS = 0
 ADMISSION_VERSION = "baostock-campaign-page-admission-v1"
 MAX_CONTROL = 262144
 MAX_PAGE_BYTES = 65536  # reserve the rest for bounded attempt/handoff metadata
@@ -285,6 +303,88 @@ def initial_entries(page):
     return [dict(attempts=0, due=0, links=[]) for _ in requests(page)]
 
 
+def entry_terminal(entry, max_attempts):
+    """A page may advance when no further attempt can change an entry's outcome.
+
+    Success is terminal immediately. A failure is terminal only once the policy
+    attempt cap is spent, so a retryable page never closes on a transient error.
+    """
+    if not entry["links"]:
+        return False
+    last = entry["links"][-1]["status"]
+    if last == "success":
+        return True
+    return last == "failed" and entry["attempts"] >= max_attempts
+
+
+def entry_failures(entries):
+    """Declared failures are derived from entries, never authored separately.
+
+    Each record points at the real retained attempt: same locator and terminal
+    hash as the verified link, so a closed failure cannot be invented.
+    """
+    failures = []
+    for index, entry in enumerate(entries):
+        if not entry["links"] or entry["links"][-1]["status"] == "success":
+            continue
+        link = entry["links"][-1]
+        failures.append(
+            dict(
+                index=index,
+                attempt=link["attempt"],
+                status=link["status"],
+                locator=link["locator"],
+                terminal_sha256=link["terminal_sha256"],
+            )
+        )
+    return failures
+
+
+def env_seconds(name, default, reason, high=86400):
+    """Bounded whole-second knob; an unparsable value refuses instead of guessing."""
+    value = os.environ.get(name, "")
+    if not value:
+        return default
+    require(value.isdigit() and int(value) <= high, reason)
+    return int(value)
+
+
+def backoff_path(directory):
+    return raw._path(directory, "backoff.json")
+
+
+def backoff_document(binding, until_ns):
+    return dict(
+        version=BACKOFF_VERSION,
+        binding=binding,
+        until_ns=until_ns,
+        reason="login_failed",
+    )
+
+
+def login_backoff_active(io, directory, binding, now_ns):
+    """A source login refusal throttles the run, not only the page it hit."""
+    path = backoff_path(directory)
+    if not path.exists():
+        return False
+    document = io.state(path)
+    keys(document, "version binding until_ns reason")
+    require(
+        document["version"] == BACKOFF_VERSION
+        and document["reason"] == "login_failed"
+        and integer(document["until_ns"], 0, 2**63 - 1),
+        "invalid_campaign_backoff",
+    )
+    return document["binding"] == binding and document["until_ns"] > now_ns
+
+
+def login_reason(captured):
+    """Only the terminal summary's authored reason may throttle the run."""
+    terminal = captured.get("terminal") if captured is not None else None
+    summary = terminal.get("summary") if terminal is not None else None
+    return summary.get("reason") if type(summary) is dict else None
+
+
 def state_check(state, binding, header):
     keys(
         state,
@@ -501,7 +601,7 @@ def verify_handoff(root, path, expected):
     # metadata. The retained expected hash pins the version as well as bytes.
     document = raw._decode(raw._read(Path(path), MAX_CONTROL))
     require(digest(document) == expected, "handoff_checksum")
-    if document.get("version") != HANDOFF_VERSION:
+    if document.get("version") not in ADMISSION_VERSIONS:
         return _verify_handoff(root, path, expected)
     with _read_ownership(root):
         document = _verify_handoff(root, path, expected)
@@ -513,23 +613,43 @@ def _verify_handoff(root, path, expected):
     """Evidence proof only; producer calls this under its exclusive ownership."""
     document = raw._decode(raw._read(Path(path), MAX_CONTROL))
     require(digest(document) == expected, "handoff_checksum")
-    if document.get("version") == LEGACY_VERSION:
+    version = document.get("version")
+    if version == LEGACY_VERSION:
         # Exact historical page reading remains supported; old handoffs lack
         # cumulative accounting and cannot authorize a new cursor transition.
         keys(document, "version binding page tasks entries")
     else:
-        keys(
-            document,
+        names = (
             "version binding page tasks entries page_sha256 next_sha256 "
-            "prior_completed prior_reserved completed_requests reserved",
+            "prior_completed prior_reserved completed_requests reserved"
         )
-        require(document["version"] in (OLD_HANDOFF_VERSION, HANDOFF_VERSION), "handoff_version")
+        if version == HANDOFF_VERSION:
+            names += " outcome failures"
+        keys(document, names)
+        require(version in HANDOFF_VERSIONS, "handoff_version")
     tasks_check(document["tasks"])
     require(type(document["entries"]) is list, "handoff_entry_count")
     flat = requests(document)
     require(len(flat) == len(document["entries"]), "handoff_entry_count")
+    if version == HANDOFF_VERSION:
+        # A dead-letter page declares exactly the failures its own entries ended
+        # in. Authoring that list differently is refused, never repaired.
+        failures = entry_failures(document["entries"])
+        require(
+            encode(document["failures"]) == encode(failures)
+            and document["outcome"]
+            == ("complete" if not failures else "closed_with_failures"),
+            "handoff_failure_binding",
+        )
     for (task, _, request), entry in zip(flat, document["entries"], strict=True):
-        require(entry["links"] and entry["links"][-1]["status"] == "success", "incomplete_handoff")
+        require(entry["links"], "incomplete_handoff")
+        if version == HANDOFF_VERSION:
+            # A closed page may retain a terminal failure, but never an attempt
+            # still reserved and unrecorded.
+            require(entry["attempts"] == len(entry["links"]), "incomplete_handoff")
+            require(entry["links"][-1]["status"] in ("success", "failed"), "incomplete_handoff")
+        else:
+            require(entry["links"][-1]["status"] == "success", "incomplete_handoff")
         for link in entry["links"]:
             linked_capture(Path(root), document["binding"], document["page"], task, request, link)
     return document
@@ -542,7 +662,7 @@ def progress_binding(state, binding, header, handoff):
         require(handoff is None, "unexpected_prior_handoff")
         return
     require(
-        handoff is not None and handoff["version"] in (OLD_HANDOFF_VERSION, HANDOFF_VERSION),
+        handoff is not None and handoff["version"] in HANDOFF_VERSIONS,
         "handoff_accounting_unavailable",
     )
     require(
@@ -605,7 +725,7 @@ def progress_binding(state, binding, header, handoff):
 
 def handoff_document(state, page, *, version=HANDOFF_VERSION):
     """Seal counters together with the immutable page cursor before advancement."""
-    return dict(
+    document: dict[str, Any] = dict(
         version=version,
         binding=state["binding"],
         page=state["page"],
@@ -618,6 +738,13 @@ def handoff_document(state, page, *, version=HANDOFF_VERSION):
         completed_requests=state["completed_requests"] + len(requests(page)),
         reserved=state["reserved"],
     )
+    if version == HANDOFF_VERSION:
+        # Rebuildable from state alone: sealed_progress_conflict compares a
+        # retained document against this exact derivation.
+        failures = entry_failures(state["entries"])
+        document["outcome"] = "complete" if not failures else "closed_with_failures"
+        document["failures"] = failures
+    return document
 
 
 def retained_handoff(root, directory, state, binding, header):
@@ -642,7 +769,7 @@ def retained_handoff(root, directory, state, binding, header):
     if state["page"] < header["page_count"] and current.exists():
         sealed = raw._decode(raw._read(current, MAX_CONTROL))
         require(
-            sealed.get("version") in (OLD_HANDOFF_VERSION, HANDOFF_VERSION),
+            sealed.get("version") in HANDOFF_VERSIONS,
             "handoff_accounting_unavailable",
         )
         page = dict(
@@ -668,6 +795,15 @@ def run(manifest, root, run_key, slot, *, stop=None):
     manifest, root = raw._path(Path(manifest)), raw._path(Path(root))
     header = io.read(manifest / "manifest.json")
     header_check(header)
+    # Environment knobs are validated before any authority or evidence is written.
+    login_backoff = env_seconds(
+        "OPENBB_CAMPAIGN_LOGIN_BACKOFF_SECONDS",
+        DEFAULT_LOGIN_BACKOFF_SECONDS,
+        "invalid_login_backoff",
+    )
+    pace = env_seconds(
+        "OPENBB_CAMPAIGN_PACE_SECONDS", DEFAULT_PACE_SECONDS, "invalid_campaign_pace"
+    )
     authority = dict(
         version=VERSION,
         run=run_key,
@@ -712,6 +848,9 @@ def run(manifest, root, run_key, slot, *, stop=None):
             )
             io.write(progress_path, state)
             prior_handoff = None
+        # A recorded login refusal is a run-wide fact: read it under ownership,
+        # before any page is selected, and never call the source while it holds.
+        throttled = login_backoff_active(io, directory, binding, time.time_ns())
         source_calls = 0
         refetch_attempts = 0
         sdk_queries = 0
@@ -722,7 +861,7 @@ def run(manifest, root, run_key, slot, *, stop=None):
         # Only a page not already admitted on entry belongs to this invocation.
         # Prior successful pages are never vetoed by a later page's cancellation.
         owned_page = state["page"]
-        if prior_handoff is not None and prior_handoff["version"] == HANDOFF_VERSION:
+        if prior_handoff is not None and prior_handoff["version"] in ADMISSION_VERSIONS:
             decision_path = admission_path(directory, prior_handoff["page"])
             if decision_path.exists():
                 decision = io.state(decision_path)
@@ -773,11 +912,18 @@ def run(manifest, root, run_key, slot, *, stop=None):
             progress_binding(state, binding, header, prior_handoff)
             terminal = state["page"] == header["page_count"] and prior_handoff is not None
             status = "cancelled" if state["cancelled"] else "complete" if terminal else "partial"
+            # A closed page that kept terminal failures must never read as clean.
+            outcome = (
+                prior_handoff.get("outcome")
+                if prior_handoff is not None and prior_handoff["version"] == HANDOFF_VERSION
+                else None
+            )
             return dict(
                 version=VERSION,
                 run=run_key,
                 slot=slot,
                 status=status,
+                outcome=outcome,
                 remaining_requests=pending,
                 reserved_requests=state["reserved"],
                 source_calls=source_calls,
@@ -806,7 +952,7 @@ def run(manifest, root, run_key, slot, *, stop=None):
                 state["cancelled"] = True
                 save()
                 result["status"] = "cancelled"
-            elif candidate is not None and candidate["version"] == HANDOFF_VERSION:
+            elif candidate is not None and candidate["version"] in ADMISSION_VERSIONS:
                 require(not page_veto_path(directory, candidate["page"]).exists(),
                         "campaign_page_cancelled")
                 io.write(admission_path(directory, candidate["page"]),
@@ -890,6 +1036,10 @@ def run(manifest, root, run_key, slot, *, stop=None):
                 recovered = index
             for index, (original, _, request) in enumerate(flat):
                 entry = state["entries"][index]
+                if throttled:
+                    # Recorded login refusal: this invocation must not call the
+                    # source again, with or without a retryable entry.
+                    break
                 if state["cancelled"] or stop.is_set():
                     state["cancelled"] = True
                     save()
@@ -904,6 +1054,12 @@ def run(manifest, root, run_key, slot, *, stop=None):
                     or time.time_ns() < entry["due"]
                 ):
                     continue
+                if pace and source_calls and stop.wait(pace):
+                    # Pacing only separates source calls; a cancellation during
+                    # the pause must not strand a fresh reservation.
+                    state["cancelled"] = True
+                    save()
+                    break
                 attempt = entry["attempts"] + 1
                 task = attempt_task(binding, state["page"], original, request, attempt)
                 page_capture.task_check(task)
@@ -929,8 +1085,19 @@ def run(manifest, root, run_key, slot, *, stop=None):
                 else:
                     sdk_counts_known = False
                 finish(index, attempt, captured)  # page eligibility precedes progress
+                if login_reason(captured) == "login_failed":
+                    # BaoStock refused this session's login. Every further attempt
+                    # in this invocation meets the same refusal, so record the
+                    # run-wide throttle and stop before spending more budget.
+                    io.write(
+                        backoff_path(directory),
+                        backoff_document(
+                            binding, time.time_ns() + login_backoff * 1_000_000_000
+                        ),
+                    )
+                    break
             if not state["cancelled"] and all(
-                e["links"] and e["links"][-1]["status"] == "success" for e in state["entries"]
+                entry_terminal(e, header["policy"]["max_attempts"]) for e in state["entries"]
             ):
                 handoff_path = directory / f"handoff-{state['page']:06d}.json"
                 version = (raw._decode(raw._read(handoff_path, MAX_CONTROL))["version"]
@@ -938,7 +1105,7 @@ def run(manifest, root, run_key, slot, *, stop=None):
                 handoff = handoff_document(state, page, version=version)
                 candidate = handoff
                 raw._install(handoff_path, encode(handoff))
-                if handoff["version"] == HANDOFF_VERSION:
+                if handoff["version"] in ADMISSION_VERSIONS:
                     io.write(admission_path(directory, handoff["page"]),
                              admission_document(handoff, "pending"))
                 state["last_handoff"] = digest(handoff)
@@ -957,7 +1124,7 @@ def run(manifest, root, run_key, slot, *, stop=None):
                 stop.is_set() or isinstance(primary, (KeyboardInterrupt, SystemExit))
             ):
                 state["cancelled"] = True
-                if candidate is not None and candidate["version"] == HANDOFF_VERSION:
+                if candidate is not None and candidate["version"] in ADMISSION_VERSIONS:
                     try:
                         # Failure inside handoff installation may precede the
                         # normal pending write. Retain denial independently of
