@@ -76,7 +76,15 @@ progress 的自身 checksum 不是 authority：page0 必须 completed=0、无 pr
 
 complete 必须 terminal page、精确 completed total、空 active/entries 和有效 handoff，不能只因 pending 算式等于零。每个 reservation 在 source 前落盘；预算/attempt cap/backoff 跨 invocation 保持；取消 veto 不因 restart 清除。campaign 另以 immutable `cancel.json` 绑定取消事实，单独把 progress.cancelled 改回 false 也会拒绝。耗尽 run 的新额度必须显式新 run，且 fresh-fetch，不是扩容旧身份。首次 authority 安装后 progress 缺失仍 fail closed，不自动建立。
 
-新 `baostock-campaign-handoff-v3` 封存 page hash/next hash、prior/current completed 和 reserved totals、全部成功/失败 links，并要求独立的本页 admission。旧 v1/v2 handoff 按原格式只读验证，不重写、不静默升级。仅重读最后 handoff 的 completed replay 表示历史 acquisition 完成，不是重审所有历史 body；消费旧页需保留 expected handoff hash 并 exact verify。单一 progress restatement 可检测；协调改写全部 authority/receipts/hashes 不在无签名本地契约的防御范围。
+新 `baostock-campaign-handoff-v4` 封存 page hash/next hash、prior/current completed 和 reserved totals、全部成功/失败 links，并要求独立的本页 admission。v4 在此之上增加 `outcome`（`complete` | `closed_with_failures`）与 `failures`（按 entry 顺序的 `{index, attempt, status, locator, terminal_sha256}`），二者只能由 entries 推导，读取端重新推导并逐字段比对，不一致返回 `handoff_failure_binding`，不修复。旧 v2/v3 handoff 按原格式只读验证（仍要求最后 link 为 success），不重写、不静默升级；v3 与 v4 页都需要本页 admission。仅重读最后 handoff 的 completed replay 表示历史 acquisition 完成，不是重审所有历史 body；消费旧页需保留 expected handoff hash 并 exact verify。单一 progress restatement 可检测；协调改写全部 authority/receipts/hashes 不在无签名本地契约的防御范围。
+
+### 死信页关闭（v2.1）
+
+翻页条件不再要求整页 success：当页内每个 entry 都是终态时封页。终态 = 最后 link 为 success，或最后 link 为 failed 且 `entry.attempts >= policy.max_attempts`（即策略重试额度已耗尽）。`unknown`/`cancelled` 不是终态，页不关闭。这样一条耗尽重试的请求只把本页封成 `closed_with_failures`，不再永久阻塞后续所有页；失败的 attempt、locator 和 terminal hash 仍指向真实保留证据，且必须能通过 `linked_capture` 校验。success 语义不变：只有 success 的请求才算采到数据，失败一律显式列入 `failures`；`completed_requests` 计入已封页的全部请求数，因此死信页之后游标继续前进。v4 允许最后 link 为 failed，但仍要求 `entry.attempts == len(entry.links)`（不存在未完成 reservation）。
+
+### 登录限流熔断与请求节流（v2.1）
+
+一次 capture 的 terminal summary `reason` 为 `login_failed` 时，本次 invocation 立即结束 entry 循环（不再消耗同页后续请求的预算），并在 run 目录（`baostock-campaign-v2/<digest(run)>/`，与 `authority.json` 同级）原子写入有 checksum 的 `backoff.json`：`{version: baostock-campaign-backoff-v1, binding, until_ns, reason: login_failed}`。该文件不属于 progress 键空间，`state_check` 的键集合不变。合法 binding 且 `until_ns > now` 时 `run` 直接返回 `partial` 且 `source_calls=0`，不调用源；过期或 binding 不匹配则忽略，已记录的 attempt 不退款。窗口默认 300 秒，可由 `OPENBB_CAMPAIGN_LOGIN_BACKOFF_SECONDS` 覆盖（非整数或越界拒绝启动）。同一 invocation 内相邻 `capture_process` 之间另按 `OPENBB_CAMPAIGN_PACE_SECONDS`（默认 0）节流，取消发生在间隔内不会留下新 reservation。
 
 ### 最后取消边界与本页消费资格
 
