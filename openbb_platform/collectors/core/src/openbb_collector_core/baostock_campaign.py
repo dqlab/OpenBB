@@ -13,6 +13,18 @@ as captured data; a failure is always declared, never inferred away.
 A source login refusal is treated as a run-wide throttle: the invocation stops
 immediately and records `backoff.json` beside the authority, so the next call
 returns without touching the source until it expires.
+
+v2.2 grades the authored source error code of a failed attempt instead of
+treating every failure alike. A blacklist lockout stops the whole run and
+throttles it for 6h x this year's hit count (bounded); a login-count limit stops
+it for 10 minutes; a transport error is retried on a later invocation with a
+30/60/120s delay and is counted in `transport.jsonl`, an append-only ledger that
+never enters progress, a handoff or a verify, so network faults cannot consume
+the authored data-attempt budget or seal a page as a dead letter. A data/parameter
+error keeps the v2.1 attempt cap. A natural-day `budget.json` bounds source calls
+(login + cleanup + observed query/next calls) and returns `partial` when spent,
+and `latency.json` widens the request interval (or throttles the run) as captures
+get slower.
 """
 
 from __future__ import annotations
@@ -49,6 +61,32 @@ ADMISSION_VERSION = "baostock-campaign-page-admission-v1"
 MAX_CONTROL = 262144
 MAX_PAGE_BYTES = 65536  # reserve the rest for bounded attempt/handoff metadata
 MAX_PAGES = 100000
+
+# v2.2 rate policy. Every knob is validated from the environment before any
+# authority, evidence or ledger byte is written; an unparsable value refuses.
+DEFAULT_BLACKLIST_SECONDS = 21600
+MAX_BLACKLIST_SECONDS = 172800
+LOGIN_LIMIT_SECONDS = 600
+LATENCY_BACKOFF_SECONDS = 300
+DEFAULT_DAILY_CALL_BUDGET = 45000
+DEFAULT_TRANSPORT_CAP = 10
+UNKNOWN_RETRY_CAP = 3
+# One entry may therefore retain max_attempts data attempts plus both retry
+# classes. The bound is fixed so progress/handoff validation never depends on
+# the current environment of a reader.
+RETRY_ALLOWANCE = DEFAULT_TRANSPORT_CAP + UNKNOWN_RETRY_CAP
+BLACKLIST_CODE = "10001011"
+LOGIN_LIMIT_CODE = "10001005"
+BAOSTOCK_CODE_PREFIX = "1000"
+TRANSPORT_CODES = frozenset({"1000200" + str(i) for i in range(1, 9)})
+DATA_CODE_PREFIX = "100040"
+BACKOFF_REASONS = ("login_failed", "login_limit", "blacklist", "latency")
+SLOW_SECONDS = 10
+VERY_SLOW_SECONDS = 30
+ELEVATED_PACE_SECONDS = 3
+FAST_SECONDS = 3
+FAST_SAMPLES = 5
+LATENCY_SAMPLES = 8
 
 
 class CampaignError(ValueError):
@@ -303,18 +341,129 @@ def initial_entries(page):
     return [dict(attempts=0, due=0, links=[]) for _ in requests(page)]
 
 
-def entry_terminal(entry, max_attempts):
+def code_class(code):
+    """Policy class of one authored source error code.
+
+    Only the documented eight-digit BaoStock namespace is graded. A code outside
+    it (an SDK-level status such as `503`, a bare login refusal, or a missing
+    code because the attempt never received anything) is not a BaoStock access
+    verdict and keeps the v2.1 attempt accounting unchanged.
+    """
+    if type(code) is not str or not code.startswith(BAOSTOCK_CODE_PREFIX):
+        return None
+    if len(code) != len(BAOSTOCK_CODE_PREFIX) + 4 or not code.isdigit():
+        return None
+    if code == BLACKLIST_CODE:
+        return "blacklist"
+    if code == LOGIN_LIMIT_CODE:
+        return "login_limit"
+    if code in TRANSPORT_CODES:
+        return "transport"
+    if code.startswith(DATA_CODE_PREFIX):
+        return "data"
+    return "unknown"
+
+
+def attempt_error_code(root, locator):
+    """The failed attempt's own evidence code; a missing body authors no code.
+
+    Capture writes one observation body per observed source page. An attempt
+    that ended on the source deadline holds no body at all, and this reader must
+    never invent a code for it.
+    """
+    directory = raw._path(Path(root), locator)
+    if not raw._path(directory, "page-000.body").is_file():
+        return None
+    return page_capture.read_page(directory, 0).get("error_code")
+
+
+def transport_path(directory):
+    return raw._path(directory, "transport.jsonl")
+
+
+def transport_read(directory):
+    """Append-only retry ledger, counted per page entry. A bad line fails closed.
+
+    The ledger is deliberately outside the progress/handoff schema: it decides
+    only whether another attempt is allowed, and never rewrites an attempt count.
+    """
+    counts: dict[tuple[int, int], dict[str, Any]] = {}
+    path = transport_path(directory)
+    if not path.exists():
+        return counts
+    content = raw._read(path, MAX_CONTROL)
+    for line in content.splitlines(keepends=True):
+        require(line.endswith(b"\n"), "invalid_transport_ledger")
+        try:
+            record = json.loads(line)
+        except (UnicodeError, ValueError) as exc:
+            raise CampaignError("invalid_transport_ledger") from exc
+        require(encode(record) == line, "invalid_transport_ledger")
+        keys(record, "page index attempt code at_ns")
+        require(
+            integer(record["page"], 0, MAX_PAGES)
+            and integer(record["index"], 0, 15)
+            and integer(record["attempt"], 1, 2**31 - 1)
+            and integer(record["at_ns"], 0, 2**63 - 1),
+            "invalid_transport_ledger",
+        )
+        found = code_class(record["code"])
+        require(found in ("transport", "unknown"), "invalid_transport_ledger")
+        kind = "transport" if found == "transport" else "unknown"
+        view = counts.setdefault(
+            (record["page"], record["index"]), dict(transport=0, unknown=0, last=None)
+        )
+        view[kind] += 1
+        view["last"] = kind
+    return counts
+
+
+def transport_append(directory, page, index, attempt, code):
+    """Append one durable retry record; never part of a handoff or a verify."""
+    record = dict(page=page, index=index, attempt=attempt, code=code, at_ns=time.time_ns())
+    with raw._opened(transport_path(directory), "ab") as stream:
+        stream.write(encode(record))
+        stream.flush()
+        os.fsync(stream.fileno())
+    return record
+
+
+def retry_delay(count):
+    """30/60/120 seconds: a transport failure slows the next attempt, never skips it."""
+    return min(30 * 2 ** max(0, count - 1), 120)
+
+
+def data_attempts(entry, retries=None):
+    """Attempts that count against the authored data-retry budget."""
+    view = retries or {}
+    return max(0, entry["attempts"] - view.get("transport", 0) - view.get("unknown", 0))
+
+
+def entry_terminal(entry, max_attempts, retries=None, transport_cap=DEFAULT_TRANSPORT_CAP):
     """A page may advance when no further attempt can change an entry's outcome.
 
     Success is terminal immediately. A failure is terminal only once the policy
     attempt cap is spent, so a retryable page never closes on a transient error.
+    A transport failure is not a data failure: it closes the page only after the
+    transport (or unknown) retry cap is spent, and it never consumes a data
+    attempt, so a network fault cannot burn the authored budget or manufacture a
+    dead letter.
     """
     if not entry["links"]:
         return False
     last = entry["links"][-1]["status"]
     if last == "success":
         return True
-    return last == "failed" and entry["attempts"] >= max_attempts
+    if last != "failed":
+        return False
+    view = retries or {}
+    if data_attempts(entry, view) >= max_attempts:
+        return True
+    if view.get("last") == "transport":
+        return view.get("transport", 0) >= transport_cap
+    if view.get("last") == "unknown":
+        return view.get("unknown", 0) >= UNKNOWN_RETRY_CAP
+    return False
 
 
 def entry_failures(entries):
@@ -340,30 +489,34 @@ def entry_failures(entries):
     return failures
 
 
-def env_seconds(name, default, reason, high=86400):
-    """Bounded whole-second knob; an unparsable value refuses instead of guessing."""
+def env_integer(name, default, reason, low, high):
+    """Bounded whole-number knob; an unparsable value refuses instead of guessing."""
     value = os.environ.get(name, "")
     if not value:
         return default
-    require(value.isdigit() and int(value) <= high, reason)
+    require(value.isdigit() and low <= int(value) <= high, reason)
     return int(value)
+
+
+def env_seconds(name, default, reason, high=86400):
+    return env_integer(name, default, reason, 0, high)
 
 
 def backoff_path(directory):
     return raw._path(directory, "backoff.json")
 
 
-def backoff_document(binding, until_ns):
+def backoff_document(binding, until_ns, reason="login_failed"):
     return dict(
         version=BACKOFF_VERSION,
         binding=binding,
         until_ns=until_ns,
-        reason="login_failed",
+        reason=reason,
     )
 
 
-def login_backoff_active(io, directory, binding, now_ns):
-    """A source login refusal throttles the run, not only the page it hit."""
+def backoff_active(io, directory, binding, now_ns):
+    """Any recorded source throttle holds this run, not only the page it hit."""
     path = backoff_path(directory)
     if not path.exists():
         return False
@@ -371,11 +524,116 @@ def login_backoff_active(io, directory, binding, now_ns):
     keys(document, "version binding until_ns reason")
     require(
         document["version"] == BACKOFF_VERSION
-        and document["reason"] == "login_failed"
+        and document["reason"] in BACKOFF_REASONS
         and integer(document["until_ns"], 0, 2**63 - 1),
         "invalid_campaign_backoff",
     )
     return document["binding"] == binding and document["until_ns"] > now_ns
+
+
+def budget_path(directory):
+    return raw._path(directory, "budget.json")
+
+
+def day_string():
+    return time.strftime("%Y-%m-%d", time.localtime())
+
+
+def budget_state(io, directory):
+    """Natural-day source-call ledger; a new local day starts again at zero."""
+    current = dict(day=day_string(), calls=0)
+    path = budget_path(directory)
+    if not path.exists():
+        return current
+    stored = io.state(path)
+    keys(stored, "day calls")
+    require(
+        type(stored["day"]) is str
+        and len(stored["day"]) == 10
+        and integer(stored["calls"], 0, 16000000),
+        "invalid_campaign_budget",
+    )
+    return stored if stored["day"] == current["day"] else current
+
+
+def budget_charge(io, directory, budget, calls):
+    """One capture costs its login, its cleanup and every observed source call."""
+    budget["calls"] += calls
+    io.write(budget_path(directory), budget)
+    return budget["calls"]
+
+
+def latency_path(directory):
+    return raw._path(directory, "latency.json")
+
+
+def latency_state(io, directory, base_pace):
+    current = dict(samples=[], pace_seconds=base_pace)
+    path = latency_path(directory)
+    if not path.exists():
+        return current
+    stored = io.state(path)
+    keys(stored, "samples pace_seconds")
+    require(
+        type(stored["samples"]) is list
+        and len(stored["samples"]) <= LATENCY_SAMPLES
+        and all(
+            type(sample) in (int, float) and 0 <= sample <= 86400
+            for sample in stored["samples"]
+        )
+        and integer(stored["pace_seconds"], 0, 86400),
+        "invalid_campaign_latency",
+    )
+    return stored
+
+
+def latency_observe(io, directory, latency, elapsed, base_pace):
+    """Slow captures widen the request interval; very slow ones throttle the run.
+
+    Only observed captures enter the window, so a paced restart that asks the
+    source nothing cannot move the interval in either direction.
+    """
+    samples = (list(latency["samples"]) + [round(float(elapsed), 3)])[-LATENCY_SAMPLES:]
+    pace, reason = latency["pace_seconds"], None
+    if len(samples) >= 3:
+        window = sorted(samples[-3:])
+        median = window[1]
+        if median > VERY_SLOW_SECONDS:
+            pace, reason = max(base_pace, ELEVATED_PACE_SECONDS), "latency"
+        elif median > SLOW_SECONDS:
+            pace = max(base_pace, ELEVATED_PACE_SECONDS)
+    if len(samples) >= FAST_SAMPLES and all(s < FAST_SECONDS for s in samples[-FAST_SAMPLES:]):
+        pace = base_pace
+    document = dict(samples=samples, pace_seconds=pace)
+    io.write(latency_path(directory), document)
+    latency.update(document)
+    return reason
+
+
+def blacklist_path(directory):
+    return raw._path(directory, "blacklist-count.json")
+
+
+def blacklist_hit(io, directory, base_seconds):
+    """Authored duration is 6h x this year's hit count, bounded and never guessed.
+
+    The official counter is not observable here, so the count is this run's own
+    record of hits this calendar year; a new year starts again at one.
+    """
+    year = time.localtime().tm_year
+    count = 0
+    path = blacklist_path(directory)
+    if path.exists():
+        stored = io.state(path)
+        keys(stored, "year count")
+        require(
+            integer(stored["year"], 1970, 9999) and integer(stored["count"], 0, 1000),
+            "invalid_blacklist_count",
+        )
+        count = stored["count"] if stored["year"] == year else 0
+    count += 1
+    io.write(path, dict(year=year, count=count))
+    return min(base_seconds * count, MAX_BLACKLIST_SECONDS)
 
 
 def login_reason(captured):
@@ -416,8 +674,12 @@ def state_check(state, binding, header):
     )
     for entry in state["entries"]:
         keys(entry, "attempts due links")
+        # The key set is unchanged. The bound widens by the fixed retry
+        # allowance because transport-class retries are real retained attempts
+        # that never consume the authored data budget.
         require(
-            integer(entry["attempts"], 0, header["policy"]["max_attempts"]), "invalid_attempt_count"
+            integer(entry["attempts"], 0, header["policy"]["max_attempts"] + RETRY_ALLOWANCE),
+            "invalid_attempt_count",
         )
         require(
             integer(entry["due"], 0, 2**63 - 1) and type(entry["links"]) is list,
@@ -804,6 +1066,28 @@ def run(manifest, root, run_key, slot, *, stop=None):
     pace = env_seconds(
         "OPENBB_CAMPAIGN_PACE_SECONDS", DEFAULT_PACE_SECONDS, "invalid_campaign_pace"
     )
+    base_pace = pace
+    blacklist_seconds = env_integer(
+        "OPENBB_CAMPAIGN_BLACKLIST_SECONDS",
+        DEFAULT_BLACKLIST_SECONDS,
+        "invalid_blacklist_seconds",
+        1,
+        MAX_BLACKLIST_SECONDS,
+    )
+    daily_budget = env_integer(
+        "OPENBB_CAMPAIGN_DAILY_CALL_BUDGET",
+        DEFAULT_DAILY_CALL_BUDGET,
+        "invalid_daily_budget",
+        1,
+        16000000,
+    )
+    transport_cap = env_integer(
+        "OPENBB_CAMPAIGN_TRANSPORT_CAP",
+        DEFAULT_TRANSPORT_CAP,
+        "invalid_transport_cap",
+        1,
+        DEFAULT_TRANSPORT_CAP,
+    )
     authority = dict(
         version=VERSION,
         run=run_key,
@@ -848,9 +1132,16 @@ def run(manifest, root, run_key, slot, *, stop=None):
             )
             io.write(progress_path, state)
             prior_handoff = None
-        # A recorded login refusal is a run-wide fact: read it under ownership,
+        # A recorded source throttle is a run-wide fact: read it under ownership,
         # before any page is selected, and never call the source while it holds.
-        throttled = login_backoff_active(io, directory, binding, time.time_ns())
+        throttled = backoff_active(io, directory, binding, time.time_ns())
+        # v2.2 ledgers: retry counts, the natural-day budget and the observed
+        # latency window. None of them enters progress, a handoff or a verify.
+        retries = transport_read(directory)
+        budget = budget_state(io, directory)
+        latency = latency_state(io, directory, base_pace)
+        pace = max(base_pace, latency["pace_seconds"])
+        daily_exhausted = int(budget["calls"]) >= daily_budget
         source_calls = 0
         refetch_attempts = 0
         sdk_queries = 0
@@ -935,6 +1226,8 @@ def run(manifest, root, run_key, slot, *, stop=None):
                 handoff_sha256=state["last_handoff"],
                 capture_kind=page_capture.VERSION,
                 retry_semantics="incomplete-request-new-session-may-refetch-prefix",
+                daily_budget_exhausted=daily_exhausted,
+                daily_calls=int(budget["calls"]),
                 metrics=io.metrics,
             )
 
@@ -989,6 +1282,10 @@ def run(manifest, root, run_key, slot, *, stop=None):
                 # Complete the previous invocation's commit before advancing to
                 # another page; never acquire another source during this replay.
                 return finalize()
+            if daily_exhausted:
+                # The natural-day source-call budget is spent: this invocation may
+                # not ask the source anything, and reports partial instead.
+                return finalize()
             page = page_read(io, manifest, state["page"], state["page_sha256"], header)
             flat = requests(page)
             # An empty entry list means the prior page was atomically handed off.
@@ -1021,6 +1318,36 @@ def run(manifest, root, run_key, slot, *, stop=None):
                     state["cancelled"] = True
                 save()
 
+            def observe_retry(index, attempt, code, kind):
+                """Ledger a retryable failure, delay it, and never refund it.
+
+                The attempt itself is real and already retained as a link; the
+                ledger only decides whether another attempt may follow, so a
+                network fault can neither burn the data budget nor seal a page.
+                """
+                transport_append(directory, state["page"], index, attempt, code)
+                view = retries.setdefault(
+                    (state["page"], index), dict(transport=0, unknown=0, last=None)
+                )
+                view[kind] += 1
+                view["last"] = kind
+                state["entries"][index]["due"] = (
+                    time.time_ns() + retry_delay(view[kind]) * 1_000_000_000
+                )
+                save()
+
+            def classify_retry(index, attempt):
+                """Read the failed attempt's own code; ledger it when retryable."""
+                original, _, request = flat[index]
+                task = attempt_task(binding, state["page"], original, request, attempt)
+                code = attempt_error_code(root, page_capture.capture_locator(task))
+                found = code_class(code)
+                if found == "transport":
+                    observe_retry(index, attempt, code, "transport")
+                elif found == "unknown":
+                    observe_retry(index, attempt, code, "unknown")
+                return found
+
             recovered = None
             if state["active"] is not None:
                 index, attempt = state["active"]["entry"], state["active"]["attempt"]
@@ -1033,6 +1360,7 @@ def run(manifest, root, run_key, slot, *, stop=None):
                     # restarted under this attempt identity or fabricated cursor.
                     captured = page_capture.recover_capture(root, task)
                 finish(index, attempt, captured)
+                classify_retry(index, attempt)
                 recovered = index
             for index, (original, _, request) in enumerate(flat):
                 entry = state["entries"][index]
@@ -1048,8 +1376,9 @@ def run(manifest, root, run_key, slot, *, stop=None):
                     entry["links"] and entry["links"][-1]["status"] == "success"
                 ):
                     continue
+                view = retries.get((state["page"], index)) or {}
                 if (
-                    entry["attempts"] >= header["policy"]["max_attempts"]
+                    data_attempts(entry, view) >= header["policy"]["max_attempts"]
                     or state["reserved"] >= header["policy"]["request_budget"]
                     or time.time_ns() < entry["due"]
                 ):
@@ -1072,12 +1401,14 @@ def run(manifest, root, run_key, slot, *, stop=None):
                     break
                 source_calls += 1
                 refetch_attempts += int(bool(entry["links"]))
+                started = time.monotonic()
                 captured = page_capture.capture_process(
                     root,
                     task,
                     stop=stop,
                     restart_of=entry["links"][-1]["locator"] if entry["links"] else None,
                 )
+                elapsed = time.monotonic() - started
                 counts = captured["metrics"]
                 if counts and counts["source_query_calls"] is not None:
                     sdk_queries += counts["source_query_calls"]
@@ -1085,10 +1416,51 @@ def run(manifest, root, run_key, slot, *, stop=None):
                 else:
                     sdk_counts_known = False
                 finish(index, attempt, captured)  # page eligibility precedes progress
+                # Natural-day accounting: one login, one cleanup attempt and every
+                # source call this capture actually made.
+                budget_charge(
+                    io,
+                    directory,
+                    budget,
+                    2
+                    + (
+                        counts["source_query_calls"] + counts["source_next_calls"]
+                        if counts and counts["source_query_calls"] is not None
+                        else 0
+                    ),
+                )
+                if int(budget["calls"]) >= daily_budget:
+                    daily_exhausted = True
+                found = classify_retry(index, attempt)
+                if found == "blacklist":
+                    # The source has locked this address out. Everything stops
+                    # immediately and the next invocation is throttled for the
+                    # authored duration (6h x this year's hit count, bounded).
+                    seconds = blacklist_hit(io, directory, blacklist_seconds)
+                    io.write(
+                        backoff_path(directory),
+                        backoff_document(
+                            binding, time.time_ns() + seconds * 1_000_000_000, "blacklist"
+                        ),
+                    )
+                    break
+                if found == "login_limit":
+                    io.write(
+                        backoff_path(directory),
+                        backoff_document(
+                            binding,
+                            time.time_ns() + LOGIN_LIMIT_SECONDS * 1_000_000_000,
+                            "login_limit",
+                        ),
+                    )
+                    break
                 if login_reason(captured) == "login_failed":
                     # BaoStock refused this session's login. Every further attempt
-                    # in this invocation meets the same refusal, so record the
+                    # in this invocation meets the same refusal - including a
+                    # refusal that carries a transport code - so record the
                     # run-wide throttle and stop before spending more budget.
+                    # The attempt is already retained, and a transport-class
+                    # refusal is already ledgered as retryable.
                     io.write(
                         backoff_path(directory),
                         backoff_document(
@@ -1096,8 +1468,30 @@ def run(manifest, root, run_key, slot, *, stop=None):
                         ),
                     )
                     break
+                if found == "transport":
+                    pass  # already ledgered with its own delay
+                if latency_observe(io, directory, latency, elapsed, base_pace) == "latency":
+                    # A very slow source is throttled for the rest of this run.
+                    io.write(
+                        backoff_path(directory),
+                        backoff_document(
+                            binding,
+                            time.time_ns() + LATENCY_BACKOFF_SECONDS * 1_000_000_000,
+                            "latency",
+                        ),
+                    )
+                    break
+                pace = max(base_pace, latency["pace_seconds"])
+                if daily_exhausted:
+                    break
             if not state["cancelled"] and all(
-                entry_terminal(e, header["policy"]["max_attempts"]) for e in state["entries"]
+                entry_terminal(
+                    e,
+                    header["policy"]["max_attempts"],
+                    retries.get((state["page"], i)),
+                    transport_cap,
+                )
+                for i, e in enumerate(state["entries"])
             ):
                 handoff_path = directory / f"handoff-{state['page']:06d}.json"
                 version = (raw._decode(raw._read(handoff_path, MAX_CONTROL))["version"]
