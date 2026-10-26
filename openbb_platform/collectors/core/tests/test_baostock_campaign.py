@@ -137,6 +137,12 @@ if os.environ.get("CAMPAIGN_OFFLINE") == "1":
 """
 
 
+# Mutable per-invocation control documents: the progress cursor and the v2.2
+# rate-policy counters (natural-day budget, observed latency). Retained evidence,
+# sealed handoffs and admission decisions are never in this set.
+MUTABLE_CONTROL = {'progress.json', 'budget.json', 'latency.json'}
+
+
 def evidence_for_link(root, link):
     """Test-only versioned read adapter; never a product aggregate backend."""
     directory = root / link["locator"]
@@ -879,7 +885,7 @@ def test_q2_prior_page_and_other_run_keep_eligibility(tmp_path):
     assert first.returncode == 1 and first_result['status'] == 'partial'
     old = h.state_path().with_name('handoff-000000.json')
     preserved = {str(p): p.read_bytes() for p in h.private.rglob('*')
-                 if p.is_file() and p.name != 'progress.json'}
+                 if p.is_file() and p.name not in MUTABLE_CONTROL}
     (tmp_path/'bootstrap/sitecustomize.py').write_text(BOOTSTRAP + Q2_BOUNDARIES)
     h.env.update(Q2_BOUNDARY='handoff_after', Q2_STYLE='sigterm')
     child, result = h.run()
@@ -1310,7 +1316,7 @@ def test_d1_later_page_storage_failure_preserves_prior_success(tmp_path):
     assert first_child.returncode == 1 and first['status'] == 'partial'
     directory = h.state_path().parent
     before = {str(p): p.read_bytes() for p in h.private.rglob('*')
-              if p.is_file() and p.name != 'progress.json'}
+              if p.is_file() and p.name not in MUTABLE_CONTROL}
     # Same real descriptor fault, aimed only at page one's selected decision.
     extension = D1_BARRIERS.replace('admission-000000.json', 'admission-000001.json')
     (h.root/'bootstrap/sitecustomize.py').write_text(BOOTSTRAP + extension)
