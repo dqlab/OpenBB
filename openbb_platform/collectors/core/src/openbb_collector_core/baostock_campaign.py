@@ -57,6 +57,9 @@ ADMISSION_VERSIONS = (HANDOFF_V3_VERSION, HANDOFF_VERSION)
 BACKOFF_VERSION = "baostock-campaign-backoff-v1"
 DEFAULT_LOGIN_BACKOFF_SECONDS = 300
 DEFAULT_PACE_SECONDS = 0
+# v3: one login for a whole page. 0 restores the v2.2 single-request path
+# byte for byte; every other value would silently change the rate contract.
+DEFAULT_SESSION_PAGES = 1
 ADMISSION_VERSION = "baostock-campaign-page-admission-v1"
 MAX_CONTROL = 262144
 MAX_PAGE_BYTES = 65536  # reserve the rest for bounded attempt/handoff metadata
@@ -1088,6 +1091,13 @@ def run(manifest, root, run_key, slot, *, stop=None):
         1,
         DEFAULT_TRANSPORT_CAP,
     )
+    session_pages = env_integer(
+        "OPENBB_CAMPAIGN_SESSION_PAGES",
+        DEFAULT_SESSION_PAGES,
+        "invalid_session_pages",
+        0,
+        1,
+    )
     authority = dict(
         version=VERSION,
         run=run_key,
@@ -1147,6 +1157,9 @@ def run(manifest, root, run_key, slot, *, stop=None):
         sdk_queries = 0
         sdk_next_calls = 0
         sdk_counts_known = True
+        # v3 session facts for this invocation's summary: what the shared login
+        # cost and how its teardown ended. Never part of progress or a handoff.
+        session_hold: dict[str, Any] = dict(charged=False, record=None)
         candidate = None
         accepting = True
         # Only a page not already admitted on entry belongs to this invocation.
@@ -1228,6 +1241,7 @@ def run(manifest, root, run_key, slot, *, stop=None):
                 retry_semantics="incomplete-request-new-session-may-refetch-prefix",
                 daily_budget_exhausted=daily_exhausted,
                 daily_calls=int(budget["calls"]),
+                session=session_hold["record"],
                 metrics=io.metrics,
             )
 
@@ -1362,70 +1376,73 @@ def run(manifest, root, run_key, slot, *, stop=None):
                 finish(index, attempt, captured)
                 classify_retry(index, attempt)
                 recovered = index
-            for index, (original, _, request) in enumerate(flat):
+            settled: set[int] = set()
+
+            def eligible(index):
+                """Whether this invocation may still spend an attempt on an entry."""
                 entry = state["entries"][index]
-                if throttled:
-                    # Recorded login refusal: this invocation must not call the
-                    # source again, with or without a retryable entry.
-                    break
-                if state["cancelled"] or stop.is_set():
-                    state["cancelled"] = True
-                    save()
-                    break
-                if index == recovered or (
-                    entry["links"] and entry["links"][-1]["status"] == "success"
-                ):
-                    continue
-                view = retries.get((state["page"], index)) or {}
                 if (
+                    index in settled
+                    or index == recovered
+                    or (entry["links"] and entry["links"][-1]["status"] == "success")
+                ):
+                    return False
+                view = retries.get((state["page"], index)) or {}
+                return not (
                     data_attempts(entry, view) >= header["policy"]["max_attempts"]
                     or state["reserved"] >= header["policy"]["request_budget"]
                     or time.time_ns() < entry["due"]
-                ):
-                    continue
-                if pace and source_calls and stop.wait(pace):
-                    # Pacing only separates source calls; a cancellation during
-                    # the pause must not strand a fresh reservation.
-                    state["cancelled"] = True
-                    save()
-                    break
-                attempt = entry["attempts"] + 1
-                task = attempt_task(binding, state["page"], original, request, attempt)
+                )
+
+            def reserve(index, attempt):
+                """Reserve exactly one attempt, durably, before the source is asked.
+
+                Returns the attempt's task, or None when the reservation itself
+                proves the entry may not be attempted any more. A reservation is
+                never refunded, so a dead process still accounts for it.
+                """
+                nonlocal source_calls, refetch_attempts
+                task = attempt_task(
+                    binding, state["page"], flat[index][0], flat[index][2], attempt
+                )
                 page_capture.task_check(task)
+                entry = state["entries"][index]
                 entry["attempts"] = attempt
-                entry["due"] = time.time_ns() + header["policy"]["backoff_seconds"] * 1_000_000_000
+                entry["due"] = (
+                    time.time_ns() + header["policy"]["backoff_seconds"] * 1_000_000_000
+                )
                 state["reserved"] += 1
                 state["active"] = dict(entry=index, attempt=attempt)
                 save()  # Reservation survives process death; never refunded.
-                if state["cancelled"]:
-                    break
+                if state["cancelled"] or stop.is_set():
+                    return None
                 source_calls += 1
                 refetch_attempts += int(bool(entry["links"]))
-                started = time.monotonic()
-                captured = page_capture.capture_process(
-                    root,
-                    task,
-                    stop=stop,
-                    restart_of=entry["links"][-1]["locator"] if entry["links"] else None,
-                )
-                elapsed = time.monotonic() - started
-                counts = captured["metrics"]
-                if counts and counts["source_query_calls"] is not None:
+                settled.add(index)
+                return task
+
+            def settle(index, attempt, captured, elapsed, extra):
+                """Record one captured attempt, then apply the v2.2 policy to it."""
+                nonlocal sdk_queries, sdk_next_calls, sdk_counts_known, daily_exhausted, pace
+                counts = captured["metrics"] if captured is not None else None
+                known = bool(counts and counts["source_query_calls"] is not None)
+                if known:
                     sdk_queries += counts["source_query_calls"]
                     sdk_next_calls += counts["source_next_calls"]
                 else:
                     sdk_counts_known = False
                 finish(index, attempt, captured)  # page eligibility precedes progress
-                # Natural-day accounting: one login, one cleanup attempt and every
-                # source call this capture actually made.
+                # Natural-day accounting: this attempt's own fixed cost (a whole
+                # login and cleanup per request, nothing inside a shared session)
+                # plus every source call the attempt actually made.
                 budget_charge(
                     io,
                     directory,
                     budget,
-                    2
+                    extra
                     + (
                         counts["source_query_calls"] + counts["source_next_calls"]
-                        if counts and counts["source_query_calls"] is not None
+                        if known
                         else 0
                     ),
                 )
@@ -1443,7 +1460,7 @@ def run(manifest, root, run_key, slot, *, stop=None):
                             binding, time.time_ns() + seconds * 1_000_000_000, "blacklist"
                         ),
                     )
-                    break
+                    return "stop"
                 if found == "login_limit":
                     io.write(
                         backoff_path(directory),
@@ -1453,7 +1470,7 @@ def run(manifest, root, run_key, slot, *, stop=None):
                             "login_limit",
                         ),
                     )
-                    break
+                    return "stop"
                 if login_reason(captured) == "login_failed":
                     # BaoStock refused this session's login. Every further attempt
                     # in this invocation meets the same refusal - including a
@@ -1467,7 +1484,7 @@ def run(manifest, root, run_key, slot, *, stop=None):
                             binding, time.time_ns() + login_backoff * 1_000_000_000
                         ),
                     )
-                    break
+                    return "stop"
                 if found == "transport":
                     pass  # already ledgered with its own delay
                 if latency_observe(io, directory, latency, elapsed, base_pace) == "latency":
@@ -1480,9 +1497,161 @@ def run(manifest, root, run_key, slot, *, stop=None):
                             "latency",
                         ),
                     )
-                    break
+                    return "stop"
                 pace = max(base_pace, latency["pace_seconds"])
-                if daily_exhausted:
+                return "stop" if daily_exhausted else "continue"
+
+            # v3: one login for the whole page. A shared session is only worth it
+            # when this invocation may really attempt two entries of this page;
+            # otherwise the v2.2 single-request path below runs unchanged.
+            session_ran = False
+            if session_pages:
+                candidates = [
+                    index
+                    for index in range(len(flat))
+                    if not (throttled or state["cancelled"] or stop.is_set())
+                    and eligible(index)
+                ]
+                if len(candidates) >= 2:
+                    session_ran = True
+
+                    def admit(ordinal):
+                        """Reserve one entry's attempt, only after a proven login."""
+                        nonlocal daily_exhausted
+                        if not session_hold["charged"]:
+                            session_hold["charged"] = True
+                            # The session's fixed cost: one login, one logout.
+                            # Each task's own query/next calls are charged by
+                            # `settle` as that attempt is recorded.
+                            budget_charge(io, directory, budget, 2)
+                            if int(budget["calls"]) >= daily_budget:
+                                daily_exhausted = True
+                                return False
+                        index = candidates[ordinal]
+                        if not eligible(index):
+                            return False
+                        return reserve(
+                            index, state["entries"][index]["attempts"] + 1
+                        ) is not None
+
+                    def capture(ordinal, captured):
+                        """Settle a durable attempt, then answer whether to go on."""
+                        index = candidates[ordinal]
+                        counts = captured["metrics"] if captured is not None else None
+                        elapsed = 0.0
+                        if counts and counts.get("elapsed_seconds"):
+                            elapsed = float(counts["elapsed_seconds"])
+                        attempt = state["entries"][index]["attempts"]
+                        if settle(index, attempt, captured, elapsed, 0) == "stop":
+                            return False
+                        if pace and stop.wait(pace):
+                            state["cancelled"] = True
+                            save()
+                            return False
+                        return not (stop.is_set() or state["cancelled"])
+
+                    tasks = [
+                        attempt_task(
+                            binding,
+                            state["page"],
+                            flat[index][0],
+                            flat[index][2],
+                            state["entries"][index]["attempts"] + 1,
+                        )
+                        for index in candidates
+                    ]
+                    for task in tasks:
+                        page_capture.task_check(task)
+                    if pace and source_calls and stop.wait(pace):
+                        state["cancelled"] = True
+                        save()
+                    else:
+                        session = page_capture.capture_session(
+                            root, tasks, stop=stop, on_task=admit, on_capture=capture
+                        )
+                        session_hold["record"] = dict(
+                            tasks=len(candidates),
+                            reason=session["reason"],
+                            error=session["session_error"],
+                            cleanup=session["session_cleanup"],
+                            logins=session["session_logins"],
+                            logouts=session["session_logouts"],
+                            interrupted=session["interrupted"],
+                        )
+                        if session["session_error"] is not None:
+                            # The session login was refused. No attempt exists and
+                            # none was spent; exactly like a single refused
+                            # request this throttles the whole run.
+                            budget_charge(io, directory, budget, 1)
+                            found = code_class(session["session_error"])
+                            if found == "blacklist":
+                                seconds = blacklist_hit(io, directory, blacklist_seconds)
+                                io.write(
+                                    backoff_path(directory),
+                                    backoff_document(
+                                        binding,
+                                        time.time_ns() + seconds * 1_000_000_000,
+                                        "blacklist",
+                                    ),
+                                )
+                            elif found == "login_limit":
+                                io.write(
+                                    backoff_path(directory),
+                                    backoff_document(
+                                        binding,
+                                        time.time_ns() + LOGIN_LIMIT_SECONDS * 1_000_000_000,
+                                        "login_limit",
+                                    ),
+                                )
+                            else:
+                                io.write(
+                                    backoff_path(directory),
+                                    backoff_document(
+                                        binding,
+                                        time.time_ns() + login_backoff * 1_000_000_000,
+                                    ),
+                                )
+                        elif not session_hold["charged"]:
+                            # The session logged in but admitted no task at all.
+                            budget_charge(io, directory, budget, 2)
+
+            for index in range(len(flat)):
+                if session_ran:
+                    # The session owned this invocation's page pass: it either
+                    # settled every candidate or stopped for a run-wide reason.
+                    break
+                if throttled:
+                    # Recorded login refusal: this invocation must not call the
+                    # source again, with or without a retryable entry.
+                    break
+                if state["cancelled"] or stop.is_set():
+                    state["cancelled"] = True
+                    save()
+                    break
+                if not eligible(index):
+                    continue
+                if pace and source_calls and stop.wait(pace):
+                    # Pacing only separates source calls; a cancellation during
+                    # the pause must not strand a fresh reservation.
+                    state["cancelled"] = True
+                    save()
+                    break
+                attempt = state["entries"][index]["attempts"] + 1
+                task = reserve(index, attempt)
+                if task is None:
+                    break
+                started = time.monotonic()
+                captured = page_capture.capture_process(
+                    root,
+                    task,
+                    stop=stop,
+                    restart_of=(
+                        state["entries"][index]["links"][-1]["locator"]
+                        if state["entries"][index]["links"]
+                        else None
+                    ),
+                )
+                if settle(index, attempt, captured, time.monotonic() - started, 2) == "stop":
                     break
             if not state["cancelled"] and all(
                 entry_terminal(

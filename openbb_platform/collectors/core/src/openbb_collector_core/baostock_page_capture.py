@@ -19,6 +19,7 @@ from . import raw_acquisition as raw
 from .providers import executor_for, package_metadata
 
 VERSION = "baostock-page-capture-v1"
+SESSION_VERSION = "baostock-page-capture-session-v1"
 FRAME = 65536
 CONTROL = 4096
 AUTHORITY_BYTES = 262144
@@ -862,3 +863,668 @@ def capture_process(root, task, *, stop=None, restart_of=None, limits=None):
                 primary.add_note("page_capture_cleanup_failed")
             else:
                 raise failures[0]
+
+
+def _session_worker(conn, tasks):
+    """One SDK session; one task at a time, each admitted by the parent.
+
+    Every task still owns its attempt: a `task_begin` handshake proves the parent
+    wrote `authority.json` before the first source call, and the `terminal` frame
+    is answered only after that attempt is durable and installed. A task-level
+    failure is reported and then the next task continues; a session-level failure
+    ends the scope, whose logout is reported once in `session_end`.
+    """
+    from openbb_baostock.utils.source_evidence import (
+        EvidenceSinkV1,
+        active_session,
+        source_session,
+    )
+
+    class Sink(EvidenceSinkV1):
+        def __init__(self, index):
+            self.index = index
+            self.page = 0
+
+        def source_call(self, kind):
+            _send(conn, dict(kind="source", index=self.index, source=kind))
+            reply = _ack(conn)
+            require(
+                reply.get("kind") == "source_ack" and reply.get("index") == self.index,
+                "source_ack_shape",
+            )
+            return reply["continue"]
+
+        def observe(self, envelope, metadata):
+            index, page = self.index, self.page
+            _send(conn, dict(kind="begin", index=index, page=page, metadata=metadata))
+            reply = _ack(conn)
+            require(reply == dict(kind="begin_ack", index=index, page=page), "begin_ack_shape")
+            whole, size, count = hashlib.sha256(), 0, 0
+            for fragment in _frames(envelope):
+                conn.send_bytes(b"D" + fragment)
+                reply = _ack(conn)
+                require(
+                    reply == dict(kind="fragment_ack", index=index, page=page, fragment=count),
+                    "fragment_ack_shape",
+                )
+                whole.update(fragment)
+                size += len(fragment)
+                count += 1
+            _send(
+                conn,
+                dict(
+                    kind="end",
+                    index=index,
+                    page=page,
+                    bytes=size,
+                    fragments=count,
+                    sha256=whole.hexdigest(),
+                ),
+            )
+            reply = _ack(conn)
+            require(
+                reply.get("kind") == "page_ack"
+                and reply.get("index") == index
+                and reply.get("page") == page
+                and reply.get("sha256") == whole.hexdigest(),
+                "page_ack_shape",
+            )
+            self.page += 1
+            return reply["continue"]
+
+    import resource
+
+    session = None
+    try:
+        with source_session() as (ok, error_code):
+            session = active_session()
+            _send(conn, dict(kind="session", ok=ok, error_code=error_code))
+            reply = _ack(conn)
+            require(reply.get("kind") == "session_ack", "session_ack_shape")
+            proceed = ok and reply["continue"] is True
+            index = 0
+            while proceed and index < len(tasks):
+                _send(conn, dict(kind="task_begin", index=index))
+                reply = _ack(conn)
+                require(
+                    reply.get("kind") == "task_ack" and reply.get("index") == index,
+                    "task_ack_shape",
+                )
+                if not reply["continue"]:
+                    break
+                task = tasks[index]
+                try:
+                    result = asyncio.run(
+                        executor_for("baostock").execute(
+                            provider_name="baostock",
+                            model_name=task["source"]["model"],
+                            params=task["requests"][0]["params"],
+                            credentials={},
+                            evidence_sink_v1=Sink(index),
+                        )
+                    )
+                except Exception:
+                    # A task-level failure never ends the page's session: the
+                    # parent installs the attempt's terminal and answers below.
+                    _send(
+                        conn,
+                        dict(
+                            kind="task_error",
+                            index=index,
+                            reason="worker_operational_error",
+                            worker_maxrss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                        ),
+                    )
+                else:
+                    _send(
+                        conn,
+                        dict(
+                            kind="terminal",
+                            index=index,
+                            summary=result[0].evidence,
+                            worker_maxrss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                        ),
+                    )
+                reply = _ack(conn)
+                require(
+                    reply.get("kind") == "continue_ack" and reply.get("index") == index,
+                    "continue_ack_shape",
+                )
+                if not reply["continue"]:
+                    break
+                index += 1
+        _send(
+            conn,
+            dict(
+                kind="session_end",
+                login_calls=session.login_calls,
+                logout_calls=session.logout_calls,
+                cleanup=session.cleanup,
+            ),
+        )
+    except Exception:
+        # Opaque exception text never enters evidence; the parent owns the
+        # decision to keep or abandon the in-flight attempt.
+        try:
+            _send(conn, dict(kind="worker_error", reason="worker_operational_error"))
+        except (OSError, EOFError):
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def capture_session(root, tasks, *, stop=None, limits=None, on_capture=None, on_task=None):
+    """One SDK session, one attempt per task, each installed before the next.
+
+    The login is paid once for the whole task list; every task still owns its
+    own attempt directory, page receipts and terminal in the unchanged layout.
+    `on_task(index)` is asked only after that login was proven and before its
+    `authority.json` exists, so a refused session can never spend an attempt.
+    `on_capture(index, captured)` runs after each attempt is durable and its
+    return value decides whether the next task is admitted at all.
+    """
+    require(type(tasks) is list and 1 <= len(tasks) <= 16, "page_session_tasks")
+    tasks = [task_check(task) for task in tasks]
+    limits = limits_check(DEFAULT_LIMITS if limits is None else limits)
+    require(on_capture is None or callable(on_capture), "page_session_callback")
+    require(on_task is None or callable(on_task), "page_session_callback")
+    stop = stop if stop is not None else Event()
+    root = raw._path(Path(root))
+    plan = []
+    for index, task in enumerate(tasks):
+        locator = capture_locator(task)
+        directory = raw._path(root, locator)
+        # An existing attempt is read by its caller, never refetched inside a
+        # live session; refusing before any byte keeps both facts honest.
+        require(not directory.exists(), "page_session_attempt_exists")
+        plan.append(
+            dict(
+                index=index,
+                task=task,
+                locator=locator,
+                directory=directory,
+                packages=package_metadata("baostock", task["source"]["model"]),
+                reserve_bytes=_capacity_bytes(limits),
+            )
+        )
+    results = []
+    live = None
+    admitted = 0
+    session_ok = None
+    session_error = None
+    session_end = None
+    reason = "interrupted"
+    started = time.monotonic()
+    deadline = started + limits["attempt_seconds"]
+    parent = child = process = None
+    primary = None
+
+    def open_task(index):
+        """Durable authority before the source is asked anything for this task."""
+        item = plan[index]
+        directory = item["directory"]
+        identity = digest(dict(version=VERSION, task=item["task"]))
+        authority = dict(
+            version=VERSION,
+            identity=identity,
+            task=item["task"],
+            limits=limits,
+            codec="baostock-source-evidence-v1-or-v2",
+            received_ns=time.time_ns(),
+            source_time=None,
+            packages=item["packages"],
+            restart_of=None,
+            refetch=False,
+        )
+        require(len(encode(authority)) <= AUTHORITY_BYTES, "page_authority_limit")
+        raw._mkdir(root)
+        reserve_bytes = item["reserve_bytes"]
+        stat = os.statvfs(root)
+        require(stat.f_bavail * stat.f_frsize >= reserve_bytes, "page_storage_headroom")
+        raw._mkdir(directory)
+        metrics = dict(
+            fragment_writes=0,
+            fragment_fsyncs=0,
+            body_bytes=0,
+            metadata_bytes=0,
+            immutable_installs=0,
+            max_frame_bytes=0,
+            source_query_calls=0,
+            source_next_calls=0,
+            reserved_capacity_bytes=reserve_bytes,
+        )
+        # Allocation credit, never source evidence; a crash-left remainder stays.
+        capacity = (directory / ".capacity").open("xb")
+        try:
+            quota_remaining = reserve_bytes - 16 * 1024 * 1024
+            os.posix_fallocate(capacity.fileno(), 0, quota_remaining)
+            capacity.flush()
+            os.fsync(capacity.fileno())
+            _install(directory / "authority.json", authority, metrics, AUTHORITY_BYTES)
+        except BaseException:
+            capacity.close()
+            raise
+        return dict(
+            index=index,
+            task=item["task"],
+            directory=directory,
+            identity=identity,
+            metrics=metrics,
+            capacity=capacity,
+            quota_remaining=quota_remaining,
+            body=None,
+            journal=None,
+            page=0,
+            total=0,
+            previous=digest(authority),
+            size=0,
+            count=0,
+            chain=ZERO,
+            whole=hashlib.sha256(),
+            source_kind=None,
+            start=time.monotonic(),
+        )
+
+    def seal_task(task_state, terminal_summary, item_reason):
+        """Install this attempt's terminal exactly once, then prove it readable."""
+        directory = task_state["directory"]
+        metrics = task_state["metrics"]
+        for name in ("body", "journal"):
+            stream = task_state[name]
+            if stream is not None:
+                stream.close()
+                task_state[name] = None
+        proved = read_capture(root, task_state["task"])
+        metrics["source_query_admissions"] = metrics["source_query_calls"]
+        metrics["source_next_admissions"] = metrics["source_next_calls"]
+        if terminal_summary is None:
+            metrics["source_query_calls"] = None
+            metrics["source_next_calls"] = None
+        metrics["elapsed_seconds"] = time.monotonic() - task_state["start"]
+        metrics["session_index"] = task_state["index"]
+        # The session's own liveness is proven by the frame protocol: a dead
+        # worker never reports a terminal, so it can never read as complete.
+        complete = bool(
+            terminal_summary
+            and terminal_summary["status"] == "complete"
+            and terminal_summary["cleanup"] == "ok"
+            and not stop.is_set()
+            and not proved["pending"]
+        )
+        terminal = dict(
+            identity=task_state["identity"],
+            status="complete" if complete else "partial",
+            reason=item_reason,
+            summary=terminal_summary,
+            pages=len(proved["pages"]),
+            last_page_root=proved["last_page_root"],
+            bytes=sum(p["receipt"]["bytes"] for p in proved["pages"])
+            + (proved["pending"]["bytes"] if proved["pending"] else 0),
+            metrics=metrics,
+        )
+        terminal_hash = _install(directory / "terminal.json", terminal)
+        if stop.is_set():
+            _install(
+                directory / "cancel.json",
+                dict(identity=task_state["identity"], reason="cancelled"),
+            )
+        if complete and not stop.is_set():
+            _install(
+                directory / "eligible.json",
+                dict(
+                    identity=task_state["identity"],
+                    terminal_sha256=terminal_hash,
+                    last_page_root=proved["last_page_root"],
+                ),
+            )
+        capacity = task_state["capacity"]
+        capacity.truncate(0)
+        capacity.flush()
+        os.fsync(capacity.fileno())
+        capacity.close()
+        task_state["capacity"] = None
+        return read_capture(root, task_state["task"])
+
+    try:
+        context = mp.get_context("spawn")
+        parent, child = context.Pipe()
+        process = context.Process(target=_session_worker, args=(child, tasks))
+        process.start()
+        child.close()
+        child = None
+        while True:
+            now = time.monotonic()
+            if stop.is_set():
+                if live is not None and not (live["directory"] / "cancel.json").exists():
+                    _install(
+                        live["directory"] / "cancel.json",
+                        dict(identity=live["identity"], reason="cancelled"),
+                        live["metrics"],
+                    )
+                reason = "cancelled"
+                break
+            if now >= deadline:
+                reason = "attempt_deadline" if live is not None else "session_deadline"
+                break
+            if live is not None and now >= live["start"] + limits["attempt_seconds"]:
+                # The v2.2 per-attempt bound still holds inside the session, so a
+                # slow source cannot stretch one attempt past its own budget.
+                reason = "attempt_deadline"
+                break
+            if not parent.poll(0.05):
+                if not process.is_alive():
+                    if reason == "interrupted":
+                        reason = "worker_died"
+                    break
+                continue
+            try:
+                message = parent.recv_bytes(FRAME + 1)
+            except EOFError:
+                if reason == "interrupted":
+                    reason = "worker_died"
+                break
+            metrics = live["metrics"] if live is not None else None
+            if metrics is not None:
+                metrics["max_frame_bytes"] = max(metrics["max_frame_bytes"], len(message))
+            if message[:1] == b"D":
+                require(live is not None and live["body"] is not None, "fragment_without_begin")
+                fragment = message[1:]
+                require(1 <= len(fragment) <= FRAME, "page_frame_limit")
+                if live["total"] + live["size"] + len(fragment) > limits["body_bytes"]:
+                    reason = "resource_exhausted"
+                    break
+                # Release enough reserved allocation before adding the body and
+                # journal record. Physical storage failure remains possible.
+                live["quota_remaining"] = max(
+                    0, live["quota_remaining"] - len(fragment) - CONTROL - 1
+                )
+                live["capacity"].truncate(live["quota_remaining"])
+                live["body"].write(fragment)
+                live["body"].flush()
+                os.fsync(live["body"].fileno())
+                record = dict(
+                    identity=live["identity"],
+                    page=live["page"],
+                    fragment=live["count"],
+                    offset=live["size"],
+                    bytes=len(fragment),
+                    sha256=sha(fragment),
+                    previous=live["chain"],
+                )
+                line = encode(record)
+                require(len(line) <= CONTROL, "fragment_record_limit")
+                live["journal"].write(line)
+                live["journal"].flush()
+                os.fsync(live["journal"].fileno())
+                live["metrics"]["fragment_writes"] += 2
+                live["metrics"]["fragment_fsyncs"] += 2
+                live["metrics"]["body_bytes"] += len(fragment)
+                live["metrics"]["metadata_bytes"] += len(line)
+                live["chain"] = sha(line)
+                live["whole"].update(fragment)
+                live["size"] += len(fragment)
+                _send(
+                    parent,
+                    dict(
+                        kind="fragment_ack",
+                        index=live["index"],
+                        page=live["page"],
+                        fragment=live["count"],
+                    ),
+                )
+                live["count"] += 1
+                continue
+            require(message[:1] == b"C" and len(message) <= CONTROL + 1, "page_message_shape")
+            item = raw._decode(message[1:])
+            kind = item.get("kind")
+            if kind == "session":
+                require(session_ok is None and live is None and admitted == 0, "page_session_phase")
+                session_ok = item["ok"] is True
+                session_error = None if session_ok else item["error_code"]
+                deadline = time.monotonic() + limits["source_seconds"]
+                _send(
+                    parent,
+                    dict(kind="session_ack", **{"continue": session_ok and not stop.is_set()}),
+                )
+                if not session_ok:
+                    reason = "login_refused"
+                elif stop.is_set():
+                    reason = "cancelled"
+                continue
+            if kind == "session_end":
+                session_end = item
+                if reason == "interrupted":
+                    reason = "complete"
+                deadline = time.monotonic() + limits["drain_seconds"]
+                continue
+            if kind == "worker_error":
+                reason = "worker_operational_error"
+                continue
+            require(session_ok is True, "page_session_phase")
+            index = item.get("index")
+            require(integer(index, 0, len(tasks) - 1), "page_session_index")
+            if kind == "task_begin":
+                require(live is None and index == admitted, "page_session_sequence")
+                proceed = not stop.is_set() and (on_task is None or on_task(index) is not False)
+                if not proceed:
+                    _send(parent, dict(kind="task_ack", index=index, **{"continue": False}))
+                    reason = "caller_stopped"
+                    deadline = time.monotonic() + limits["drain_seconds"]
+                    continue
+                live = open_task(index)
+                _send(parent, dict(kind="task_ack", index=index, **{"continue": True}))
+                deadline = time.monotonic() + limits["source_seconds"]
+                continue
+            require(live is not None and live["index"] == index, "page_session_sequence")
+            if kind == "source":
+                require(
+                    live["body"] is None and item["source"] in ("login", "query", "next"),
+                    "source_phase",
+                )
+                live["source_kind"] = item["source"]
+                proceed = (
+                    not stop.is_set()
+                    and live["page"] < limits["observations"]
+                    and live["total"] < limits["body_bytes"]
+                )
+                if proceed:
+                    if live["source_kind"] == "query":
+                        live["metrics"]["source_query_calls"] += 1
+                    elif live["source_kind"] == "next":
+                        live["metrics"]["source_next_calls"] += 1
+                _send(parent, dict(kind="source_ack", index=index, **{"continue": proceed}))
+                deadline = time.monotonic() + limits["source_seconds"]
+                continue
+            if kind == "begin":
+                require(
+                    live["body"] is None
+                    and type(item["page"]) is int
+                    and item["page"] == live["page"]
+                    and live["page"] < limits["observations"]
+                    and live["source_kind"] is not None,
+                    "page_begin_phase",
+                )
+                meta = item["metadata"]
+                require(
+                    set(meta) == {"trigger", "previous_state_sha256", "received_ns"}
+                    and meta["trigger"]
+                    in ("login_return", "query_return", "next_return", "next_raise")
+                    and integer(meta["received_ns"], 1, 2**63 - 1),
+                    "page_observation_shape",
+                )
+                begin = dict(
+                    identity=live["identity"],
+                    page=live["page"],
+                    previous_page_root=live["previous"],
+                    source_time=None,
+                    **meta,
+                )
+                _install(
+                    live["directory"] / f"page-{live['page']:03d}.begin.json",
+                    begin,
+                    live["metrics"],
+                )
+                live["body"] = (live["directory"] / f"page-{live['page']:03d}.body").open("xb")
+                live["journal"] = (
+                    live["directory"] / f"page-{live['page']:03d}.fragments.jsonl"
+                ).open("xb")
+                live["begin"] = begin
+                raw._sync(live["directory"])
+                live.update(size=0, count=0, chain=ZERO, whole=hashlib.sha256())
+                deadline = time.monotonic() + limits["drain_seconds"]
+                _send(parent, dict(kind="begin_ack", index=index, page=live["page"]))
+                continue
+            if kind == "end":
+                require(
+                    live["body"] is not None
+                    and item
+                    == dict(
+                        kind="end",
+                        index=index,
+                        page=live["page"],
+                        bytes=live["size"],
+                        fragments=live["count"],
+                        sha256=live["whole"].hexdigest(),
+                    ),
+                    "page_end_binding",
+                )
+                live["body"].close()
+                live["body"] = None
+                live["journal"].close()
+                live["journal"] = None
+                receipt = dict(
+                    identity=live["identity"],
+                    page=live["page"],
+                    begin_sha256=digest(live["begin"]),
+                    previous_page_root=live["previous"],
+                    bytes=live["size"],
+                    fragments=live["count"],
+                    fragment_root=live["chain"],
+                    sha256=live["whole"].hexdigest(),
+                )
+                live["previous"] = _install(
+                    live["directory"] / f"page-{live['page']:03d}.receipt.json",
+                    receipt,
+                    live["metrics"],
+                )
+                # Actual bytes and codec must be readable before permitting next.
+                proved = read_capture(root, live["task"])
+                require(
+                    len(proved["pages"]) == live["page"] + 1 and proved["pending"] is None,
+                    "page_ack_proof",
+                )
+                live["total"] += live["size"]
+                proceed = (
+                    not stop.is_set()
+                    and live["page"] + 1 < limits["observations"]
+                    and live["total"] < limits["body_bytes"]
+                )
+                _send(
+                    parent,
+                    dict(
+                        kind="page_ack",
+                        index=index,
+                        page=live["page"],
+                        sha256=live["whole"].hexdigest(),
+                        **{"continue": proceed},
+                    ),
+                )
+                live["page"] += 1
+                deadline = time.monotonic() + limits["source_seconds"]
+                continue
+            if kind in ("terminal", "task_error"):
+                require(
+                    live["body"] is None and live["journal"] is None,
+                    "terminal_with_pending_page",
+                )
+                if kind == "terminal":
+                    terminal_summary = item["summary"]
+                    require(
+                        terminal_summary["version"] == "baostock-page-summary-v1"
+                        and terminal_summary["pages"] == live["page"]
+                        and terminal_summary["query_calls"] == live["metrics"]["source_query_calls"]
+                        and terminal_summary["next_calls"] == live["metrics"]["source_next_calls"],
+                        "worker_summary_binding",
+                    )
+                    item_reason = terminal_summary["reason"]
+                else:
+                    terminal_summary = None
+                    item_reason = item["reason"]
+                live["metrics"]["worker_maxrss_kib"] = item["worker_maxrss_kib"]
+                captured = seal_task(live, terminal_summary, item_reason)
+                results.append(
+                    dict(
+                        index=index,
+                        status=captured["status"],
+                        captured=captured,
+                        elapsed_seconds=live["metrics"]["elapsed_seconds"],
+                    )
+                )
+                admitted += 1
+                # The callback owns progress: a failure here must stop the
+                # session before the source is asked for another task.
+                proceed = on_capture is None or on_capture(index, captured) is not False
+                live = None
+                _send(parent, dict(kind="continue_ack", index=index, **{"continue": bool(proceed)}))
+                if not proceed:
+                    reason = "caller_stopped"
+                    deadline = time.monotonic() + limits["drain_seconds"]
+                else:
+                    deadline = time.monotonic() + limits["source_seconds"]
+                continue
+            raise PageCaptureError("unknown_page_message")
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        failures = []
+        if live is not None:
+            # An in-flight attempt keeps its authority and any page receipts
+            # only: no terminal is authored for an unproven capture.
+            for name in ("body", "journal", "capacity"):
+                stream = live.get(name)
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except BaseException as exc:
+                        failures.append(exc)
+        if process is not None:
+            for signal_worker in (process.terminate, process.kill):
+                try:
+                    if process.is_alive():
+                        signal_worker()
+                except BaseException as exc:
+                    failures.append(exc)
+                try:
+                    process.join(2 if process.is_alive() else 0)
+                except BaseException as exc:
+                    failures.append(exc)
+            try:
+                require(not process.is_alive(), "page_worker_not_reaped")
+                process.close()
+            except BaseException as exc:
+                failures.append(exc)
+        for resource in (parent, child):
+            if resource is not None:
+                try:
+                    resource.close()
+                except BaseException as exc:
+                    failures.append(exc)
+        if failures:
+            if primary is not None:
+                primary.add_note("page_capture_cleanup_failed")
+            else:
+                raise failures[0]
+    return dict(
+        version=SESSION_VERSION,
+        reason=reason,
+        session_ok=session_ok is True,
+        session_error=session_error,
+        session_cleanup=(session_end or {}).get("cleanup"),
+        session_logins=(session_end or {}).get("login_calls"),
+        session_logouts=(session_end or {}).get("logout_calls"),
+        completed=[dict(entry) for entry in results],
+        interrupted=live["index"] if live is not None else None,
+        elapsed_seconds=time.monotonic() - started,
+    )

@@ -103,6 +103,14 @@ reader 不补 fsync，也不能从可见文件推断另一进程失败或未返�
 正常新页仍写 pending/eligible 两个 control；最终 confirmation 额外做一次有界 admission read、一次 file fsync 和四次 directory fsync，无 source body reread。已存在 eligible 的 producer replay 同样做这五次同步，不以同内容早退；Control metrics 计入这些成功完成的同步与 admission read。取消额外保存本页 veto。v3 verify 的只读 shared root lock、authority/admission 检查和版本选择用 handoff 读取不变。现有 root 粒度锁意味着后页 producer 活跃时，旧 v3 页的 reader 也可能 busy；没有新中央库或并发 publisher。
 
 
+### 会话复用：每页一次登录（v3）
+
+`OPENBB_CAMPAIGN_SESSION_PAGES`（默认 1，只接受 0/1，其他值在写任何字节前拒绝）开启后，`run` 的页循环先收集本页本 invocation 真正可采的 entry（未成功、未到期、数据 attempt 未用尽、预算未耗尽）；待采数 ≥ 2 时走一次 `capture_session`：单个 worker 进程在 `source_session()` 内依次执行这些 attempt，登录与登出各一次，各任务只保留自己的 query/next。待采数 < 2 或该变量为 0 时逐条走原有 `capture_process`，证据、progress、handoff 与 v2.2 逐字节一致。
+
+会话内的 attempt 仍是独立 attempt：父进程在 `task_begin` 握手时才调用 `admit`，先落 reservation 与 `authority.json`，之后 worker 才被允许请求源；每个 attempt 的 body/receipt/terminal/eligible 布局、`read_capture` 校验、`linked_capture` 绑定与 v2.2 完全相同。任务完成即 durable，父进程用 `on_capture` 结算（`finish` → `save()` → 预算 → `classify_retry` → v2.2 规则），得到 `continue` 后 worker 才处理下一个任务；回调抛异常立即中止会话且不再请求源。单个任务的数据/参数错误只记录该 attempt，其余任务照常继续。
+
+预算：会话固定 1 login + 1 logout，加各任务实际 query/next。`session_end` 帧带回 `cleanup`（`logout_failed` 如实记录，不降级任何已产出证据）。会话级登录被拒时 `capture_session` 返回 `session_error`，**不产生任何 attempt、不消耗任何 reservation**，campaign 按该错误码分类后写 `backoff.json` 并结束本次 invocation。进程死亡/超时时：已完成的 attempt 已装盘；在飞的 attempt 只留 `authority.json`（可能带已完成的页 receipt），不伪造 terminal，交由下一轮 `recover_capture` 判定；未 admit 的任务不产生 attempt。`capture_session` 要求每个任务的 attempt 目录不存在（调用方对已存在的 attempt 只读不重取）。
+
 ## 计量与验收
 
 Control metrics 只覆盖 campaign Control read/progress write；page-capture metrics 单独记录 body/journal 写入、fragment fsync、元数据安装/字节、最大 frame、elapsed、worker peak RSS（本 Linux/WSL 环境的 KiB）。fragment_fsyncs 不包括 authority/receipt/directory/capacity fsync。posix_fallocate 与 repeated readback 都有真实成本，不能用小夹具证明 NAS、Windows、断电或生产量级吞吐。

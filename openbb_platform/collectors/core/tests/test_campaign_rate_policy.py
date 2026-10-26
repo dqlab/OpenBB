@@ -448,19 +448,20 @@ def test_transport_class_login_refusal_still_stops_the_invocation(tmp_path):
     h.env["FORCED_LOGIN_CODE"] = "10002007"
     child, summary = h.run()
     assert child.returncode == 1 and summary["status"] == "partial"
-    assert summary["source_calls"] == 1
-    assert len(logins(h)) == 1
+    # v3: one login covers the page, and its refusal is proven before any
+    # attempt exists. Nothing is spent and no request reaches the source.
+    assert summary["source_calls"] == 0 and summary["session"]["error"] == "10002007"
+    assert len(logins(h)) == 1 and not h.queries()
     document = backoff_document(h)
     assert document["reason"] == "login_failed"
     remaining = document["until_ns"] - time.time_ns()
     assert 0 < remaining <= campaign.DEFAULT_LOGIN_BACKOFF_SECONDS * 10**9
-    # The refused attempt is retained, and graded as retryable rather than data.
+    # No attempt, no ledger entry and no data attempt are consumed by a refusal.
     state = h.state()
-    assert len(state["entries"][0]["links"]) == 1
-    records = ledger(h)
-    assert len(records) == 1 and records[0]["code"] == "10002007"
-    view = campaign.transport_read(run_directory(h))[(0, 0)]
-    assert campaign.data_attempts(state["entries"][0], view) == 0
+    assert [entry["attempts"] for entry in state["entries"]] == [0, 0, 0]
+    assert [entry["links"] for entry in state["entries"]] == [[], [], []]
+    assert ledger(h) == []
+    assert campaign.data_attempts(state["entries"][0], {}) == 0
     # While the throttle holds, the source is not touched again.
     child, throttled = h.run()
     assert throttled["source_calls"] == 0 and len(logins(h)) == 1

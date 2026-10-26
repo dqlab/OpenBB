@@ -181,8 +181,9 @@ def test_login_failure_writes_run_backoff_and_stops_the_invocation(tmp_path):
     h = Harness(tmp_path, [task(flags=("3", "2"))])
     child, summary = h.run("login_failure")
     assert child.returncode == 1 and summary["status"] == "partial"
-    # The page holds two requests; the second is never sent after a refusal.
-    assert summary["source_calls"] == 1 and len(logins(h)) == 1 and not h.queries()
+    # v3: the page's two requests share one login, so the refusal is proven
+    # before any attempt exists. No attempt is spent and no request is sent.
+    assert summary["source_calls"] == 0 and len(logins(h)) == 1 and not h.queries()
     document = campaign.Control().state(backoff_file(h))
     authority = json.loads((run_directory(h) / "authority.json").read_bytes())
     assert document["version"] == campaign.BACKOFF_VERSION
@@ -191,7 +192,8 @@ def test_login_failure_writes_run_backoff_and_stops_the_invocation(tmp_path):
     remaining = document["until_ns"] - time.time_ns()
     assert 0 < remaining <= campaign.DEFAULT_LOGIN_BACKOFF_SECONDS * 1_000_000_000
     entries = h.state()["entries"]
-    assert [entry["attempts"] for entry in entries] == [1, 0]
+    assert [entry["attempts"] for entry in entries] == [0, 0]
+    assert [entry["links"] for entry in entries] == [[], []]
 
 
 # 6 ---------------------------------------------------------------------------
@@ -201,7 +203,8 @@ def test_active_backoff_skips_the_source_then_expires(tmp_path):
     child, throttled = h.run()
     assert child.returncode == 1 and throttled["status"] == "partial"
     assert throttled["source_calls"] == 0 and len(logins(h)) == 1 and not h.queries()
-    assert [entry["attempts"] for entry in h.state()["entries"]] == [1, 0]
+    # v3 proved the refusal with the page's single login, so nothing was spent.
+    assert [entry["attempts"] for entry in h.state()["entries"]] == [0, 0]
     binding = campaign.Control().state(backoff_file(h))["binding"]
     campaign.Control().write(
         backoff_file(h), campaign.backoff_document(binding, time.time_ns() - 1)

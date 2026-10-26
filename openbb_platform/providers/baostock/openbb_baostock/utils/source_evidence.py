@@ -8,7 +8,9 @@ import asyncio
 import json
 import math
 import struct
+from contextlib import contextmanager
 from copy import deepcopy
+from threading import local
 from typing import Any
 
 from openbb_baostock.utils import helpers
@@ -167,7 +169,96 @@ def _snapshot(result):
     }
 
 
-def _query_values(operation, params):
+class SourceSession:
+    """One provider-owned SDK session; a transport fact, never evidence.
+
+    Only `ok`/`error_code` describe what the source answered. `cleanup` records
+    the session's own teardown, which happens after the enclosed calls returned
+    and therefore can never be attributed to a single page observation.
+    """
+
+    def __init__(self):
+        self.ok = False
+        self.error_code: Any = None
+        self.reason = "login_failed"
+        self.authenticated = False
+        self.login_calls = 0
+        self.logout_calls = 0
+        self.cleanup = "ok"
+
+
+# The SDK keeps one process-global socket. While a session owns it, an enclosed
+# query must not take `helpers._SESSION_LOCK` (a non-reentrant Lock), log in
+# again, or tear the connection down. The activation marker is thread-local, so
+# a query on any other thread keeps the unchanged single-request path.
+_ACTIVE = local()
+
+
+def active_session():
+    """Return the session this thread is currently inside, or None."""
+    return getattr(_ACTIVE, "session", None)
+
+
+@contextmanager
+def _no_lock():
+    """Stand-in for the session lock an inner call must not re-acquire."""
+    yield
+
+
+@contextmanager
+def source_session():
+    """Open one BaoStock session and reuse it for the enclosed calls.
+
+    Yields `(True, None)` once the session is usable and `(False, error_code)`
+    when the source refused the login: a refusal is a value, never an exception.
+    Nothing logs in again, logs out or closes the socket until this scope exits.
+    """
+    if active_session() is not None:
+        # Re-entering would deadlock on the non-reentrant session lock.
+        raise ValueError("nested_source_session")
+    session = SourceSession()
+    helpers._SESSION_LOCK.acquire()
+    _ACTIVE.session = session
+    try:
+        session.login_calls += 1
+        try:
+            login = helpers.bs.login()
+        except Exception:
+            # No code was returned: the caller learns "not usable" without a
+            # fabricated source status.
+            session.reason = "login_exception"
+        else:
+            session.error_code = _code(login)
+            session.ok = _success(session.error_code)
+            session.authenticated = session.ok
+            session.reason = "ok" if session.ok else "login_failed"
+        try:
+            yield session.ok, (None if session.ok else session.error_code)
+        finally:
+            try:
+                if session.authenticated:
+                    session.logout_calls += 1
+                    try:
+                        if not _success(_code(helpers.bs.logout())):
+                            session.cleanup = "logout_failed"
+                    except Exception:
+                        session.cleanup = "logout_failed"
+            finally:
+                connection = getattr(helpers.context, "default_socket", None)
+                try:
+                    if connection is not None:
+                        connection.close()
+                except Exception:
+                    session.cleanup = "socket_close_failed"
+                finally:
+                    helpers.context.default_socket = None
+    finally:
+        _ACTIVE.session = None
+        helpers._SESSION_LOCK.release()
+
+
+def _query_values(operation, params, session=None):
+    session = active_session() if session is None else session
     method = OPERATIONS[operation]
     envelope: dict[str, Any] = dict(
         version=VERSION,
@@ -180,15 +271,22 @@ def _query_values(operation, params):
         pages=[],
         cleanup="ok",
     )
-    with helpers._SESSION_LOCK:
+    with (helpers._SESSION_LOCK if session is None else _no_lock()):
         logged_in = False
         try:
-            login = helpers.bs.login()
-            envelope["error_code"] = _code(login)
-            if not _success(envelope["error_code"]):
-                envelope["reason"] = "login_failed"
+            if session is None:
+                login = helpers.bs.login()
+                envelope["error_code"] = _code(login)
+                if not _success(envelope["error_code"]):
+                    envelope["reason"] = "login_failed"
+                    return envelope
+                logged_in = True
+            elif not session.ok:
+                # A refused session never asks the source anything; the caller's
+                # own envelope reports the refusal verbatim.
+                envelope["error_code"] = session.error_code
+                envelope["reason"] = session.reason
                 return envelope
-            logged_in = True
             result = helpers.resolve_method(method)(**params)
             if result is None:
                 return envelope
@@ -243,36 +341,44 @@ def _query_values(operation, params):
             if envelope["pages"]:
                 envelope["status"] = "partial"
         finally:
-            try:
-                if logged_in and not _success(_code(helpers.bs.logout())):
-                    envelope["cleanup"] = "logout_failed"
-            except Exception:
-                envelope["cleanup"] = "logout_failed"
-            finally:
-                connection = getattr(helpers.context, "default_socket", None)
+            # An enclosing session owns login/logout/socket teardown; closing it
+            # here would break every later call in the same session.
+            if session is None:
                 try:
-                    if connection is not None:
-                        connection.close()
+                    if logged_in and not _success(_code(helpers.bs.logout())):
+                        envelope["cleanup"] = "logout_failed"
                 except Exception:
-                    envelope["cleanup"] = "socket_close_failed"
+                    envelope["cleanup"] = "logout_failed"
                 finally:
-                    helpers.context.default_socket = None
+                    connection = getattr(helpers.context, "default_socket", None)
+                    try:
+                        if connection is not None:
+                            connection.close()
+                    except Exception:
+                        envelope["cleanup"] = "socket_close_failed"
+                    finally:
+                        helpers.context.default_socket = None
     return envelope
 
 
-def _query(operation, params):
-    return _wire(_query_values(operation, params))
+def _query(operation, params, session=None):
+    return _wire(_query_values(operation, params, session))
 
 
 async def query_evidence(operation, params, evidence_sink_v1=None):
     """Serialize the SDK session; the caller owns the hard deadline."""
     if operation not in OPERATIONS:
         raise ValueError("unsupported_source_operation")
+    # The SDK runs on a helper thread, so the session capability is carried
+    # across that boundary explicitly instead of relying on thread-local state.
+    session = active_session()
     if evidence_sink_v1 is not None:
         if not isinstance(evidence_sink_v1, EvidenceSinkV1):
             raise ValueError("invalid_evidence_sink_v1")
-        return await asyncio.to_thread(_query_stream, operation, params, evidence_sink_v1)
-    return await asyncio.to_thread(_query, operation, params)
+        return await asyncio.to_thread(
+            _query_stream, operation, params, evidence_sink_v1, session
+        )
+    return await asyncio.to_thread(_query, operation, params, session)
 
 
 class EvidenceSinkV1:
@@ -323,7 +429,75 @@ def encoded_chunks(envelope):
     yield from emit(value)
 
 
-def _query_stream(operation, params, sink):
+def _login_observation(operation, params, code, reason):
+    """One failed login is a received SDK state, never a manufactured body."""
+    return dict(
+        version=VERSION,
+        operation=operation,
+        params=params,
+        representation="baostock-sdk-pages-not-wire",
+        status="failed",
+        error_code=code,
+        reason=reason,
+        pages=[],
+        cleanup="ok",
+    )
+
+
+def _stream_login(session, sink, operation, params, summary):
+    """Admit one live login; a refusal is recorded as received evidence.
+
+    A session-owned login already happened, so only its verdict is consumed
+    here. Nothing is logged out: this call never owns the connection.
+    """
+    import time
+
+    if session is None:
+        if not sink.source_call("login"):
+            summary.update(status="cancelled", reason="cancelled")
+            return False
+        try:
+            login = helpers.bs.login()
+        except Exception:
+            summary["reason"] = "login_exception"
+            return False
+        code, reason = _code(login), "login_failed"
+        if _success(code):
+            return True
+    else:
+        if session.ok:
+            return True
+        code, reason = session.error_code, session.reason
+    sink.observe(
+        _login_observation(operation, params, code, reason),
+        dict(trigger="login_return", previous_state_sha256=None, received_ns=time.time_ns()),
+    )
+    summary.update(reason=reason, pages=1)
+    return False
+
+
+def _stream_teardown(session, summary, logged_in):
+    """Close a connection this call owns; an enclosing session owns its own."""
+    if session is not None:
+        return "ok"
+    try:
+        if logged_in and not _success(_code(helpers.bs.logout())):
+            summary["cleanup"] = "logout_failed"
+    except Exception:
+        summary["cleanup"] = "logout_failed"
+    finally:
+        connection = getattr(helpers.context, "default_socket", None)
+        try:
+            if connection is not None:
+                connection.close()
+        except Exception:
+            summary["cleanup"] = "socket_close_failed"
+        finally:
+            helpers.context.default_socket = None
+    return summary["cleanup"]
+
+
+def _query_stream(operation, params, sink, session=None):
     """One live session; no next until the collector's durable page ACK.
 
     Only SDK calls are caught as SDK errors. Sink/IPC/durability failures escape
@@ -344,31 +518,10 @@ def _query_stream(operation, params, sink):
     )
     logged_in = False
     primary = None
-    with helpers._SESSION_LOCK:
+    session = active_session() if session is None else session
+    with (helpers._SESSION_LOCK if session is None else _no_lock()):
         try:
-            if not sink.source_call("login"):
-                summary.update(status="cancelled", reason="cancelled")
-                return summary
-            try:
-                login = helpers.bs.login()
-            except Exception:
-                summary["reason"] = "login_exception"
-                return summary
-            if not _success(_code(login)):
-                # Login state is actual received source evidence too.
-                env = dict(
-                    version=VERSION,
-                    operation=operation,
-                    params=params,
-                    representation="baostock-sdk-pages-not-wire",
-                    status="failed",
-                    error_code=_code(login),
-                    reason="login_failed",
-                    pages=[],
-                    cleanup="ok",
-                )
-                sink.observe(env, dict(trigger="login_return", previous_state_sha256=None, received_ns=time.time_ns()))
-                summary.update(reason="login_failed", pages=1)
+            if not _stream_login(session, sink, operation, params, summary):
                 return summary
             logged_in = True
             if not sink.source_call("query"):
@@ -452,20 +605,9 @@ def _query_stream(operation, params, sink):
             primary = exc
             raise
         finally:
-            try:
-                if logged_in and not _success(_code(helpers.bs.logout())):
-                    summary["cleanup"] = "logout_failed"
-            except Exception:
-                summary["cleanup"] = "logout_failed"
-            finally:
-                connection = getattr(helpers.context, "default_socket", None)
-                try:
-                    if connection is not None:
-                        connection.close()
-                except Exception:
-                    summary["cleanup"] = "socket_close_failed"
-                finally:
-                    helpers.context.default_socket = None
+            # A session owns login/logout/socket teardown; an in-session task
+            # must not disconnect it from under the tasks that follow.
+            _stream_teardown(session, summary, logged_in)
             if primary is not None and summary["cleanup"] != "ok":
                 primary.add_note("baostock_cleanup_failed")
     return summary
