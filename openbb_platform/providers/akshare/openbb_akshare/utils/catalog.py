@@ -68,6 +68,12 @@ DATASETS = (
         identifiers=("日期",),
     ),
     Dataset(
+        "tool_trade_date_hist_sina",
+        "Sina/SSE reference trading calendar, with source trade_date identifiers.",
+        "none",
+        identifiers=("trade_date",),
+    ),
+    Dataset(
         "bond_zh_us_rate",
         "China and US government bond yields by tenor plus GDP growth, from a start date.",
         "start_date",

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "openbb-akshare"
-version = "1.0.0"
+version = "1.1.0"
 description = "AKShare data provider extension for the OpenBB Platform"
 authors = ["OpenBB Team <hello@openbb.co>"]
 readme = "README.md"

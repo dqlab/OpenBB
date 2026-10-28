@@ -141,7 +141,14 @@ def _call(method: str, params: dict[str, Any]) -> list[dict[str, Any]]:
     function: Callable[..., Any] = resolve_method(method)
     arguments = {key: value for key, value in params.items() if value is not None}
     try:
-        frame = function(**arguments)
+        if method == "futures_hist_daily_cffex":
+            # AKShare's positional renaming fails on older 15-column files.
+            # Keep acquisition inside the provider and use the identical source.
+            from openbb_akshare.utils.cffex import fetch_daily_csv
+
+            frame = fetch_daily_csv(arguments["date"])
+        else:
+            frame = function(**arguments)
     except TypeError as exc:
         raise OpenBBError(f"AKShare {method} rejected the query parameters: {exc}") from exc
     except Exception as exc:  # Network, parsing, and source-side failures.

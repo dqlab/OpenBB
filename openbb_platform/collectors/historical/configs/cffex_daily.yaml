@@ -1,0 +1,18 @@
+# Paths resolve against this YAML; deploy a copy to a local app workspace.
+# This is a daily full-contract basket, not continuous IF0 or intraday snapshots.
+version: 1
+root: ../state/cffex
+calendar_file: ./cffex-calendar.json
+start_date: 2010-04-16
+not_before: "18:30"
+source_id: cffex
+source:
+  provider: akshare
+  model: AkshareFuturesHistDailyCffex
+  credentials_env: {}
+  timeout_seconds: 60
+  min_interval_seconds: 2
+  retries: 2
+  retry_delay_seconds: 2
+  max_rows: 10000
+  max_response_bytes: 8000000
