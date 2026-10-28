@@ -83,7 +83,7 @@ class Config(StrictModel):
     version: Literal[1] = 1
     root: Path = Path("data/cffex")
     calendar_file: Path
-    # Private immutable capture store (``raw-acquisition-v1``). Independent of
+    # Private immutable capture store (``raw-acquisition-v2``). Independent of
     # the journal: acquisition may write it while the journal is closed.
     evidence_root: Path | None = None
     source: Source = Field(default_factory=Source)

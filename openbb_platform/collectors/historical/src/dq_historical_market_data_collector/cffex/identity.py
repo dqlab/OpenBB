@@ -1,6 +1,6 @@
 """The one capture identity shared by the acquire task and the collector.
 
-A ``raw-acquisition-v1`` generation is addressed by ``(task_id, generation)``.
+A ``raw-acquisition-v2`` generation is addressed by ``(task_id, generation)``.
 Two lanes write into that store -- the acquisition-only task
 (:mod:`.acquire`) and the collection task (:mod:`.runtime`, ``Collector``) --
 and the whole point of separating them is that the bytes the acquire task
@@ -12,7 +12,7 @@ both modules call them:
     fingerprint = sha256(version=2, source_id, source, units, evidence_version)
     base        = sha256(fingerprint, source_id, date, attempt, token, evidence_version)
     generation  = sha256(base, epoch)
-    locator     = raw-acquisition-v1/sha256(version, task_id, generation)   (the store)
+    locator     = raw-acquisition-v2/sha256(version, task_id, generation)   (the store)
 
 ``fingerprint`` describes the transport authority that shapes a capture -- the
 provider, its limits and the declared units -- so evidence captured under one
@@ -36,7 +36,9 @@ import json
 from datetime import date
 from typing import Any
 
-EVIDENCE_VERSION = "raw-acquisition-v1"
+EVIDENCE_VERSION = "raw-acquisition-v2"
+# Keep the historical generation formula so legacy evidence remains discoverable.
+_IDENTITY_VERSION = "raw-acquisition-v1"
 KIND = "cffex-daily"
 
 # ``Config.fingerprint`` material version. Bumping it renames every capture of
@@ -101,7 +103,7 @@ def fingerprint(source_id: str, source: dict[str, Any], units: dict[str, str]) -
         "source_id": source_id,
         "source": source,
         "units": dict(units),
-        "evidence_version": EVIDENCE_VERSION,
+        "evidence_version": _IDENTITY_VERSION,
     }
     body = json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(body).hexdigest()
@@ -122,7 +124,7 @@ def capture_base(
             "date": _iso(day),
             "attempt": attempt,
             "token": token,
-            "evidence_version": EVIDENCE_VERSION,
+            "evidence_version": _IDENTITY_VERSION,
         }
     )
 

@@ -77,7 +77,7 @@ from .storage import Journal, encoded, protected_target, sync_directory, utc_now
 PLAN_VERSION = "cffex-raw-plan-v1"
 DELIVERY_VERSION = "cffex-raw-delivery-v2"
 CALENDAR_DELIVERY_VERSION = "cffex-raw-calendar-v1"
-EVIDENCE_VERSION = "raw-acquisition-v1"
+EVIDENCE_VERSION = "raw-acquisition-v2"
 MAX_PLAN_ENTRIES = 366
 MAX_EVIDENCE_EPOCHS = 4096
 
@@ -264,6 +264,7 @@ def validate_plan(plan: Any) -> dict[str, Any]:
             "invalid_credentials_env",
         )
         task = validate_task(entry["task"])
+        _require(task["version"] == EVIDENCE_VERSION, "unsupported_version")
         _require(
             task["source"] == {"provider": source["provider"], "model": source["model"]},
             "source_configuration_mismatch",
@@ -292,10 +293,12 @@ def existing_state(root: Path | str, task_id: str, generation: str) -> dict[str,
     """
     from openbb_collector_core.raw_acquisition import capture_locator
 
-    if not (Path(root) / capture_locator(task_id, generation)).exists():
+    if not (Path(root) / capture_locator(task_id, generation, version=EVIDENCE_VERSION)).exists():
+        if (Path(root) / capture_locator(task_id, generation)).exists():
+            raise EvidenceStateError("legacy_http_status_missing")
         return None
     try:
-        return read_capture(root, task_id, generation)
+        return read_capture(root, task_id, generation, version=EVIDENCE_VERSION)
     except EvidenceStateError:
         raise
     except Exception as exc:  # noqa: BLE001 - every failure here is a refusal
@@ -317,6 +320,7 @@ def _fetch_adapter(client: Any, task_id: str, source: EvidenceSource, counter: d
       ``provider-transformed`` label so nothing downstream can mistake it for source
       bytes.
     """
+
     def fetch(request: dict[str, Any]) -> RawResponse:
         counter["calls"] += 1
         result = client.fetch(task_id, source, request["params"])
@@ -328,6 +332,7 @@ def _fetch_adapter(client: Any, task_id: str, source: EvidenceSource, counter: d
                 "raw-bytes",
                 None,
                 media_type=getattr(result, "media_type", None) or "text/csv",
+                http_status=getattr(result, "status", None),
             )
         counter.setdefault("http_status", []).append(None)
         encoded = json.dumps(
@@ -427,15 +432,24 @@ def acquire(
             # Anything else (a provider exception that is not a ProviderFailure,
             # an OSError from the store, a KeyboardInterrupt) is not a data
             # verdict: it escapes so the session is cleaned up and fails loudly.
+            from .acquire import _http_ok, _http_status
+
+            http_ok = _http_ok(state)
             results.append(
                 {
                     "entry_id": entry["entry_id"],
                     "task_id": task["task_id"],
                     "generation": task["generation"],
                     "locator": state["locator"],
-                    "status": state["status"],
-                    "reason": state["reason"],
-                    "complete": state["complete"],
+                    "status": state["status"] if http_ok else "failed",
+                    "reason": state["reason"]
+                    if http_ok
+                    else (
+                        "http_status_missing"
+                        if _http_status(state) is None
+                        else "http_status_failure"
+                    ),
+                    "complete": state["complete"] and http_ok,
                     "responses": [
                         {
                             name: item["receipt"][name]
@@ -454,7 +468,7 @@ def acquire(
                         for item in state["responses"]
                     ],
                     "source_calls": counter["calls"],
-                    "http_status": (counter.get("http_status") or [None])[0],
+                    "http_status": _http_status(state),
                 }
             )
     finally:
@@ -494,7 +508,9 @@ def payload(
     metadata: dict[str, Any] = {}
     warnings = 0
     provenance = _empty_provenance()
-    provenance["http_status"] = http_status
+    from .acquire import _http_status
+
+    provenance["http_status"] = _http_status(state)
     for item in state["responses"]:
         receipt = item["receipt"]
         if receipt["status"] != "captured" or item["body"] is None:
@@ -520,9 +536,7 @@ def payload(
             }
             provenance["transforms"] = list(part["transforms"])
             # The layout states no date, so the request is the only date there is.
-            provenance["date_source"] = (
-                "row" if part["date_column"] else "request_parameter"
-            )
+            provenance["date_source"] = "row" if part["date_column"] else "request_parameter"
             continue
         try:
             body = json.loads(item["body"])
@@ -557,9 +571,7 @@ def unit_authority(provenance: dict[str, Any], declared: dict[str, str]) -> Unit
     return declared_units(declared)
 
 
-def row_provenance(
-    rows: list[dict[str, Any]], provenance: dict[str, Any]
-) -> list[dict[str, Any]]:
+def row_provenance(rows: list[dict[str, Any]], provenance: dict[str, Any]) -> list[dict[str, Any]]:
     """One provenance record per delivered row, aligned by position."""
     result = []
     for index, item in enumerate(rows):
@@ -603,8 +615,10 @@ def _capture_block(body: dict[str, Any], path: Path) -> dict[str, Any]:
 
 
 def _hash(value: Any) -> bool:
-    return type(value) is str and len(value) == 64 and all(
-        character in "0123456789abcdef" for character in value
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
     )
 
 
@@ -662,12 +676,9 @@ def read_delivery(path: Path | str, capture_root: Path | str | None = None) -> d
         raise EvidenceStateError("invalid_delivery", {"path": str(path), "row_sha256": "len"})
     for index, item in enumerate(rows):
         if capture["row_sha256"][index] != digest(item):
-            raise EvidenceStateError(
-                "delivery_row_digest", {"path": str(path), "row": index}
-            )
-        if (
-            type(row_prov[index]) is not dict
-            or row_prov[index].get("source_sha256") != digest(item)
+            raise EvidenceStateError("delivery_row_digest", {"path": str(path), "row": index})
+        if type(row_prov[index]) is not dict or row_prov[index].get("source_sha256") != digest(
+            item
         ):
             raise EvidenceStateError(
                 "delivery_row_digest", {"path": str(path), "row": index, "field": "provenance"}
@@ -676,7 +687,12 @@ def read_delivery(path: Path | str, capture_root: Path | str | None = None) -> d
         # Nothing may be consumed without re-reading the bytes it claims to copy.
         raise EvidenceStateError("delivery_unbound", {"path": str(path)})
     try:
-        state = read_capture(capture_root, capture["task_id"], capture["generation"])
+        state = read_capture(
+            capture_root,
+            capture["task_id"],
+            capture["generation"],
+            version=capture["evidence_version"],
+        )
     except Exception as exc:  # noqa: BLE001 - every failure here is a refusal
         raise EvidenceStateError(
             "evidence_state_unreadable",
@@ -686,19 +702,29 @@ def read_delivery(path: Path | str, capture_root: Path | str | None = None) -> d
         raise EvidenceStateError(
             "delivery_capture_mismatch", {"path": str(path), "reason": "locator"}
         )
+    if not state["complete"] or state["status"] != "captured" or state["reason"] != "finished":
+        raise EvidenceStateError(
+            "delivery_capture_incomplete", {"path": str(path), "reason": state["reason"]}
+        )
+    from .acquire import _http_ok
+
+    if not _http_ok(state):
+        raise EvidenceStateError("delivery_http_status", {"path": str(path)})
     captured_rows, _, _, captured = payload(state, http_status=provenance.get("http_status"))
     # A delivery may legitimately record that its capture did not parse -- that is
     # evidence, not corruption. What it may not do is claim a different outcome
     # than the bytes produce.
+    if captured["http_status"] != provenance.get("http_status"):
+        raise EvidenceStateError(
+            "delivery_capture_mismatch", {"path": str(path), "reason": "http_status"}
+        )
     if captured["parse_error"] != provenance.get("parse_error"):
         raise EvidenceStateError(
             "delivery_capture_mismatch",
             {"path": str(path), "reason": "parse_error", "capture": captured["parse_error"]},
         )
     if canonical(captured_rows) != canonical(rows):
-        raise EvidenceStateError(
-            "delivery_capture_mismatch", {"path": str(path), "reason": "rows"}
-        )
+        raise EvidenceStateError("delivery_capture_mismatch", {"path": str(path), "reason": "rows"})
     body_sha = None
     for item in state["responses"]:
         if item["receipt"]["status"] == "captured" and item["body"] is not None:
@@ -734,7 +760,12 @@ def read_calendar_delivery(
     if capture_root is None:
         raise EvidenceStateError("delivery_unbound", {"path": str(path)})
     try:
-        state = read_capture(capture_root, capture["task_id"], capture["generation"])
+        state = read_capture(
+            capture_root,
+            capture["task_id"],
+            capture["generation"],
+            version=capture["evidence_version"],
+        )
     except Exception as exc:  # noqa: BLE001 - every failure here is a refusal
         raise EvidenceStateError(
             "evidence_state_unreadable", {"path": str(path), "reason": _safe_code(exc)}
@@ -743,10 +774,35 @@ def read_calendar_delivery(
         raise EvidenceStateError(
             "delivery_capture_mismatch", {"path": str(path), "reason": "locator"}
         )
-    if canonical(payload(state)[0]) != canonical(rows):
+    if not state["complete"] or state["status"] != "captured" or state["reason"] != "finished":
+        raise EvidenceStateError("delivery_capture_incomplete", {"path": str(path)})
+    from .acquire import _http_ok
+
+    if not _http_ok(state):
+        raise EvidenceStateError("delivery_http_status", {"path": str(path)})
+    if len(state["responses"]) != 1:
         raise EvidenceStateError(
-            "delivery_capture_mismatch", {"path": str(path), "reason": "rows"}
+            "delivery_capture_mismatch", {"path": str(path), "reason": "responses"}
         )
+    receipt = state["responses"][0]["receipt"]
+    source = body["source"]
+    if (
+        type(source) is not dict
+        or source.get("model") != "AkshareToolTradeDateHistSina"
+        or state["task"]["source"] != {
+            "provider": source.get("provider"), "model": source.get("model")
+        }
+    ):
+        raise EvidenceStateError(
+            "delivery_capture_mismatch", {"path": str(path), "reason": "source"}
+        )
+    for key in ("sha256", "size", "evidence_kind", "transformation", "media_type"):
+        if capture[key] != receipt[key]:
+            raise EvidenceStateError(
+                "delivery_capture_mismatch", {"path": str(path), "reason": key}
+            )
+    if canonical(payload(state)[0]) != canonical(rows):
+        raise EvidenceStateError("delivery_capture_mismatch", {"path": str(path), "reason": "rows"})
     return body
 
 
@@ -807,9 +863,7 @@ class Collector:
 
     def _task_id(self, day: date) -> str:
         source = self.config.source
-        return identity.task_identity(
-            self.config.source_id, source.provider, source.model, day
-        )
+        return identity.task_identity(self.config.source_id, source.provider, source.model, day)
 
     def _base(self, day: date, attempt: int, token: str) -> str:
         return identity.capture_base(
@@ -837,7 +891,9 @@ class Collector:
                 return generation, False
             if self.journal.verdict(state["locator"]) == "rejected":
                 continue
-            if state["complete"] and state["status"] == "captured":
+            from .acquire import _http_ok
+
+            if state["complete"] and state["status"] == "captured" and _http_ok(state):
                 return generation, True
             if state["reason"] == "interrupted":
                 return generation, True
@@ -1109,9 +1165,7 @@ class Collector:
             if self.stop.is_set():
                 report["status"] = "interrupted"
             elif report["failed_days"]:
-                report["status"] = (
-                    "partial" if report["completed_days"] else "failed"
-                )
+                report["status"] = "partial" if report["completed_days"] else "failed"
             else:
                 report["status"] = "complete"
             report["unprocessed_days"] = 0
@@ -1142,9 +1196,7 @@ class Collector:
         folder = Path(self.config.root) / "raw" / day.isoformat()
         if not folder.is_dir():
             return None
-        files = sorted(
-            folder.glob("*.json"), key=lambda item: (item.stat().st_mtime_ns, item.name)
-        )
+        files = sorted(folder.glob("*.json"), key=lambda item: (item.stat().st_mtime_ns, item.name))
         return files[-1] if files else None
 
     # -- one session --------------------------------------------------------
@@ -1193,9 +1245,7 @@ class Collector:
                     attempt_id = self.journal.begin_attempt(report["run_id"], day.isoformat())
                     plan = session["plans"][(day, attempt)]
                     entry = plan["entries"][0]
-                    results = acquire(
-                        self.evidence_root, plan, client=self.client, stop=self.stop
-                    )
+                    results = acquire(self.evidence_root, plan, client=self.client, stop=self.stop)
                     result = results[0]
                     report["provider_calls"] += result["source_calls"]
                     # A generation that already existed is replayed, not captured.
@@ -1211,7 +1261,10 @@ class Collector:
                             continue
                         break
                     state = read_capture(
-                        self.evidence_root, result["task_id"], result["generation"]
+                        self.evidence_root,
+                        result["task_id"],
+                        result["generation"],
+                        version=EVIDENCE_VERSION,
                     )
                     delivery, raw_path = self._deliver(attempt_id, day, plan, state, result)
                     report["rows_received"] += len(delivery["rows"])
@@ -1358,9 +1411,7 @@ class Collector:
         re-reads the capture and refuses any row that the bytes do not re-derive,
         so the delivery cannot drift from its evidence.
         """
-        rows, metadata, warnings, provenance = payload(
-            state, http_status=result.get("http_status")
-        )
+        rows, metadata, warnings, provenance = payload(state, http_status=result.get("http_status"))
         entry = plan["entries"][0]
         receipts = [
             {
@@ -1533,12 +1584,12 @@ def _refresh_calendar(
             report["provider_calls"] += result["source_calls"]
             if result["status"] != "captured" or not result["complete"]:
                 raise DataError(result["reason"] or "acquisition_incomplete")
-            state = read_capture(config.evidence, result["task_id"], result["generation"])
+            state = read_capture(
+                config.evidence, result["task_id"], result["generation"], version=EVIDENCE_VERSION
+            )
             rows, _, warnings, provenance = payload(state, http_status=result.get("http_status"))
             report["warning_count"] += warnings
-            captured_at = (
-                result["responses"][0]["acquired_at"] if result["responses"] else None
-            )
+            captured_at = result["responses"][0]["acquired_at"] if result["responses"] else None
             raw_path = journal.archive(
                 uuid.uuid4().hex,
                 {
@@ -1559,13 +1610,9 @@ def _refresh_calendar(
                             result["responses"][0]["media_type"] if result["responses"] else None
                         ),
                         "sha256": (
-                            result["responses"][0]["sha256"]
-                            if result["responses"]
-                            else "0" * 64
+                            result["responses"][0]["sha256"] if result["responses"] else "0" * 64
                         ),
-                        "size": (
-                            result["responses"][0]["size"] if result["responses"] else 0
-                        ),
+                        "size": (result["responses"][0]["size"] if result["responses"] else 0),
                         "row_sha256": [digest(item) for item in rows],
                     },
                     "rows": rows,

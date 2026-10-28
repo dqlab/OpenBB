@@ -6,7 +6,7 @@ range plus the collector's transport authority), performs exactly one literal
 HTTP GET per requested date per attempt through
 :mod:`dq_historical_market_data_collector.cffex.source` -- the provider's own
 transport helper, whose response body is taken *before* any parser sees it --
-and writes every returned body into a private ``raw-acquisition-v1``
+and writes every returned body into a private ``raw-acquisition-v2``
 content-addressed evidence root with the standard receipts. It then exits.
 
 What it does **not** do, by construction and by import closure:
@@ -109,7 +109,7 @@ formulas, called from the module the collector calls. So:
   *plan*, not the capture.
 
 ``--root`` is the private evidence root (the directory a configured run calls
-``evidence``/``<root>/evidence``). Nothing outside ``<root>/raw-acquisition-v1/``
+``evidence``/``<root>/evidence``). Nothing outside ``<root>/raw-acquisition-v2/``
 is created.
 
 Exit codes, aligned with the collection CLI's map (``cffex/cli.py``): ``0``
@@ -442,7 +442,7 @@ def base_for(authority: dict[str, Any], day: date | str) -> str:
 
 
 def task_for(authority: dict[str, Any], day: date | str, epoch: int = 0) -> dict[str, Any]:
-    """The literal ``raw-acquisition-v1`` task for one requested date and epoch.
+    """The literal ``raw-acquisition-v2`` task for one requested date and epoch.
 
     Byte-for-byte what ``Collector._plan`` builds for the same configuration
     (same task id, same generation, same ``request_id == source_id``), which is
@@ -505,10 +505,12 @@ def existing_state(root: Path | str, task_id: str, generation: str) -> dict[str,
     Unreadable state is a typed refusal, never "absent": refetching over corrupt
     evidence would destroy the only copy of what the source actually sent.
     """
-    if not (Path(root) / capture_locator(task_id, generation)).exists():
+    if not (Path(root) / capture_locator(task_id, generation, version=EVIDENCE_VERSION)).exists():
+        if (Path(root) / capture_locator(task_id, generation)).exists():
+            raise RawAcquisitionError("legacy_http_status_missing")
         return None
     try:
-        return read_capture(root, task_id, generation)
+        return read_capture(root, task_id, generation, version=EVIDENCE_VERSION)
     except RawAcquisitionError:
         raise
     except Exception as exc:  # noqa: BLE001 - every failure here is a refusal
@@ -546,14 +548,35 @@ def _scan(
         }
         if state["reason"] == "cancelled":
             return {**choice, "kind": "cancelled"}
-        if state["complete"] and state["status"] == "captured":
+        if state["complete"] and state["status"] == "captured" and _http_ok(state):
             return {**choice, "kind": "replay"}
         if state["reason"] == "interrupted":
             return {**choice, "kind": "resume"}
-        skipped.append(
-            {"epoch": epoch, "status": state["status"], "reason": state["reason"]}
-        )
+        skipped.append({"epoch": epoch, "status": state["status"], "reason": state["reason"]})
     raise RawAcquisitionError("evidence_generation_exhausted")
+
+
+def _http_ok(state: dict[str, Any]) -> bool:
+    """Raw HTTP evidence is successful only with a bound 2xx status."""
+    return all(
+        item["receipt"].get("evidence_kind") != "raw-bytes"
+        or (
+            type(item["receipt"].get("http_status")) is int
+            and 200 <= item["receipt"]["http_status"] < 300
+        )
+        for item in state["responses"]
+    )
+
+
+def _http_status(state: dict[str, Any]) -> int | None:
+    return next(
+        (
+            item["receipt"].get("http_status")
+            for item in state["responses"]
+            if item["receipt"].get("evidence_kind") == "raw-bytes"
+        ),
+        None,
+    )
 
 
 def _adapter(client: Any, source: EvidenceSource, task_id: str, counter: dict[str, Any]):
@@ -573,6 +596,7 @@ def _adapter(client: Any, source: EvidenceSource, task_id: str, counter: dict[st
             "raw-bytes",
             None,
             media_type=getattr(result, "media_type", None) or "text/csv",
+            http_status=counter["status"],
         )
 
     return fetch
@@ -634,7 +658,12 @@ def _entry_result(
         )
     else:
         status = "cancelled" if state["reason"] == "cancelled" else state["status"]
+        if status == "captured" and not _http_ok(state):
+            status = "failed"
         reason = state["reason"]
+        http_status = _http_status(state)
+        if status == "failed" and state["status"] == "captured":
+            reason = "http_status_missing" if http_status is None else "http_status_failure"
         terminal = state["complete"]
         locator = state["locator"]
         responses = _receipts(state)
@@ -742,7 +771,7 @@ def _run_entry(
             }
         )
         last = {**choice, "state": state}
-        if state["status"] == "captured" and state["complete"]:
+        if state["status"] == "captured" and state["complete"] and _http_ok(state):
             return _entry_result(
                 entry,
                 {**choice, "state": state, "kind": "captured"},
@@ -904,7 +933,7 @@ def main(argv: list[str] | None = None) -> int:
     except PlanError as exc:
         emit({"status": "error", "command": "acquire", "code": exc.code})
         return 2
-    except RawAcquisitionError as exc:
+    except (RawAcquisitionError, ValueError) as exc:
         emit({"status": "error", "command": "acquire", "code": _code(exc)})
         return 2
     except OSError as exc:

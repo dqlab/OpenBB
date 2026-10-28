@@ -27,6 +27,7 @@ from typing import Any
 from .models import ProviderFailure
 
 VERSION = "raw-acquisition-v1"
+HTTP_VERSION = "raw-acquisition-v2"
 MAX_REQUESTS = 256
 MAX_TASK_BYTES = 262144
 MAX_BODY_BYTES = 16 * 1024 * 1024
@@ -51,6 +52,7 @@ class RawResponse:
     transformation: str | None = None
     source_time: str | None = None
     media_type: str = "application/octet-stream"
+    http_status: int | None = None
 
 
 def _require(condition: bool, code: str = "invalid_raw_evidence") -> None:
@@ -100,7 +102,7 @@ def validate_task(task: dict[str, Any]) -> dict[str, Any]:
     encoded = _encode(task)
     _require(len(encoded) <= MAX_TASK_BYTES, "task_size_limit")
     _keys(task, "version task_id generation source requests")
-    _require(task["version"] == VERSION, "unsupported_version")
+    _require(task["version"] in (VERSION, HTTP_VERSION), "unsupported_version")
     _require(_text(task["task_id"]) and _text(task["generation"]), "invalid_identity")
     _keys(task["source"], "provider model")
     _require(all(_text(v) for v in task["source"].values()), "invalid_source")
@@ -159,9 +161,10 @@ def plan_process_capture(task: dict[str, Any], source: Any) -> dict:
     return {**plan, "source_max_response_bytes": maximum}
 
 
-def capture_locator(task_id: str, generation: str) -> str:
+def capture_locator(task_id: str, generation: str, *, version: str = VERSION) -> str:
     _require(_text(task_id) and _text(generation), "invalid_identity")
-    return VERSION + "/" + _sha(_encode([VERSION, task_id, generation]))
+    _require(version in (VERSION, HTTP_VERSION), "unsupported_version")
+    return version + "/" + _sha(_encode([version, task_id, generation]))
 
 
 def _path(root: Path, relative: str = "") -> Path:
@@ -321,13 +324,26 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def _receipt(value: Any, task_sha: str, request: dict, index: int) -> None:
+def _receipt(value: Any, task_sha: str, request: dict, index: int, version: str) -> None:
+    fields = (
+        "version task_sha256 request_sha256 index status acquired_at monotonic_ns "
+        "evidence_kind transformation source_time media_type body_path sha256 size error"
+    )
+    _require(type(value) is dict, "invalid_fields")
     _keys(
         value,
-        "version task_sha256 request_sha256 index status acquired_at monotonic_ns "
-        "evidence_kind transformation source_time media_type body_path sha256 size error",
+        fields + (" http_status" if version == HTTP_VERSION and "http_status" in value else ""),
     )
-    _require(value["version"] == VERSION and value["task_sha256"] == task_sha, "receipt_binding")
+    if "http_status" in value:
+        _require(
+            type(value["http_status"]) is int and 100 <= value["http_status"] <= 599,
+            "invalid_http_status",
+        )
+        _require(
+            value["status"] == "captured" and value["evidence_kind"] == "raw-bytes",
+            "invalid_http_status",
+        )
+    _require(value["version"] == version and value["task_sha256"] == task_sha, "receipt_binding")
     _require(value["request_sha256"] == _sha(_encode(request)), "request_binding")
     _require(type(value["index"]) is int and value["index"] == index, "receipt_index")
     _clock(value["acquired_at"])
@@ -376,13 +392,20 @@ def _receipt(value: Any, task_sha: str, request: dict, index: int) -> None:
     )
 
 
-def read_capture(root: Path | str, task_id: str, generation: str) -> dict[str, Any]:
+def read_capture(
+    root: Path | str, task_id: str, generation: str, *, version: str = VERSION
+) -> dict[str, Any]:
     """Read exact task only, including interrupted/cancelled audit evidence."""
-    locator = capture_locator(task_id, generation)
+    locator = capture_locator(task_id, generation, version=version)
     directory = _path(Path(root), locator)
     task_bytes = _read(_path(directory, "task.json"), MAX_TASK_BYTES)
     task = validate_task(_decode(task_bytes))
-    _require(task["task_id"] == task_id and task["generation"] == generation, "task_binding")
+    _require(
+        task["version"] == version
+        and task["task_id"] == task_id
+        and task["generation"] == generation,
+        "task_binding",
+    )
     task_sha = _sha(task_bytes)
     responses, hashes = [], []
     total, missing = 0, False
@@ -394,7 +417,7 @@ def read_capture(root: Path | str, task_id: str, generation: str) -> dict[str, A
         _require(not missing, "noncontiguous_responses")
         receipt_bytes = _read(_path(folder, "receipt.json"), MAX_META_BYTES)
         receipt = _decode(receipt_bytes)
-        _receipt(receipt, task_sha, request, index)
+        _receipt(receipt, task_sha, request, index, version)
         body = None
         if receipt["status"] == "captured":
             body = _read(_path(directory, receipt["body_path"]), MAX_CAPTURE_BODY_BYTES)
@@ -418,7 +441,7 @@ def read_capture(root: Path | str, task_id: str, generation: str) -> dict[str, A
         terminal = _decode(_read(terminal_path, MAX_META_BYTES))
         _keys(terminal, "version task_sha256 status receipts finalized_at")
         _require(
-            terminal["version"] == VERSION and terminal["task_sha256"] == task_sha,
+            terminal["version"] == version and terminal["task_sha256"] == task_sha,
             "terminal_binding",
         )
         _require(
@@ -434,7 +457,7 @@ def read_capture(root: Path | str, task_id: str, generation: str) -> dict[str, A
             _require(
                 durable
                 == {
-                    "version": VERSION,
+                    "version": version,
                     "task_sha256": task_sha,
                     "terminal_sha256": _sha(_encode(terminal)),
                 },
@@ -445,7 +468,7 @@ def read_capture(root: Path | str, task_id: str, generation: str) -> dict[str, A
     if cancel_path.exists():
         cancel = _decode(_read(cancel_path, MAX_META_BYTES))
         _require(
-            cancel == {"version": VERSION, "task_sha256": task_sha, "reason": "cancelled"},
+            cancel == {"version": version, "task_sha256": task_sha, "reason": "cancelled"},
             "invalid_cancellation",
         )
         complete, reason = False, "cancelled"
@@ -517,7 +540,7 @@ def _establish_durability(directory: Path, state: dict) -> None:
         directory / "durable.json",
         _encode(
             {
-                "version": VERSION,
+                "version": state["task"]["version"],
                 "task_sha256": _sha(_encode(state["task"])),
                 "terminal_sha256": _sha(terminal),
             }
@@ -599,7 +622,9 @@ def _recover_pending(directory: Path, state: dict) -> None:
     index, stage = pending
     receipt_path = _path(stage, "receipt.json")
     receipt = _decode(_read(receipt_path, MAX_META_BYTES))
-    _receipt(receipt, _sha(_encode(authority)), authority["requests"][index], index)
+    _receipt(
+        receipt, _sha(_encode(authority)), authority["requests"][index], index, authority["version"]
+    )
     paths = [receipt_path]
     body_path = _path(stage, "body.bin")
     if receipt["status"] == "captured":
@@ -681,7 +706,12 @@ def capture(
     stop = stop if stop is not None else Event()
     task_bytes = _encode(authority)
     task_sha = _sha(task_bytes)
-    directory = _path(Path(root), capture_locator(authority["task_id"], authority["generation"]))
+    directory = _path(
+        Path(root),
+        capture_locator(
+            authority["task_id"], authority["generation"], version=authority["version"]
+        ),
+    )
     if directory.exists():
         _require(_path(directory, "task.json").is_file(), "missing_task_authority")
     _mkdir(directory)
@@ -701,7 +731,7 @@ def capture(
                 directory / "cancel.json",
                 _encode(
                     {
-                        "version": VERSION,
+                        "version": authority["version"],
                         "task_sha256": task_sha,
                         "reason": "cancelled",
                     }
@@ -720,11 +750,15 @@ def capture(
 
         try:
             _install(directory / "task.json", task_bytes)
-            state = read_capture(root, authority["task_id"], authority["generation"])
+            state = read_capture(
+                root, authority["task_id"], authority["generation"], version=authority["version"]
+            )
             if state["reason"] == "cancelled":
                 return state
             _recover_pending(directory, state)
-            state = read_capture(root, authority["task_id"], authority["generation"])
+            state = read_capture(
+                root, authority["task_id"], authority["generation"], version=authority["version"]
+            )
             total = sum(
                 len(item["body"]) for item in state["responses"] if item["body"] is not None
             )
@@ -749,7 +783,7 @@ def capture(
                     failed = True
                 acquired_at, monotonic_ns = _now(), time.monotonic_ns()
                 receipt = {
-                    "version": VERSION,
+                    "version": authority["version"],
                     "task_sha256": task_sha,
                     "request_sha256": _sha(_encode(request)),
                     "index": index,
@@ -775,6 +809,8 @@ def capture(
                     _require(len(body) <= response_max_bytes, "adapter_response_limit_exceeded")
                     total += len(body)
                     _require(total <= MAX_TOTAL_BYTES, "capture_size_limit")
+                    if response.http_status is not None:
+                        receipt["http_status"] = response.http_status
                     receipt.update(
                         evidence_kind=response.evidence_kind,
                         transformation=response.transformation,
@@ -784,11 +820,13 @@ def capture(
                         sha256=_sha(body),
                         size=len(body),
                     )
-                _receipt(receipt, task_sha, request, index)
+                _receipt(receipt, task_sha, request, index, authority["version"])
                 _require(len(_encode(receipt)) <= MAX_META_BYTES, "receipt_size_limit")
                 _install_response(directory, index, receipt, body)
             cleanup()
-            state = read_capture(root, authority["task_id"], authority["generation"])
+            state = read_capture(
+                root, authority["task_id"], authority["generation"], version=authority["version"]
+            )
             if stop.is_set() or obligation.accepted:
                 cancel()
             elif state["reason"] != "cancelled":
@@ -806,7 +844,7 @@ def capture(
                         directory / "terminal.json",
                         _encode(
                             {
-                                "version": VERSION,
+                                "version": authority["version"],
                                 "task_sha256": task_sha,
                                 "status": status,
                                 "receipts": [_sha(_encode(item["receipt"])) for item in outcomes],
@@ -815,7 +853,9 @@ def capture(
                         ),
                     )
                 _establish_durability(directory, state)
-            state = read_capture(root, authority["task_id"], authority["generation"])
+            state = read_capture(
+                root, authority["task_id"], authority["generation"], version=authority["version"]
+            )
             # Close acceptance only after the protected snapshot and its native
             # cleanup. Sample the Event at this cutoff, still under ownership:
             # unlike raising handlers, Event-only handlers do not set the latch.

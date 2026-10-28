@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import os
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -1182,6 +1183,7 @@ def test_cli_update_finalization_failure_and_empty_cancellation(
     config.calendar_file.write_text(calendar.model_dump_json())
     client = FakeClient()
     patch_source_clients(monkeypatch, lambda *_: client)
+
     class WeekendDateTime(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -1203,9 +1205,7 @@ def test_cli_update_finalization_failure_and_empty_cancellation(
 
     with monkeypatch.context() as patch:
         patch.setattr(Journal, "__enter__", enter_with_fault)
-        assert cli.main(["update", "--config", str(settings)]) == (
-            4 if failure == "sigterm" else 2
-        )
+        assert cli.main(["update", "--config", str(settings)]) == (4 if failure == "sigterm" else 2)
     output = json.loads(capsys.readouterr().out)
     assert client.closed
     if failure == "sigterm":
@@ -1217,8 +1217,10 @@ def test_cli_update_finalization_failure_and_empty_cancellation(
         assert latest[0] == ("interrupted" if failure == "sigterm" else "failed")
         assert json.loads(latest[1]).get("update_cursor") is None
         assert journal.get_meta("update_cursor") is None
-        assert count(journal, "futures_daily") == count(journal, "revisions") == (
-            0 if failure == "sigterm" else 1
+        assert (
+            count(journal, "futures_daily")
+            == count(journal, "revisions")
+            == (0 if failure == "sigterm" else 1)
         )
 
 
@@ -1249,9 +1251,13 @@ def test_cli_backfill_sigterm_at_finish_run(
     with Journal(config.root) as journal:
         journal.set_meta("update_cursor", DAY.isoformat())
     args = [
-        "backfill", "--config", str(settings),
-        "--start-date", "2026-09-16" if bounded else "2026-09-19",
-        "--end-date", "2026-09-18" if bounded else "2026-09-20",
+        "backfill",
+        "--config",
+        str(settings),
+        "--start-date",
+        "2026-09-16" if bounded else "2026-09-19",
+        "--end-date",
+        "2026-09-18" if bounded else "2026-09-20",
     ]
     if bounded:
         args.extend(["--max-days", "1"])
@@ -1264,9 +1270,10 @@ def test_cli_backfill_sigterm_at_finish_run(
             os.kill(os.getpid(), signal.SIGTERM)
         else:
             # The cancelled completion must have rolled back before abort cleanup.
-            assert self.db.execute(
-                "SELECT status FROM runs WHERE id=?", (run_id,)
-            ).fetchone()[0] == "running"
+            assert (
+                self.db.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()[0]
+                == "running"
+            )
         original_finish(self, run_id, report)
 
     with monkeypatch.context() as patch:
@@ -1290,9 +1297,11 @@ def test_cli_backfill_sigterm_at_finish_run(
             assert journal.complete("2026-09-16", "akshare", config.source.model)
     assert not scheduled.deferred_success(code, report)
     monkeypatch.setattr(
-        scheduled, "invoke",
-        lambda command, *_: (0, {"status": "complete"})
-        if command == "calendar-refresh" else (code, output),
+        scheduled,
+        "invoke",
+        lambda command, *_: (
+            (0, {"status": "complete"}) if command == "calendar-refresh" else (code, output)
+        ),
     )
     adapter_code, adapter_report = scheduled.one_pass("backfill", settings, 1)
     assert adapter_code == adapter_report["exit_code"] == 4
@@ -1323,7 +1332,6 @@ def test_real_process_client_hard_timeout(monkeypatch):
         assert not client._workers and time.monotonic() - started < 5
     finally:
         client.close()
-
 
 
 # ---------------------------------------------------------------------------
@@ -1470,9 +1478,7 @@ def traffic_call_shapes():
         "transport_trap:socket:getaddrinfo": lambda: socket.getaddrinfo("127.0.0.1", 1),
         "transport_trap:requests:Session.request": session_request,
         "transport_trap:requests:Session.send": session_send,
-        "transport_trap:provider:make_request": lambda: module.make_request(
-            "http://127.0.0.1:1/"
-        ),
+        "transport_trap:provider:make_request": lambda: module.make_request("http://127.0.0.1:1/"),
         "transport_trap:provider:fetch_daily_csv": lambda: module.fetch_daily_csv("20260918"),
     }
 
@@ -1508,6 +1514,7 @@ def test_each_transport_trap_label_is_falsifiable(label):
     if observed is not None:
         assert observed in TRAFFIC_LABELS
 
+
 # ---------------------------------------------------------------------------
 # Task 5B-3 — raw-only capture, one versioned delivery, downstream consumer
 #
@@ -1516,6 +1523,7 @@ def test_each_transport_trap_label_is_falsifiable(label):
 # rules did not change, they moved. The tests below exercise the boundary that
 # moved them out of acquisition, and nothing here weakens an older assertion.
 # ---------------------------------------------------------------------------
+
 
 def evidence_source(config):
     return cffex_runtime.source_of(config.source)
@@ -1947,7 +1955,7 @@ def test_no_source_client_refuses_to_fetch():
         NoSourceClient().fetch("cffex", None, {})
 
 
-CENTRAL_CHILD = r'''
+CENTRAL_CHILD = r"""
 import json, os, sys, sqlite3
 
 if os.environ.get("OPENBB_AUTO_BUILD") != "false":
@@ -2072,7 +2080,7 @@ print(json.dumps({
     "central_exists": os.path.exists(central),
     "auto_build_effective": os.environ.get("OPENBB_AUTO_BUILD"),
 }))
-'''
+"""
 
 
 @contextlib.contextmanager
@@ -2162,9 +2170,7 @@ def test_private_run_touches_no_central_store(tmp_path, state):
         with held if held is not None else contextlib.nullcontext():
             child, payload = run_central_child(tmp_path, central)
             if state == "locked":
-                observed["lock_still_held_after_child"] = lock_is_held(
-                    central / "journal.sqlite3"
-                )
+                observed["lock_still_held_after_child"] = lock_is_held(central / "journal.sqlite3")
     finally:
         if state == "inaccessible":
             central.chmod(0o700)
@@ -2233,9 +2239,9 @@ def test_literal_source_bytes_are_captured_before_any_parser(config, calendar):
         return FakeResponse(body)
 
     with Journal(config.root) as journal:
-        report = collector(
-            config, journal, calendar, CffexCsvClient(sender=sender)
-        ).backfill(DAY, DAY)
+        report = collector(config, journal, calendar, CffexCsvClient(sender=sender)).backfill(
+            DAY, DAY
+        )
         committed = [
             dict(item)
             for item in journal.db.execute(
@@ -2294,8 +2300,10 @@ def test_owned_transport_url_equals_the_provider_url(monkeypatch):
     [
         (csv_body(("IF2610  ,100,103,99,12,567.8,34,0,102,101",)), "source_row_truncated"),
         (csv_body(header=CSV_HEADER + ",今收盘"), "source_header_duplicate"),
-        (csv_body(("CU2610  ,100,103,99,12,567.8,34,0,102,101,100,1,1,--",)),
-         "source_contract_unexpected:0"),
+        (
+            csv_body(("CU2610  ,100,103,99,12,567.8,34,0,102,101,100,1,1,--",)),
+            "source_contract_unexpected:0",
+        ),
         (b"\xff\xfe not a gbk csv at all", "source_body_undecodable"),
         (csv_body((CSV_FUTURES, CSV_FUTURES)), "source_duplicate_contract"),
     ],
@@ -2362,9 +2370,9 @@ def test_delivery_refuses_rows_the_capture_does_not_support(config, calendar, tm
         read_delivery(target, capture_root=config.evidence)
 
     # And nothing may be consumed without the capture root to verify against.
-    payload["capture"]["sha256"] = json.loads(deliveries(config, DAY)[0].read_text())[
-        "capture"
-    ]["sha256"]
+    payload["capture"]["sha256"] = json.loads(deliveries(config, DAY)[0].read_text())["capture"][
+        "sha256"
+    ]
     target.write_text(json.dumps(payload))
     with pytest.raises(EvidenceStateError, match="delivery_unbound"):
         read_delivery(target)
@@ -2396,10 +2404,21 @@ def test_scale_consistent_x10_body_is_refused_without_a_declared_unit(tmp_path, 
     assert delivery["rows"][0]["open"] == "1000"  # the bytes are kept verbatim
     with pytest.raises(DataError, match="units_undetermined"):
         normalize(
-            [{"date": DAY.strftime("%Y%m%d"), "symbol": "IF2610", "open": "1000",
-              "high": "1030", "low": "990", "close": "1020", "settle": "1010",
-              "pre_settle": "1000", "volume": "12", "open_interest": "34",
-              "turnover": "567.8"}],
+            [
+                {
+                    "date": DAY.strftime("%Y%m%d"),
+                    "symbol": "IF2610",
+                    "open": "1000",
+                    "high": "1030",
+                    "low": "990",
+                    "close": "1020",
+                    "settle": "1010",
+                    "pre_settle": "1000",
+                    "volume": "12",
+                    "open_interest": "34",
+                    "turnover": "567.8",
+                }
+            ],
             DAY,
             units=UnitAuthority(authority="absent"),
         )
@@ -2529,14 +2548,14 @@ def test_owned_cffex_sources_import_no_root_collector_module():
     imported = {
         node.module
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
-            "dq_historical_market_data_collector"
-        )
+        if isinstance(node, ast.ImportFrom)
+        and (node.module or "").startswith("dq_historical_market_data_collector")
     }
     assert imported == {
         "dq_historical_market_data_collector.config",
         "dq_historical_market_data_collector.providers",
     }
+
 
 # ---------------------------------------------------------------------------
 # Acquisition only (`cffex acquire`): a literal plan in, raw evidence out
@@ -2632,6 +2651,20 @@ def acquire_failing_sender(calls=None):
     return sender
 
 
+def test_acquire_http_failure_body_is_preserved_and_never_replayed_as_success(tmp_path):
+    root = tmp_path / "evidence"
+    plan = acquire_plan(max_attempts=1)
+    body = b"service unavailable"
+    report = cffex_acquire.run(root, plan, sender=lambda url, timeout: FakeResponse(body, 503))
+    assert report["status"] == "failed"
+    assert report["results"][0]["http_status"] == 503
+    assert raw_bodies(acquire_folders(root)[0]) == [body]
+    calls = []
+    again = cffex_acquire.run(root, plan, sender=acquire_sender(ACQUIRE_BODY, calls))
+    assert len(calls) == 1
+    assert again["status"] == "complete"
+
+
 COMMITTED_COLUMNS = (
     "trading_date, contract_symbol, product, source_variety, open, high, low, "
     "close, settle, pre_settle, volume, open_interest, turnover, "
@@ -2653,7 +2686,7 @@ def committed_rows(journal):
 def acquire_folders(root):
     return sorted(
         path
-        for path in (root / "raw-acquisition-v1").iterdir()
+        for path in (root / EVIDENCE_VERSION).iterdir()
         if path.is_dir() and not path.name.startswith(".")
     )
 
@@ -2661,9 +2694,7 @@ def acquire_folders(root):
 def test_cffex_acquire_only_writes_transport_bytes_and_stops_there(tmp_path):
     root = tmp_path / "evidence"
     calls = []
-    report = cffex_acquire.run(
-        root, acquire_plan(), sender=acquire_sender(ACQUIRE_BODY, calls)
-    )
+    report = cffex_acquire.run(root, acquire_plan(), sender=acquire_sender(ACQUIRE_BODY, calls))
     assert report["status"] == "complete" and report["source_calls"] == 1
     assert report["captured"] == 1 and report["replayed"] == 0 and report["unprocessed"] == 0
     assert calls == [cffex_source.daily_csv_url(DAY)]
@@ -2676,9 +2707,7 @@ def test_cffex_acquire_only_writes_transport_bytes_and_stops_there(tmp_path):
     assert receipt["size"] == len(ACQUIRE_BODY)
     assert receipt["status"] == "captured" and receipt["error"] is None
     # Nothing downstream of the bytes exists: no parse result, delivery or journal.
-    assert {path.relative_to(root).parts[0] for path in root.rglob("*")} == {
-        "raw-acquisition-v1"
-    }
+    assert {path.relative_to(root).parts[0] for path in root.rglob("*")} == {EVIDENCE_VERSION}
     assert not (root / "raw").exists() and not list(root.rglob("journal.sqlite3"))
     rendered = json.dumps(report)
     for downstream in ("rows_committed", "trading_date", "delivery", "revisions"):
@@ -2906,7 +2935,11 @@ def test_cffex_acquire_only_failed_request_is_retryable_under_the_same_plan_id(t
     states = []
     for folder in acquire_folders(root):
         task = json.loads((folder / "task.json").read_text())
-        states.append(cffex_runtime.read_capture(root, task["task_id"], task["generation"]))
+        states.append(
+            cffex_runtime.read_capture(
+                root, task["task_id"], task["generation"], version=EVIDENCE_VERSION
+            )
+        )
     assert sorted(state["status"] for state in states) == ["captured", "failed", "failed"]
     for folder, state in zip(acquire_folders(root), states, strict=True):
         assert (folder / "terminal.json").is_file()
@@ -3105,8 +3138,7 @@ ACQUIRE_REFUSALS = {
         acquire_plan(
             requests={
                 "dates": [
-                    (date(2026, 1, 1) + timedelta(days=offset)).isoformat()
-                    for offset in range(367)
+                    (date(2026, 1, 1) + timedelta(days=offset)).isoformat() for offset in range(367)
                 ]
             }
         ),
@@ -3153,6 +3185,8 @@ ACQUIRE_REFUSALS = {
         "unknown_range",
     ),
 }
+
+
 @pytest.mark.parametrize("shape", sorted(ACQUIRE_REFUSALS))
 def test_cffex_acquire_only_refuses_a_malformed_plan_before_any_source_call(
     tmp_path, shape, capsys
@@ -3171,6 +3205,7 @@ def test_cffex_acquire_only_refuses_a_malformed_plan_before_any_source_call(
     emitted = json.loads(capsys.readouterr().out)
     assert emitted["status"] == "error" and emitted["code"] == code
     assert not root.exists()
+
 
 def test_cffex_acquire_only_replays_a_completed_plan_with_zero_source_calls(tmp_path):
     root = tmp_path / "evidence"
@@ -3220,7 +3255,9 @@ def test_cffex_acquire_only_cancellation_writes_a_durable_veto(tmp_path):
     (folder,) = acquire_folders(root)
     assert (folder / "cancel.json").is_file()
     task = json.loads((folder / "task.json").read_text())
-    state = cffex_runtime.read_capture(root, task["task_id"], task["generation"])
+    state = cffex_runtime.read_capture(
+        root, task["task_id"], task["generation"], version=EVIDENCE_VERSION
+    )
     assert state["reason"] == "cancelled" and state["complete"] is False
     # The veto is durable: that date never calls the source again under this plan.
     resumed_calls = []
@@ -3502,9 +3539,7 @@ def test_cffex_acquire_only_runs_with_no_config_and_no_central_store(tmp_path, s
                 tmp_path, central, acquire_plan(), ACQUIRE_BODY, root
             )
             if state == "locked":
-                observed["lock_still_held_after_child"] = lock_is_held(
-                    central / "journal.sqlite3"
-                )
+                observed["lock_still_held_after_child"] = lock_is_held(central / "journal.sqlite3")
     finally:
         if state == "inaccessible":
             central.chmod(0o700)
@@ -3520,7 +3555,7 @@ def test_cffex_acquire_only_runs_with_no_config_and_no_central_store(tmp_path, s
     ]
     assert payload["config_loaded"] is False and payload["journal_loaded"] is False
     # The private root is the only writable store and holds only raw evidence.
-    assert payload["written_roots"] == ["raw-acquisition-v1"]
+    assert payload["written_roots"] == [EVIDENCE_VERSION]
     (folder,) = acquire_folders(root)
     assert raw_bodies(folder) == [ACQUIRE_BODY]
     receipt = json.loads((folder / "responses/000000/receipt.json").read_text())
@@ -3549,3 +3584,437 @@ def test_cffex_cli_acquire_alias_returns_the_acquire_exit_code(tmp_path, capfd):
     emitted = json.loads(capfd.readouterr().out)
     assert code == 2 and emitted["command"] == "acquire" and emitted["code"] == "unknown_plan"
     assert not (tmp_path / "evidence").exists()
+
+
+def test_http_status_is_bound_and_replay_reports_it(tmp_path):
+    root = tmp_path / "evidence"
+    plan = acquire_plan(max_attempts=1)
+    first = cffex_acquire.run(root, plan, sender=acquire_sender(ACQUIRE_BODY))
+    assert first["results"][0]["http_status"] == 200
+    replay = cffex_acquire.run(root, plan, sender=acquire_failing_sender())
+    assert replay["results"][0]["http_status"] == 200
+    assert replay["source_calls"] == 0
+    (folder,) = acquire_folders(root)
+    receipt = folder / "responses/000000/receipt.json"
+    record = json.loads(receipt.read_text())
+    record["http_status"] = 503
+    receipt.chmod(0o644)
+    receipt.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+    with pytest.raises(ValueError, match="terminal_conflict"):
+        cffex_acquire.run(root, plan, sender=acquire_failing_sender())
+
+
+def test_legacy_statusless_raw_capture_is_not_replayed(tmp_path):
+    from openbb_collector_core.raw_acquisition import RawResponse, capture
+
+    root = tmp_path / "evidence"
+    plan = acquire_plan(max_attempts=1)
+    authority = cffex_acquire.validate_plan(plan)
+    task = cffex_acquire.task_for(authority, DAY)
+    task["version"] = "raw-acquisition-v1"
+    capture(root, task, lambda _: RawResponse(ACQUIRE_BODY))
+    calls = []
+    with pytest.raises(ValueError, match="legacy_http_status_missing"):
+        cffex_acquire.run(root, plan, sender=acquire_sender(ACQUIRE_BODY, calls))
+    assert not calls
+    assert not (root / "raw-acquisition-v2").exists()
+
+
+def test_evidence_versions_are_isolated_and_v1_rejects_status(tmp_path):
+    from openbb_collector_core.raw_acquisition import RawResponse, capture, read_capture
+
+    task = cffex_acquire.task_for(cffex_acquire.validate_plan(acquire_plan()), DAY)
+    assert task["version"] == "raw-acquisition-v2"
+    old = {**task, "version": "raw-acquisition-v1"}
+    capture(tmp_path, old, lambda _: RawResponse(b"old"))
+    capture(tmp_path, task, lambda _: RawResponse(b"new", http_status=200))
+    assert (
+        read_capture(tmp_path, task["task_id"], task["generation"])["responses"][0]["body"]
+        == b"old"
+    )
+    assert (
+        read_capture(tmp_path, task["task_id"], task["generation"], version=task["version"])[
+            "responses"
+        ][0]["body"]
+        == b"new"
+    )
+    old2 = {**old, "generation": "other"}
+    with pytest.raises(ValueError, match="invalid_fields"):
+        capture(tmp_path, old2, lambda _: RawResponse(b"bad", http_status=200))
+
+
+def test_missing_transport_status_is_never_assumed_success():
+    class MissingStatus:
+        content = b"body"
+        headers = {}
+
+    with pytest.raises(ValueError, match="invalid_source_status"):
+        cffex_source.fetch_body(DAY, fetch=lambda *args, **kwargs: MissingStatus())
+
+
+def test_interrupted_http_failure_resumes_without_losing_status(tmp_path):
+    root = tmp_path / "evidence"
+    plan = acquire_plan(max_attempts=1)
+    first = cffex_acquire.run(root, plan, sender=lambda url, timeout: FakeResponse(b"bad", 503))
+    assert first["status"] == "failed"
+    (folder,) = acquire_folders(root)
+    (folder / "durable.json").unlink()
+    calls = []
+    second = cffex_acquire.run(root, plan, sender=acquire_sender(ACQUIRE_BODY, calls))
+    assert second["status"] == "failed"
+    assert second["results"][0]["http_status"] == 503
+    assert second["source_calls"] == 0 and not calls
+    assert raw_bodies(folder) == [b"bad"]
+    third = cffex_acquire.run(root, plan, sender=acquire_sender(ACQUIRE_BODY, calls))
+    assert third["status"] == "complete" and len(calls) == 1
+
+
+def test_collector_rejects_503_even_when_body_is_valid_csv(config, calendar):
+    body = csv_body()
+    with Journal(config.root) as journal:
+        report = collector(
+            config,
+            journal,
+            calendar,
+            CffexCsvClient(sender=lambda url, timeout: FakeResponse(body, 503)),
+        ).backfill(DAY, DAY)
+        assert journal.db.execute("SELECT count(*) FROM futures_daily").fetchone()[0] == 0
+    assert report["status"] == "failed"
+    folders = captures_for(config, DAY)
+    assert folders and all(raw_bodies(folder) == [body] for folder in folders)
+    assert all(
+        json.loads((folder / "responses/000000/receipt.json").read_text())["http_status"] == 503
+        for folder in folders
+    )
+
+
+@pytest.mark.parametrize(
+    "http_status,version",
+    [
+        (None, "raw-acquisition-v1"),
+        (None, EVIDENCE_VERSION),
+        (503, EVIDENCE_VERSION),
+        (200, EVIDENCE_VERSION),
+    ],
+)
+def test_consume_requires_bound_successful_raw_http_status(config, calendar, http_status, version):
+    """Consistent legacy/failure evidence must never become an offline commit."""
+    from openbb_collector_core.raw_acquisition import RawResponse, capture, read_capture
+
+    body = csv_body((CSV_FUTURES, CSV_SECOND))
+    with Journal(config.root) as journal:
+        worker = collector(
+            config,
+            journal,
+            calendar,
+            CffexCsvClient(sender=lambda url, timeout: FakeResponse(body)),
+        )
+        assert worker.backfill(DAY, DAY)["status"] == "complete"
+        (path,) = deliveries(config, DAY)
+        envelope = json.loads(path.read_text())
+        old = read_capture(
+            config.evidence,
+            envelope["capture"]["task_id"],
+            envelope["capture"]["generation"],
+            version=EVIDENCE_VERSION,
+        )
+        # Make independently valid capture evidence, including legacy no-status
+        # receipts, using the real shared writer in a separate, fresh root.
+        alternate = config.root / "attack-evidence"
+        state = capture(
+            alternate,
+            {**old["task"], "version": version},
+            lambda _: RawResponse(body, http_status=http_status),
+        )
+        envelope["provenance"]["http_status"] = http_status
+        envelope["capture"]["evidence_version"] = version
+        envelope["capture"]["locator"] = state["locator"]
+        attack_path = config.root / "attack" / DAY.isoformat() / "delivery.json"
+        attack_path.parent.mkdir(parents=True)
+        attack_path.write_text(json.dumps(envelope))
+        path = attack_path
+        worker.delivered = lambda day: attack_path
+        worker.client = NoSourceClient()
+        # consume uses config.evidence; point its read at the independent root.
+        original_reader = cffex_runtime.read_delivery
+
+        def bound_reader(delivery_path, capture_root=None):
+            return original_reader(delivery_path, capture_root=alternate)
+
+        from unittest.mock import patch
+
+        before = {
+            p.relative_to(alternate): p.read_bytes() for p in alternate.rglob("*") if p.is_file()
+        }
+        baseline = (count(journal, "futures_daily"), count(journal, "revisions"))
+        assert state["complete"] and state["status"] == "captured"
+        if http_status == 200:
+            assert len(original_reader(path, capture_root=alternate)["rows"]) == 2
+            with patch.object(cffex_runtime, "read_delivery", bound_reader):
+                report = worker.consume(DAY, DAY)
+            assert report["status"] == "complete" and report["provider_calls"] == 0
+        else:
+            with pytest.raises(EvidenceStateError, match="http_status"):
+                original_reader(path, capture_root=alternate)
+            with patch.object(cffex_runtime, "read_delivery", bound_reader):
+                with pytest.raises(EvidenceStateError, match="http_status"):
+                    worker.consume(DAY, DAY)
+            assert (count(journal, "futures_daily"), count(journal, "revisions")) == baseline
+        assert before == {
+            p.relative_to(alternate): p.read_bytes() for p in alternate.rglob("*") if p.is_file()
+        }
+
+
+@pytest.mark.parametrize(
+    "damage,code",
+    [("interrupted", "delivery_capture_incomplete"), ("tampered", "evidence_state_unreadable")],
+)
+def test_delivery_refuses_nonterminal_or_tampered_capture(config, calendar, damage, code):
+    with Journal(config.root) as journal:
+        worker = collector(
+            config,
+            journal,
+            calendar,
+            CffexCsvClient(
+                sender=lambda url, timeout: FakeResponse(csv_body((CSV_FUTURES, CSV_SECOND)))
+            ),
+        )
+        assert worker.backfill(DAY, DAY)["status"] == "complete"
+        (path,) = deliveries(config, DAY)
+        (folder,) = captures_for(config, DAY)
+        if damage == "interrupted":
+            (folder / "durable.json").unlink()
+        else:
+            receipt = folder / "responses/000000/receipt.json"
+            value = json.loads(receipt.read_text())
+            value["http_status"] = 503
+            receipt.chmod(0o600)
+            receipt.write_text(json.dumps(value))
+        before = {
+            p.relative_to(config.evidence): p.read_bytes()
+            for p in config.evidence.rglob("*")
+            if p.is_file()
+        }
+        baseline = (count(journal, "futures_daily"), count(journal, "revisions"))
+        worker.client = NoSourceClient()
+        with pytest.raises(EvidenceStateError, match=code):
+            read_delivery(path, capture_root=config.evidence)
+        with pytest.raises(EvidenceStateError, match=code):
+            worker.consume(DAY, DAY)
+        assert (count(journal, "futures_daily"), count(journal, "revisions")) == baseline
+        assert before == {
+            p.relative_to(config.evidence): p.read_bytes()
+            for p in config.evidence.rglob("*")
+            if p.is_file()
+        }
+
+
+def test_calendar_delivery_requires_durability_and_receipt_binding(config, calendar):
+    config.units = UNITS
+    with Journal(config.root) as journal:
+        report = refresh_calendar(config, journal, FakeClient([
+            {"trade_date": "2026-09-17"}, {"trade_date": "2026-09-18"}
+        ]))
+        path = config.root / report["raw_path"]
+        envelope = json.loads(path.read_text())
+        assert len(read_calendar_delivery(path, capture_root=config.evidence)["rows"]) == 2
+        envelope["capture"]["sha256"] = "0" * 64
+        altered = path.parent / "altered.json"
+        altered.write_text(json.dumps(envelope))
+        with pytest.raises(EvidenceStateError, match="delivery_capture_mismatch"):
+            read_calendar_delivery(altered, capture_root=config.evidence)
+        (config.evidence / envelope["capture"]["locator"] / "durable.json").unlink()
+        with pytest.raises(EvidenceStateError, match="delivery_capture_incomplete"):
+            read_calendar_delivery(path, capture_root=config.evidence)
+
+
+@pytest.mark.parametrize("status_code", [None, 503])
+def test_calendar_rejects_unsuccessful_raw_http(config, calendar, status_code):
+    from openbb_collector_core.raw_acquisition import RawResponse, capture, read_capture
+
+    config.units = UNITS
+    with Journal(config.root) as journal:
+        report = refresh_calendar(config, journal, FakeClient([{"trade_date": "2026-09-18"}]))
+        path = config.root / report["raw_path"]
+        envelope = json.loads(path.read_text())
+        state = read_capture(config.evidence, envelope["capture"]["task_id"],
+                             envelope["capture"]["generation"], version=EVIDENCE_VERSION)
+        independent = config.root / "independent-calendar"
+        capture(independent, state["task"], lambda _: RawResponse(b"x", http_status=status_code))
+        with pytest.raises(EvidenceStateError, match="delivery_http_status"):
+            read_calendar_delivery(path, capture_root=independent)
+
+
+def test_new_root_real_subprocess_capture_and_calendar(tmp_path):
+    """Exercise a new local root in a fresh interpreter, with offline transports."""
+    script = r"""
+import json, runpy, sys
+from pathlib import Path
+from dq_historical_market_data_collector.cffex import identity, acquire
+from dq_historical_market_data_collector.cffex.config import Config, load_calendar
+from dq_historical_market_data_collector.cffex.runtime import (
+    refresh_calendar, read_calendar_delivery,
+)
+from dq_historical_market_data_collector.cffex.storage import Journal
+helpers = runpy.run_path(sys.argv[1])
+base = Path(sys.argv[2]); root = base / 'new-root'
+plan = helpers['acquire_plan'](max_attempts=1)
+response = helpers['FakeResponse']; calls = []
+def send(url, timeout=30):
+    calls.append(url)
+    return response(helpers['ACQUIRE_BODY'])
+first = acquire.run(root, plan, sender=send)
+assert first['status'] == 'complete' and len(calls) == 1
+again = acquire.run(root, plan, sender=send)
+assert again['replayed'] == 1 and len(calls) == 1
+failure_plan = helpers['acquire_plan'](max_attempts=1, token='failure')
+failed = acquire.run(root, failure_plan, sender=lambda url, timeout: response(b'unavailable', 503))
+assert failed['status'] == 'failed' and failed['results'][0]['http_status'] == 503
+assert any(p.read_bytes() == b'unavailable' for p in root.rglob('body.bin'))
+config = Config(root=base / 'journal', evidence_root=root, calendar_file=base / 'calendar.json')
+client = helpers['FakeClient']([{'trade_date':'2026-09-17'}, {'trade_date':'2026-09-18'}])
+with Journal(config.root) as journal:
+    report = refresh_calendar(config, journal, client)
+    assert report['status'] == 'complete'
+    delivered = read_calendar_delivery(config.root / report['raw_path'], capture_root=root)
+    assert len(delivered['rows']) == 2
+assert len(load_calendar(config.calendar_file).trading_dates) == 2
+calendar_path = config.root / report['raw_path']
+envelope = json.loads(calendar_path.read_text())
+envelope['capture']['sha256'] = '0' * 64
+calendar_path = base / 'altered-calendar.json'
+calendar_path.write_text(json.dumps(envelope))
+try:
+    read_calendar_delivery(calendar_path, capture_root=root)
+    raise AssertionError('corrupted calendar evidence accepted')
+except RuntimeError as exc:
+    assert 'delivery_capture_mismatch' in str(exc)
+"""
+    completed = subprocess.run([sys.executable, "-c", script, __file__, str(tmp_path)],
+                               capture_output=True, text=True, timeout=60)
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_acquire_real_cli_offline_http_and_recovery(tmp_path):
+    """Run the actual module entry point with an offline transport in each child."""
+    hook = tmp_path / "sitecustomize.py"
+    hook.write_text('''
+import os
+from pathlib import Path
+from dq_historical_market_data_collector.cffex import source
+class Response:
+    status_code = int(os.environ.get("TEST_HTTP_STATUS", "200"))
+    content = bytes.fromhex(os.environ.get("TEST_HTTP_BODY", ""))
+    headers = {"Content-Type": "text/csv"}
+def send(url, timeout):
+    with Path(os.environ["TEST_CALLS"]).open("a") as calls:
+        calls.write("call\\n")
+    if os.environ.get("TEST_FAIL"):
+        raise OSError("offline fault")
+    return Response()
+source.transport = lambda: send
+''')
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
+    calls = tmp_path / "calls"
+    env["TEST_CALLS"] = str(calls)
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(acquire_plan(max_attempts=1)))
+
+    def invoke(root, status=200, body=b"", fault=False):
+        child_env = {**env, "TEST_HTTP_STATUS": str(status), "TEST_HTTP_BODY": body.hex()}
+        if fault:
+            child_env["TEST_FAIL"] = "1"
+        child = subprocess.run(
+            [sys.executable, "-m", "dq_historical_market_data_collector.cffex.acquire",
+             "--plan", str(plan_path), "--root", str(root)],
+            env=child_env, text=True, capture_output=True, timeout=30,
+        )
+        return child.returncode, json.loads(child.stdout)
+
+    root = tmp_path / "success"
+    code, first = invoke(root, body=ACQUIRE_BODY)
+    assert code == 0 and first["results"][0]["http_status"] == 200
+    before = calls.read_text()
+    code, replay = invoke(root, status=503, fault=True)
+    assert code == 0 and replay["replayed"] == 1 and calls.read_text() == before
+    code, failed = invoke(tmp_path / "failure", status=503, body=b"unavailable")
+    assert code != 0 and failed["results"][0]["http_status"] == 503
+    assert [p.read_bytes() for p in (tmp_path / "failure").rglob("body.bin")] == [b"unavailable"]
+    code, retry = invoke(tmp_path / "failure", body=ACQUIRE_BODY)
+    assert code == 0 and retry["source_calls"] == 1 and retry["replayed"] == 0
+    code, empty = invoke(tmp_path / "empty", body=b"")
+    assert code == 0 and empty["results"][0]["http_status"] == 200
+    assert [p.read_bytes() for p in (tmp_path / "empty").rglob("body.bin")] == [b""]
+    code, fault = invoke(tmp_path / "fault", fault=True)
+    assert code != 0 and fault["status"] != "complete"
+    receipt = next(root.rglob("receipt.json"))
+    receipt.chmod(0o644)
+    record = json.loads(receipt.read_text())
+    record["http_status"] = 503
+    receipt.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+    before = calls.read_text()
+    code, corrupt = invoke(root)
+    assert code != 0 and corrupt["status"] != "complete" and calls.read_text() == before
+
+
+def test_acquire_cli_overlapping_windows_and_crash_recovery(tmp_path):
+    """Separate CLI processes reuse inclusive dates and durable crash prefixes."""
+    hook = tmp_path / "sitecustomize.py"
+    hook.write_text('''
+import os, signal
+from pathlib import Path
+from dq_historical_market_data_collector.cffex import source
+class Response:
+    status_code = 200
+    content = b"offline evidence"
+    headers = {"Content-Type": "text/csv"}
+def send(url, timeout):
+    with Path(os.environ["TEST_CALLS"]).open("a") as calls:
+        calls.write(url + "\\n")
+    if os.environ.get("TEST_CRASH") and "20260918" in url:
+        os.kill(os.getpid(), signal.SIGKILL)
+    return Response()
+source.transport = lambda: send
+''')
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
+    calls = tmp_path / "calls"
+    env["TEST_CALLS"] = str(calls)
+    plan_path = tmp_path / "plan.json"
+
+    def invoke(root, start, end, crash=False):
+        plan_path.write_text(json.dumps(acquire_plan(
+            requests={"range": {"start": start, "end": end, "weekdays_only": False}},
+            max_attempts=1,
+        )))
+        child = subprocess.run(
+            [sys.executable, "-m", "dq_historical_market_data_collector.cffex.acquire",
+             "--plan", str(plan_path), "--root", str(root)],
+            env={**env, **({"TEST_CRASH": "1"} if crash else {})},
+            text=True, capture_output=True, timeout=30,
+        )
+        return child, json.loads(child.stdout) if child.stdout else None
+
+    root = tmp_path / "overlap"
+    first, a = invoke(root, "2026-09-16", "2026-09-18")
+    second, b = invoke(root, "2026-09-18", "2026-09-20")
+    repeat, c = invoke(root, "2026-09-18", "2026-09-20")
+    assert [first.returncode, second.returncode, repeat.returncode] == [0, 0, 0]
+    assert [a["source_calls"], b["source_calls"], c["source_calls"]] == [3, 2, 0]
+    assert [b["replayed"], c["replayed"]] == [1, 3]
+    assert [item["trade_date"] for item in a["results"]] == [
+        "2026-09-16", "2026-09-17", "2026-09-18"
+    ]
+    assert [item["trade_date"] for item in b["results"]] == [
+        "2026-09-18", "2026-09-19", "2026-09-20"
+    ]
+    assert len(calls.read_text().splitlines()) == 5
+
+    calls.unlink()
+    crashed, _ = invoke(tmp_path / "crash", "2026-09-17", "2026-09-19", crash=True)
+    assert crashed.returncode == -signal.SIGKILL
+    resumed, report = invoke(tmp_path / "crash", "2026-09-17", "2026-09-19")
+    assert resumed.returncode == 0
+    assert report["source_calls"] == 2 and report["replayed"] == 1
+    assert len(calls.read_text().splitlines()) == 4

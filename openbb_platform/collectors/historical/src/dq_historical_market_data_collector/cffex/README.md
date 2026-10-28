@@ -62,7 +62,18 @@ are errors, never evidence of a holiday. A refreshed calendar also contains
 
 The installed commands are `dq-cffex-daily-collector` and `dq-cffex-acquire`.
 The latter accepts `--plan <json> --root <dir>` and captures raw evidence without
-loading the collector configuration or journal. Use `--help` for its arguments.
+loading the collector configuration or journal. HTTP response bodies and status codes
+are stored together in the integrity-checked capture receipt. Only 2xx responses
+can succeed; old raw captures without a status cannot be replayed as successes.
+Failed responses remain as evidence and a retry uses a new generation.
+CFFEX writes `raw-acquisition-v2` in its own versioned namespace; v1 remains
+unchanged for other providers. A matching legacy v1 capture blocks acquisition
+without a source call, because its HTTP status cannot be established. Generation
+identity material remains stable so the legacy capture can be found.
+Offline consumption also verifies the capture's durable terminal state and bound
+raw HTTP status; incomplete, statusless and non-2xx raw captures are refused.
+Existing provider-transformed captures do not require an HTTP status.
+Use `--help` for its arguments.
 The daily module is also runnable directly:
 
 ```bash
@@ -190,3 +201,16 @@ SQLite's backup API for a live journal. Orphan raw envelopes from a crash are
 retained for audit; there is no pruning, migration beyond schema v1, remote
 delivery, or background scheduler. Provider installation and live exchange
 availability are integration concerns, not simulated by offline tests.
+
+### Deployment boundary
+
+Use a local, independent evidence directory on the new computer. Do not share it
+with the old computer or copy old evidence into it. The directory is created as
+needed; no initialization command or writer-drain step is required. Historical
+evidence migration, if needed later, requires separate reconciliation.
+Without a reconciled historical inventory, the new computer cannot know which
+dates the old computer captured; deduplication and recovery use the evidence
+available in the local directory. Overlapping acquisition plans with the same
+source authority, token and attempt reuse locally verified successful date
+captures, regardless of the plan's date bounds. Explicit refreshes or changed
+capture authority intentionally use different identities.

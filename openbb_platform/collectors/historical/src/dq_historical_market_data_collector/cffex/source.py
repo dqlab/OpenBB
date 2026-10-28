@@ -33,9 +33,7 @@ from openbb_collector_core.models import ProviderFailure
 
 SOURCE_LAYOUT = "cffex-rtj-csv-v1"
 SOURCE_ENCODING = "gbk"
-DAILY_CSV_URL = (
-    "http://www.cffex.com.cn/sj/hqsj/rtj/{year:04d}{month:02d}/{day:02d}/{stamp}_1.csv"
-)
+DAILY_CSV_URL = "http://www.cffex.com.cn/sj/hqsj/rtj/{year:04d}{month:02d}/{day:02d}/{stamp}_1.csv"
 DEFAULT_TIMEOUT = 30
 _STAMP = re.compile(r"[0-9]{8}\Z")
 
@@ -70,7 +68,7 @@ class SourceBody:
     media_type: str | None = None
 
     def __post_init__(self) -> None:
-        if type(self.status) is not int:
+        if type(self.status) is not int or not 100 <= self.status <= 599:
             raise ValueError("invalid_source_status")
         if type(self.body) is not bytes:
             raise ValueError("invalid_source_body_type")
@@ -93,9 +91,7 @@ def fetch_body(
     if hasattr(headers, "get"):
         media_type = headers.get("Content-Type") or None
     status = getattr(response, "status_code", None)
-    if status is None:
-        status = 200 if hasattr(response, "content") else 0
-    return SourceBody(int(status), content, media_type)
+    return SourceBody(status, content, media_type)
 
 
 class CffexCsvClient:
@@ -103,8 +99,7 @@ class CffexCsvClient:
 
     Pacing, cancellation and the byte budget are the only policies here; every
     decision about the payload belongs downstream of the store. A non-2xx status
-    is *not* an exception: the body is captured and the downstream parser refuses
-    it by content, so an error page is evidence instead of a silent failure.
+    is captured with its body and rejected by the acquisition verdict.
     """
 
     def __init__(self, stop: Any = None, clock=time.monotonic, sender=None) -> None:
