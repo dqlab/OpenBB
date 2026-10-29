@@ -30,7 +30,12 @@ def atomic_json(path, value):
 
 
 def launch(args):
-    day = shanghai_date()
+    execution_day = shanghai_date()
+    day = args.date or execution_day
+    if date.fromisoformat(day).isoformat() != day:
+        raise ValueError("invalid_date")
+    if day != execution_day and not args.correct_closed:
+        raise ValueError("historical_correction_requires_authorization")
     config = campaign.load_json(args.config)
     start = date.fromisoformat(config["start_date"])
     end = date.fromisoformat(config["end_date"])
@@ -80,14 +85,58 @@ def launch(args):
             ),
             status=result["status"],
         )
+        correction = directory / "closed-correction"
+        was_existing = directory.exists()
+        root_identity = str(args.root.resolve())
         if directory.exists():
-            if campaign.load_json(directory / "identity.json") != identity:
-                raise ValueError("daily_identity_conflict")
+            original = campaign.load_json(directory / "identity.json")
+            if correction.exists():
+                audit = campaign.load_json(correction / "audit.json")
+                if (audit["original_identity"] != original or audit["corrected_identity"] != identity
+                        or audit["root"] != root_identity):
+                    raise ValueError("daily_identity_conflict")
+                if campaign.load_json(correction / "calendar.json") != calendar:
+                    raise ValueError("daily_correction_evidence_conflict")
+            elif original != identity:
+                if not args.correct_closed or not args.reason:
+                    raise ValueError("daily_identity_conflict")
+                if original.get("status") != "closed" or identity["status"] != "planned":
+                    raise ValueError("only_closed_to_open_correction_supported")
+                if any(original.get(k) != identity.get(k) for k in ("date", "config", "policy")):
+                    raise ValueError("daily_correction_scope_conflict")
+                run_dir = args.root / campaign.VERSION / campaign.digest("daily:" + day)
+                if run_dir.exists() or (directory / "manifest").exists():
+                    raise ValueError("daily_correction_existing_campaign")
+                old_calendar = directory / "calendar.json"
+                if old_calendar.exists() and campaign.digest(campaign.load_json(old_calendar)) != original["calendar_sha256"]:
+                    raise ValueError("original_calendar_evidence_conflict")
+                stage = Path(tempfile.mkdtemp(prefix=".correction-", dir=directory))
+                try:
+                    audit = dict(version="baostock-closed-correction-v1", reason=args.reason,
+                                 original_identity=original, corrected_identity=identity,
+                                 recorded_ns=time.time_ns(), root=root_identity,
+                                 original_calendar_retained=(directory / "calendar.json").is_file())
+                    atomic_json(stage / "audit.json", audit)
+                    atomic_json(stage / "calendar.json", calendar)
+                    atomic_json(stage / "universe.json", stock)
+                    campaign.compile_manifest(result["plan"], stage / "manifest", identity["policy"])
+                    os.rename(stage, correction)
+                    campaign.raw._sync(directory)
+                finally:
+                    if stage.exists():
+                        shutil.rmtree(stage)
+            elif args.correct_closed:
+                raise ValueError("daily_correction_not_needed")
         else:
+            if day != execution_day or args.correct_closed:
+                raise ValueError("correction_requires_existing_closed_day")
             stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=days))
             try:
                 atomic_json(stage / "identity.json", identity)
+                atomic_json(stage / "calendar.json", calendar)
                 if result["status"] == "planned":
+                    atomic_json(stage / "capture-root.json",
+                                {"version": "baostock-daily-root-v1", "root": root_identity})
                     campaign.compile_manifest(
                         result["plan"], stage / "manifest", identity["policy"]
                     )
@@ -98,12 +147,30 @@ def launch(args):
                     shutil.rmtree(stage)
         if result["status"] == "closed":
             return dict(status="closed", date=day, gaps=gaps, gap_history_known=bool(previous))
-        manifest = directory / "manifest"
+        manifest = (correction if correction.exists() else directory) / "manifest"
         run_key, slot = "daily:" + day, day
+        binding_file = directory / "capture-root.json"
+        binding = {"version": "baostock-daily-root-v1", "root": root_identity}
+        if binding_file.exists():
+            if campaign.load_json(binding_file) != binding:
+                raise ValueError("daily_capture_root_conflict")
+        else:
+            if was_existing and not correction.exists():
+                authority = args.root / campaign.VERSION / campaign.digest(run_key) / "authority.json"
+                if not authority.exists():
+                    raise ValueError("legacy_daily_root_unproven")
+                existing = campaign.load_json(authority)
+                if (existing.get("run") != run_key or existing.get("slot") != slot
+                        or existing.get("manifest") != campaign.load_json(manifest / "manifest.json")):
+                    raise ValueError("legacy_daily_root_unproven")
+            campaign.raw._install(binding_file, campaign.encode(binding))
         deadline = time.monotonic() + args.seconds
         last = None
-        while time.monotonic() < deadline and shanghai_date() == day:
-            last = campaign.run(manifest, args.root, run_key, slot)
+        while time.monotonic() < deadline and shanghai_date() == execution_day:
+            last = campaign.run(
+                manifest, args.root, run_key, slot,
+                source_allowed=lambda: time.monotonic() < deadline and shanghai_date() == execution_day,
+            )
             if last["status"] == "complete":
                 verified = verify_campaign(manifest, args.root, run_key, slot)
                 return dict(
@@ -122,7 +189,7 @@ def launch(args):
             campaign=last,
             reason=(
                 "date_changed"
-                if shanghai_date() != day
+                if shanghai_date() != execution_day
                 else "time_budget"
                 if time.monotonic() >= deadline
                 else "campaign_stalled"
@@ -138,8 +205,13 @@ def main(argv=None):
     parser.add_argument("--seconds", type=int, required=True)
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--backoff-seconds", type=int, default=60)
+    parser.add_argument("--correct-closed", action="store_true")
+    parser.add_argument("--reason")
+    parser.add_argument("--date", help="Explicit date for an authorized closed-day correction")
     args = parser.parse_args(argv)
     try:
+        if args.correct_closed != bool(args.reason and args.reason.strip()):
+            raise ValueError("correction_requires_flag_and_reason")
         if args.seconds <= 0:
             raise ValueError("invalid_time_budget")
         result = launch(args)

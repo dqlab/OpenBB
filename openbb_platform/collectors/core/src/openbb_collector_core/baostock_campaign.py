@@ -37,6 +37,8 @@ import signal
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -439,7 +441,8 @@ def retry_delay(count):
 def data_attempts(entry, retries=None):
     """Attempts that count against the authored data-retry budget."""
     view = retries or {}
-    return max(0, entry["attempts"] - view.get("transport", 0) - view.get("unknown", 0))
+    return max(0, entry["attempts"] - view.get("transport", 0) - view.get("unknown", 0)
+               - sum(link["status"] == "unknown" for link in entry["links"]))
 
 
 def entry_terminal(entry, max_attempts, retries=None, transport_cap=DEFAULT_TRANSPORT_CAP):
@@ -539,7 +542,7 @@ def budget_path(directory):
 
 
 def day_string():
-    return time.strftime("%Y-%m-%d", time.localtime())
+    return datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
 
 
 def budget_state(io, directory):
@@ -547,6 +550,7 @@ def budget_state(io, directory):
     current = dict(day=day_string(), calls=0)
     path = budget_path(directory)
     if not path.exists():
+        io.write(raw._path(directory, "budget-timezone.json"), {"timezone": "Asia/Shanghai"})
         return current
     stored = io.state(path)
     keys(stored, "day calls")
@@ -556,6 +560,17 @@ def budget_state(io, directory):
         and integer(stored["calls"], 0, 16000000),
         "invalid_campaign_budget",
     )
+    marker = raw._path(directory, "budget-timezone.json")
+    if not marker.exists():
+        # A legacy ledger used host localtime. Preserve a possible adjacent-day
+        # charge once during migration; never grant extra budget on upgrade.
+        if abs((datetime.fromisoformat(stored["day"]).date() -
+                datetime.fromisoformat(current["day"]).date()).days) <= 1:
+            current["calls"] = stored["calls"]
+        io.write(path, current)
+        io.write(marker, {"timezone": "Asia/Shanghai"})
+        return current
+    require(io.state(marker) == {"timezone": "Asia/Shanghai"}, "invalid_budget_timezone")
     return stored if stored["day"] == current["day"] else current
 
 
@@ -763,7 +778,9 @@ def linked_capture(root, binding, page_index, original, request, link):
             return
         captured = page_capture.read_capture(root, task, expected=link["receipt_sha256"])
         require(
-            captured["status"] == link["status"]
+            (captured["status"] == link["status"]
+             or (link["status"] == "failed" and captured["status"] == "unknown"
+                 and captured["terminal"] is None))
             and captured["terminal_sha256"] == link["terminal_sha256"]
             and captured["last_page_root"] == link["last_page_root"],
             "page_link_binding",
@@ -1052,7 +1069,7 @@ def retained_handoff(root, directory, state, binding, header):
     return handoff
 
 
-def run(manifest, root, run_key, slot, *, stop=None):
+def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
     """One bounded page pass; retries happen on later explicit invocations."""
     stop = stop if stop is not None else Event()
     require(raw._text(run_key) and raw._text(slot), "explicit_run_and_slot_required")
@@ -1152,6 +1169,19 @@ def run(manifest, root, run_key, slot, *, stop=None):
         latency = latency_state(io, directory, base_pace)
         pace = max(base_pace, latency["pace_seconds"])
         daily_exhausted = int(budget["calls"]) >= daily_budget
+        def admit_source(kind):
+            nonlocal daily_exhausted
+            if not source_allowed():
+                return False
+            charge = 2 if kind == "login" else 1  # Include eventual logout up front.
+            if budget["calls"] + charge > daily_budget:
+                daily_exhausted = True
+                return False
+            budget_charge(io, directory, budget, charge)
+            if budget["calls"] >= daily_budget:
+                daily_exhausted = True
+            return source_allowed()
+
         source_calls = 0
         refetch_attempts = 0
         sdk_queries = 0
@@ -1374,7 +1404,8 @@ def run(manifest, root, run_key, slot, *, stop=None):
                     # restarted under this attempt identity or fabricated cursor.
                     captured = page_capture.recover_capture(root, task)
                 finish(index, attempt, captured)
-                classify_retry(index, attempt)
+                if captured is not None and captured["status"] != "unknown":
+                    classify_retry(index, attempt)
                 recovered = index
             settled: set[int] = set()
 
@@ -1402,6 +1433,8 @@ def run(manifest, root, run_key, slot, *, stop=None):
                 never refunded, so a dead process still accounts for it.
                 """
                 nonlocal source_calls, refetch_attempts
+                if source_allowed is not None and not source_allowed():
+                    return None
                 task = attempt_task(
                     binding, state["page"], flat[index][0], flat[index][2], attempt
                 )
@@ -1435,20 +1468,16 @@ def run(manifest, root, run_key, slot, *, stop=None):
                 # Natural-day accounting: this attempt's own fixed cost (a whole
                 # login and cleanup per request, nothing inside a shared session)
                 # plus every source call the attempt actually made.
-                budget_charge(
-                    io,
-                    directory,
-                    budget,
-                    extra
-                    + (
-                        counts["source_query_calls"] + counts["source_next_calls"]
-                        if known
-                        else 0
-                    ),
-                )
+                if source_allowed is None:
+                    budget_charge(
+                        io, directory, budget,
+                        extra + (counts["source_query_calls"] + counts["source_next_calls"]
+                                 if known else 0),
+                    )
                 if int(budget["calls"]) >= daily_budget:
                     daily_exhausted = True
-                found = classify_retry(index, attempt)
+                found = (classify_retry(index, attempt)
+                         if captured is not None and captured["status"] != "unknown" else None)
                 if found == "blacklist":
                     # The source has locked this address out. Everything stops
                     # immediately and the next invocation is throttled for the
@@ -1510,6 +1539,7 @@ def run(manifest, root, run_key, slot, *, stop=None):
                     index
                     for index in range(len(flat))
                     if not (throttled or state["cancelled"] or stop.is_set())
+                    and (source_allowed is None or source_allowed())
                     and eligible(index)
                 ]
                 if len(candidates) >= 2:
@@ -1523,7 +1553,8 @@ def run(manifest, root, run_key, slot, *, stop=None):
                             # The session's fixed cost: one login, one logout.
                             # Each task's own query/next calls are charged by
                             # `settle` as that attempt is recorded.
-                            budget_charge(io, directory, budget, 2)
+                            if source_allowed is None:
+                                budget_charge(io, directory, budget, 2)
                             if int(budget["calls"]) >= daily_budget:
                                 daily_exhausted = True
                                 return False
@@ -1567,7 +1598,8 @@ def run(manifest, root, run_key, slot, *, stop=None):
                         save()
                     else:
                         session = page_capture.capture_session(
-                            root, tasks, stop=stop, on_task=admit, on_capture=capture
+                            root, tasks, stop=stop, on_task=admit, on_capture=capture,
+                            source_allowed=admit_source if source_allowed is not None else None
                         )
                         session_hold["record"] = dict(
                             tasks=len(candidates),
@@ -1582,7 +1614,8 @@ def run(manifest, root, run_key, slot, *, stop=None):
                             # The session login was refused. No attempt exists and
                             # none was spent; exactly like a single refused
                             # request this throttles the whole run.
-                            budget_charge(io, directory, budget, 1)
+                            if source_allowed is None:
+                                budget_charge(io, directory, budget, 1)
                             found = code_class(session["session_error"])
                             if found == "blacklist":
                                 seconds = blacklist_hit(io, directory, blacklist_seconds)
@@ -1611,7 +1644,7 @@ def run(manifest, root, run_key, slot, *, stop=None):
                                         time.time_ns() + login_backoff * 1_000_000_000,
                                     ),
                                 )
-                        elif not session_hold["charged"]:
+                        elif not session_hold["charged"] and source_allowed is None:
                             # The session logged in but admitted no task at all.
                             budget_charge(io, directory, budget, 2)
 
@@ -1645,6 +1678,7 @@ def run(manifest, root, run_key, slot, *, stop=None):
                     root,
                     task,
                     stop=stop,
+                    source_allowed=admit_source if source_allowed is not None else None,
                     restart_of=(
                         state["entries"][index]["links"][-1]["locator"]
                         if state["entries"][index]["links"]

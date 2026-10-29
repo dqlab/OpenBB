@@ -294,6 +294,10 @@ def read_capture(root, task, expected=None):
         and authority["codec"] == "baostock-source-evidence-v1-or-v2",
         "page_authority_shape",
     )
+    soft_path = raw._path(directory, "soft-deadline.json")
+    soft = _read(soft_path) if soft_path.exists() else None
+    require(soft is None or soft == dict(identity=identity, reason="soft_deadline"),
+            "soft_deadline_binding")
     previous = digest(authority)
     pages, pending, total, missing = [], None, 0, False
     for page in range(limits["observations"]):
@@ -410,6 +414,8 @@ def read_capture(root, task, expected=None):
         cancel=digest(cancel) if cancel else None,
         eligible=digest(eligible) if eligible else None,
     )
+    if soft is not None:
+        proof["soft_deadline"] = digest(soft)
     anchor = digest(proof)
     require(expected is None or expected == anchor, "page_capture_anchor")
     return dict(
@@ -424,7 +430,7 @@ def read_capture(root, task, expected=None):
         last_page_root=previous,
         capture_sha256=anchor,
         complete=complete,
-        status="cancelled" if cancel else "success" if complete else "failed",
+        status="cancelled" if cancel else "success" if complete else "unknown" if terminal is None and soft else "failed",
         restart_of=authority["restart_of"],
         refetch=authority["refetch"],
         metrics=terminal["metrics"] if terminal else None,
@@ -465,7 +471,7 @@ def _capacity_bytes(limits):
     )
 
 
-def capture_process(root, task, *, stop=None, restart_of=None, limits=None):
+def capture_process(root, task, *, stop=None, restart_of=None, limits=None, source_allowed=None):
     """Caller holds the campaign root lock. Existing attempt means read, not refetch."""
     task = task_check(task)
     limits = limits_check(DEFAULT_LIMITS if limits is None else limits)
@@ -610,6 +616,10 @@ def capture_process(root, task, *, stop=None, restart_of=None, limits=None):
                         "source_phase",
                     )
                     source_kind = item["source"]
+                    if source_allowed is not None and not source_allowed(source_kind):
+                        _install(directory / "soft-deadline.json", dict(identity=identity, reason="soft_deadline"))
+                        reason = "soft_deadline"
+                        break
                     proceed = (
                         not stop.is_set()
                         and page < limits["observations"]
@@ -796,6 +806,8 @@ def capture_process(root, task, *, stop=None, restart_of=None, limits=None):
             metrics["source_query_calls"] = None
             metrics["source_next_calls"] = None
         metrics["elapsed_seconds"] = time.monotonic() - start
+        if reason == "soft_deadline":
+            return read_capture(root, task)  # Durable prefix, without a terminal verdict.
         terminal = dict(
             identity=identity,
             status="complete" if complete else "partial",
@@ -938,6 +950,9 @@ def _session_worker(conn, tasks):
 
     session = None
     try:
+        _send(conn, dict(kind="session_login"))
+        if not _ack(conn).get("continue"):
+            return
         with source_session() as (ok, error_code):
             session = active_session()
             _send(conn, dict(kind="session", ok=ok, error_code=error_code))
@@ -1016,7 +1031,8 @@ def _session_worker(conn, tasks):
         conn.close()
 
 
-def capture_session(root, tasks, *, stop=None, limits=None, on_capture=None, on_task=None):
+def capture_session(root, tasks, *, stop=None, limits=None, on_capture=None, on_task=None,
+                    source_allowed=None):
     """One SDK session, one attempt per task, each installed before the next.
 
     The login is paid once for the whole task list; every task still owns its
@@ -1280,6 +1296,13 @@ def capture_session(root, tasks, *, stop=None, limits=None, on_capture=None, on_
             require(message[:1] == b"C" and len(message) <= CONTROL + 1, "page_message_shape")
             item = raw._decode(message[1:])
             kind = item.get("kind")
+            if kind == "session_login":
+                allowed = not stop.is_set() and (source_allowed is None or source_allowed("login"))
+                _send(parent, dict(kind="session_login_ack", **{"continue": allowed}))
+                if not allowed:
+                    reason = "soft_deadline"
+                    break
+                continue
             if kind == "session":
                 require(session_ok is None and live is None and admitted == 0, "page_session_phase")
                 session_ok = item["ok"] is True
@@ -1325,6 +1348,11 @@ def capture_session(root, tasks, *, stop=None, limits=None, on_capture=None, on_
                     "source_phase",
                 )
                 live["source_kind"] = item["source"]
+                if source_allowed is not None and not source_allowed(live["source_kind"]):
+                    _install(live["directory"] / "soft-deadline.json",
+                             dict(identity=live["identity"], reason="soft_deadline"))
+                    reason = "soft_deadline"
+                    break
                 proceed = (
                     not stop.is_set()
                     and live["page"] < limits["observations"]

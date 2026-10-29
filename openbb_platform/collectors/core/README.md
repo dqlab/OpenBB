@@ -139,7 +139,28 @@ single immutable daily manifest and reuses it on restart. It verifies all pages
 before reporting success; terminal failures and unfinished work exit nonzero.
 A closed trading day needs no universe file. `gaps` lists calendar dates since
 the last retained day; their trading status is unknown and no backfill is run.
-The time limit is checked between bounded campaign passes, so a pass can exceed
-it. Campaign request budget and its separate daily source-call budget still
-apply. Keep the same work and capture roots for restart, and retain the exact
-source evidence and configuration for the lifetime of the daily run.
+The soft time limit and Shanghai civil date are checked at each source admission,
+including shared-session login, query, and pagination. A call already in flight
+may return after the limit; its durable observations remain, but no subsequent
+source call is admitted. An interrupted attempt remains unknown and consumes its
+reservation; restart uses the same work and capture roots, and successful entries
+are not refetched. Cleanup can extend past the limit. Campaign request budget and
+its separate daily source-call budget still apply.
+
+If retained evidence originally marked today closed and corrected calendar evidence
+now marks it open, the launcher refuses the identity change by default. An operator
+may explicitly run the same command with `--correct-closed --reason 'EXPLANATION'`.
+This only permits closed-to-open for the selected day, with unchanged config
+and policy and no existing daily campaign. The original identity and available
+calendar remain in place; `closed-correction/` retains the corrected inputs, both
+identities, reason, timestamp and manifest. For a past day, additionally pass `--date YYYY-MM-DD`; every historical invocation
+requires the correction flag and reason. Older closed records may only have the
+original calendar hash, not the original body. A historical correction immediately runs the explicitly selected day; each historical
+restart requires the same explicit date, correction flag and reason. No historical
+day is scheduled automatically. Current-day restarts omit the correction flag. Keep the same work and capture roots for restart, and retain the exact
+source evidence and configuration for the lifetime of the daily run. The daily
+work directory binds its canonical capture root; changing the root is refused.
+Independent work directories cannot establish global deduplication. Existing
+planned days without a binding require a matching retained authority in that root.
+The natural-day budget uses Shanghai time; on first upgrade a legacy adjacent-day
+ledger is conservatively carried forward to avoid refunding source calls.
