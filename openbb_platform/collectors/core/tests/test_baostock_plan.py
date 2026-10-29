@@ -81,6 +81,7 @@ def test_unselected_bad_identity_is_not_silently_ignored():
 
 def test_duplicate_json_keys_rejected_at_any_depth():
     import json
+
     from openbb_collector_core.baostock_plan import _unique_object
 
     for raw in ('{"rows": [], "rows": []}', '{"params": {"a": 1, "a": 2}}'):
