@@ -37,7 +37,7 @@ if os.environ.get("CAMPAIGN_OFFLINE") == "1":
 """
 
 
-def setup(tmp_path, budget=5, history=30):
+def setup(tmp_path, budget=30, history=30):
     import openbb_baostock
 
     import openbb_collector_core
@@ -191,3 +191,239 @@ def test_first_run_success_and_zero_query_replay(tmp_path):
     before = calls.read_text()
     assert invoke(cmd, env)["status"] == "complete"
     assert calls.read_text() == before
+
+
+def test_reference_budget_counts_each_admission_and_survives_restart(tmp_path):
+    cmd, env, calls, day = setup(tmp_path, budget=1)
+    assert invoke(cmd, env)["reason"] == "reference_budget_exhausted"
+    events = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert [e["event"] for e in events if e["event"] in ("login", "query", "logout")] == ["login"]
+    records = list((tmp_path / "work" / "references" / day).glob("call-*.json"))
+    assert len(records) == 1
+    assert json.loads(records[0].read_text())["status"] == "unknown"
+    before = calls.read_text()
+    assert invoke(cmd, env)["reason"] == "reference_budget_exhausted"
+    assert calls.read_text() == before
+
+
+def test_parent_kill_keeps_source_lock_until_child_exits(tmp_path):
+    import time
+
+    cmd, env, calls, _ = setup(tmp_path)
+    boot = tmp_path / "bootstrap/sitecustomize.py"
+    boot.write_text(
+        boot.read_text()
+        + """\nif os.environ.get("CAMPAIGN_OFFLINE") == "1":
+    previous = helpers.resolve_method
+    def delayed(m):
+        q = previous(m)
+        def f(**p):
+            if m == "query_trade_dates":
+                log("reference_started"); time.sleep(3)
+            return q(**p)
+        return f
+    helpers.resolve_method = delayed
+"""
+    )
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        for _ in range(200):
+            if "reference_started" in calls.read_text():
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("reference worker did not start")
+        proc.kill()
+        proc.wait()
+        retry = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=10)
+        assert retry.returncode == 2
+        assert len([x for x in calls.read_text().splitlines() if "reference_started" in x]) == 1
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_reference_login_crossing_day_does_not_admit_query(tmp_path):
+    cmd, env, calls, day = setup(tmp_path)
+    marker = tmp_path / "midnight"
+    env["MIDNIGHT_MARKER"] = str(marker)
+    boot = tmp_path / "bootstrap/sitecustomize.py"
+    boot.write_text(
+        boot.read_text()
+        + """\nif os.environ.get("MIDNIGHT_MARKER"):
+    from openbb_collector_core import baostock_daily_orchestrator as orch
+    real_day = orch.shanghai_date
+    orch.shanghai_date = lambda: ("2099-01-01" if Path(os.environ["MIDNIGHT_MARKER"]).exists()
+                                 else real_day())
+    old_login = helpers.bs.login
+    def login():
+        result = old_login()
+        Path(os.environ["MIDNIGHT_MARKER"]).touch()
+        time.sleep(.2)
+        return result
+    helpers.bs.login = login
+"""
+    )
+    cmd = [
+        cmd[0],
+        "-c",
+        "from openbb_collector_core.baostock_daily_orchestrator import main; "
+        "raise SystemExit(main())",
+    ] + cmd[3:]
+    assert invoke(cmd, env)["reason"] == "date_changed"
+    events = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert not any(e.get("method") == "query_trade_dates" for e in events)
+
+
+def test_visible_pointer_requires_successful_restart_sync(tmp_path):
+    cmd, env, calls, _ = setup(tmp_path)
+    boot = tmp_path / "bootstrap/sitecustomize.py"
+    boot.write_text(
+        boot.read_text()
+        + """\nif os.environ.get("FAIL_POINTER_SYNC"):
+    from openbb_collector_core import baostock_daily as d
+    original = d.atomic_json
+    def injected(path, value):
+        if path.name == "calendar.json" and "references" in str(path):
+            sync = d.campaign.raw._sync
+            def fail(directory): raise OSError("injected fsync failure")
+            d.campaign.raw._sync = fail
+            try: return original(path, value)
+            finally: d.campaign.raw._sync = sync
+        return original(path, value)
+    d.atomic_json = injected
+if os.environ.get("FAIL_RESTART_SYNC"):
+    from openbb_collector_core import baostock_campaign as c
+    original_sync = c.raw._sync
+    def fail_restart(directory):
+        if Path(directory).name == os.environ["FAIL_RESTART_SYNC"]:
+            raise OSError("injected restart fsync failure")
+        return original_sync(directory)
+    c.raw._sync = fail_restart
+"""
+    )
+    env["FAIL_POINTER_SYNC"] = "1"
+    assert invoke(cmd, env)["status"] == "partial"
+    before = calls.read_text()
+    env.pop("FAIL_POINTER_SYNC")
+    env["FAIL_RESTART_SYNC"] = shanghai_date()
+    failed = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30)
+    assert failed.returncode == 2
+    assert calls.read_text() == before
+    env.pop("FAIL_RESTART_SYNC")
+    assert invoke(cmd, env)["status"] == "complete"
+    events = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert sum(e.get("method") == "query_trade_dates" for e in events) == 1
+
+
+def test_page_calls_consume_budget(tmp_path):
+    cmd, env, calls, day = setup(tmp_path, budget=3)
+    boot = tmp_path / "bootstrap/sitecustomize.py"
+    boot.write_text(
+        boot.read_text()
+        + """\nif os.environ.get("CAMPAIGN_OFFLINE") == "1":
+    previous = helpers.resolve_method
+    helpers.BAOSTOCK_PER_PAGE_COUNT = 1
+    def paged(m):
+        query = previous(m)
+        def f(**p):
+            result = query(**p)
+            old_next = result.next
+            def next_page():
+                log("page"); return old_next()
+            result.next = next_page
+            return result
+        return f
+    helpers.resolve_method = paged
+"""
+    )
+    assert invoke(cmd, env)["reason"] == "reference_budget_exhausted"
+    records = [
+        json.loads(p.read_text())
+        for p in (tmp_path / "work" / "references" / day).glob("call-*.json")
+    ]
+    assert {r["kind"] for r in records} == {"login", "query", "page"}
+    assert sum(json.loads(line)["event"] == "page" for line in calls.read_text().splitlines()) == 1
+
+
+def test_crash_after_pointer_preserves_evidence_and_call_budget(tmp_path):
+    cmd, env, calls, day = setup(tmp_path)
+    boot = tmp_path / "bootstrap/sitecustomize.py"
+    boot.write_text(boot.read_text() + '''\nif os.environ.get("CRASH_POINTER"):
+    from openbb_collector_core import baostock_daily as d
+    original = d.atomic_json
+    def crash(path, value):
+        original(path, value)
+        if path.name == "calendar.json" and "references" in str(path):
+            os._exit(77)
+    d.atomic_json = crash
+''')
+    env["CRASH_POINTER"] = "1"
+    assert subprocess.run(cmd, env=env, capture_output=True, timeout=30).returncode == 77
+    refs = tmp_path / "work" / "references" / day
+    before = len(list(refs.glob("call-*.json")))
+    assert before == 3
+    env.pop("CRASH_POINTER")
+    assert invoke(cmd, env)["status"] == "complete"
+    assert len(list(refs.glob("call-*.json"))) == before + 3
+    events = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert sum(e.get("method") == "query_trade_dates" for e in events) == 1
+
+
+def test_legacy_failure_with_unknown_usage_is_not_reset(tmp_path):
+    cmd, env, calls, day = setup(tmp_path)
+    env["REFERENCE_FAIL"] = "query_trade_dates"
+    assert invoke(cmd, env)["status"] == "partial"
+    directory = tmp_path / "work" / "references" / day
+    for attempt in directory.glob("attempt-*.json"):
+        record = json.loads(attempt.read_text())
+        record.pop("call_journal")
+        attempt.write_text(json.dumps(record))
+    before = calls.read_text()
+    env.pop("REFERENCE_FAIL")
+    assert invoke(cmd, env)["reason"] == "legacy_reference_calls_unknown"
+    assert calls.read_text() == before
+
+
+def test_call_reservation_sync_failure_cannot_restore_budget(tmp_path):
+    cmd, env, calls, day = setup(tmp_path, budget=1)
+    boot = tmp_path / "bootstrap/sitecustomize.py"
+    boot.write_text(boot.read_text() + '''\nif os.environ.get("FAIL_CALL_SYNC"):
+    from openbb_collector_core import baostock_daily as d
+    original = d.atomic_json
+    def injected(path, value):
+        if path.name.startswith("call-"):
+            sync = d.campaign.raw._sync
+            def fail(directory): raise OSError("call reservation sync failed")
+            d.campaign.raw._sync = fail
+            try: return original(path, value)
+            finally: d.campaign.raw._sync = sync
+        return original(path, value)
+    d.atomic_json = injected
+''')
+    env["FAIL_CALL_SYNC"] = "1"
+    failed = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30)
+    assert failed.returncode == 2
+    assert len(list((tmp_path / "work" / "references" / day).glob("call-*.json"))) == 1
+    env.pop("FAIL_CALL_SYNC")
+    assert invoke(cmd, env)["reason"] == "reference_budget_exhausted"
+    assert not any(json.loads(line)["event"] == "login" for line in calls.read_text().splitlines())
+
+
+def test_full_fields_and_adjustflags_with_call_budget(tmp_path):
+    cmd, env, calls, _ = setup(tmp_path, history=100)
+    config_path = tmp_path / "config"
+    config = json.loads(config_path.read_text())
+    config["fields"] = (
+        "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,"
+        "tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"
+    )
+    config["adjustflags"] = ["3", "2", "1"]
+    config_path.write_text(json.dumps(config))
+    assert invoke(cmd, env)["status"] == "complete"
+    queries = [json.loads(line) for line in calls.read_text().splitlines()]
+    queries = [e for e in queries if e.get("method") == "query_history_k_data_plus"]
+    assert {e["params"]["adjustflag"] for e in queries} == {"1", "2", "3"}
+    assert all(e["params"]["fields"] == config["fields"] for e in queries)
+    assert len(queries) == 3

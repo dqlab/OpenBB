@@ -168,7 +168,7 @@ planned days without a binding require a matching retained authority in that roo
 The natural-day budget uses Shanghai time; on first upgrade a legacy adjacent-day
 ledger is conservatively carried forward to avoid refunding source calls.
 
-### Daily orchestration (0.1.12)
+### Daily orchestration (0.1.13)
 
 `dq-baostock-daily-orchestrator --config CONFIG.json --work PRIVATE/daily --root
 PRIVATE/captures --reference-budget N --history-daily-budget N --request-budget N
@@ -176,10 +176,12 @@ PRIVATE/captures --reference-budget N --history-daily-budget N --request-budget 
 daily campaign. The config chooses security type, markets, fields and adjustment
 flags; the example's 18 fields and three flags are choices, not quality gates.
 `--date` optionally asserts today's Asia/Shanghai date. The reference budget is
-a durable per-day total of reserved attempts, including timeouts and interrupted
-processes; successful evidence is pinned by digest and reused. A failed reference
-attempt remains in `work/references/DATE`, and a later invocation may retry while
-budget remains. Identity, including budgets and capture root, is fixed for the
+a durable per-day limit on source-call admissions, including login, query,
+page and logout. Each admission is recorded before the call and remains unknown
+if interrupted, so the limit conservatively includes calls that may not have
+started. Successful evidence is pinned by digest and reused. A failed reference
+attempt remains in `work/references/DATE`; legacy attempts without call journals
+block further reference calls because their actual usage is unknown. Identity, including budgets and capture root, is fixed for the
 day. History calls have a separate daily call budget and manifest request budget;
 see the campaign section above for their semantics. The CLI reports partial or
 failed runs with nonzero exit status, verifies every completed campaign page, and

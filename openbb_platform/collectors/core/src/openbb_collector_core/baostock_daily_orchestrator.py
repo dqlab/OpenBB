@@ -8,13 +8,74 @@ import os
 import time
 import uuid
 from datetime import date
+from multiprocessing.reduction import DupFd
 from pathlib import Path
 from types import SimpleNamespace
 
 from . import baostock_campaign as campaign
 from . import baostock_daily as daily
 from .baostock_daily_plan import _rows, shanghai_date
-from .baostock_daily_source import _fetch
+
+
+def _reference_worker(operation, params, output, connection, lock_handle, day, deadline):
+    # A duplicate of the very same open file description retains flock after
+    # parent death. It is released only when the source worker actually exits.
+    lock_fd = lock_handle.detach()
+    from openbb_baostock.utils import source_evidence as source
+
+    def admit(kind):
+        connection.send(kind)
+        if not connection.recv():
+            raise RuntimeError("source admission refused")
+        if kind != "logout" and (shanghai_date() != day or time.monotonic() >= deadline):
+            raise RuntimeError("source admission expired")
+
+    original_login, original_logout = source.helpers.bs.login, source.helpers.bs.logout
+    original_resolve = source.helpers.resolve_method
+
+    def login():
+        admit("login")
+        return original_login()
+
+    def logout():
+        admit("logout")
+        return original_logout()
+
+    def resolve(method):
+        original = original_resolve(method)
+
+        def query(**kwargs):
+            admit("query")
+            result = original(**kwargs)
+            if result is not None:
+                old_next = result.next
+
+                def next_page():
+                    admit("page")
+                    return old_next()
+
+                result.next = next_page
+            return result
+
+        return query
+
+    source.helpers.bs.login = login
+    source.helpers.bs.logout = logout
+    source.helpers.resolve_method = resolve
+    try:
+        daily.atomic_json(Path(output), source._query(operation, params))
+    finally:
+        connection.close()
+        os.close(lock_fd)
+
+
+def _durable_read(path):
+    # A visible rename may have preceded a failed directory fsync. Flush both
+    # the actual object and its directory before accepting its contents.
+    with path.open("rb") as stream:
+        os.fsync(stream.fileno())
+    campaign.raw._sync(path.parent)
+    return campaign.load_json(path)
 
 
 def run(args):
@@ -33,6 +94,8 @@ def run(args):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         directory = args.work / "references" / day
         directory.mkdir(parents=True, exist_ok=True)
+        for parent in reversed((directory.resolve(), *directory.resolve().parents)):
+            campaign.raw._sync(parent)
         identity = dict(
             version="baostock-orchestrator-v1",
             date=day,
@@ -47,7 +110,7 @@ def run(args):
         )
         identity_path = directory / "identity.json"
         if identity_path.exists():
-            if campaign.load_json(identity_path) != identity:
+            if _durable_read(identity_path) != identity:
                 raise ValueError("reference_identity_conflict")
         else:
             daily.atomic_json(identity_path, identity)
@@ -70,7 +133,7 @@ def run(args):
         for name, operation, params, fields in specs:
             pinned = directory / (name + ".json")
             if pinned.exists():
-                pointer = campaign.load_json(pinned)
+                pointer = _durable_read(pinned)
                 digest = pointer["sha256"]
                 if (
                     not isinstance(digest, str)
@@ -79,14 +142,29 @@ def run(args):
                 ):
                     raise ValueError("invalid_reference_pointer")
                 evidence_path = directory / ("evidence-" + digest + ".json")
-                evidence = campaign.load_json(evidence_path)
+                evidence = _durable_read(evidence_path)
                 if campaign.digest(evidence) != digest:
                     raise ValueError("reference_evidence_conflict")
                 _rows(evidence, operation, params, fields)
                 retained[name] = evidence_path
                 continue
+            calls = list(directory.glob("call-*.json"))
+            for call in calls:
+                record = _durable_read(call)
+                if (
+                    set(record) != {"attempt", "kind", "status"}
+                    or record["kind"] not in ("login", "query", "page", "logout")
+                    or record["status"] != "unknown"
+                ):
+                    raise ValueError("invalid_reference_call_journal")
+            # Legacy attempts have no per-call journal and therefore cannot be
+            # safely priced. Preserve them and refuse further source calls.
             attempts = list(directory.glob("attempt-*.json"))
-            if len(attempts) >= args.reference_budget:
+            if any("call_journal" not in _durable_read(p) for p in attempts):
+                return dict(
+                    status="partial", date=day, reason="legacy_reference_calls_unknown", source=name
+                )
+            if len(calls) >= args.reference_budget:
                 return dict(
                     status="partial", date=day, reason="reference_budget_exhausted", source=name
                 )
@@ -100,12 +178,41 @@ def run(args):
             attempt = directory / ("attempt-" + token + ".json")
             output = directory / ("result-" + token + ".json")
             # Reserve durably before starting a child, including crashes and timeouts.
-            daily.atomic_json(attempt, dict(operation=operation, params=params, status="reserved"))
-            process = multiprocessing.get_context("spawn").Process(
-                target=_fetch, args=(operation, params, str(output))
+            daily.atomic_json(
+                attempt, dict(operation=operation, params=params, status="reserved", call_journal=1)
+            )
+            context = multiprocessing.get_context("spawn")
+            parent, child = context.Pipe()
+            process = context.Process(
+                target=_reference_worker,
+                args=(operation, params, str(output), child, DupFd(lock.fileno()), day, deadline),
             )
             process.start()
-            process.join(max(0, min(args.timeout, deadline - time.monotonic())))
+            child.close()
+            limit = min(time.monotonic() + args.timeout, deadline)
+            refusal = None
+            while process.is_alive() and time.monotonic() < limit:
+                if not parent.poll(min(0.05, max(0, limit - time.monotonic()))):
+                    continue
+                try:
+                    kind = parent.recv()
+                except EOFError:
+                    break
+                calls = list(directory.glob("call-*.json"))
+                if len(calls) >= args.reference_budget:
+                    refusal = "reference_budget_exhausted"
+                elif kind != "logout" and shanghai_date() != day:
+                    refusal = "date_changed"
+                elif kind != "logout" and time.monotonic() >= deadline:
+                    refusal = "time_budget"
+                if refusal is None:
+                    call = directory / (
+                        "call-" + str(time.time_ns()) + "-" + uuid.uuid4().hex + ".json"
+                    )
+                    daily.atomic_json(call, dict(attempt=token, kind=kind, status="unknown"))
+                parent.send(refusal is None)
+            process.join(max(0, limit - time.monotonic()))
+            parent.close()
             status = "process_failed"
             if process.is_alive():
                 process.terminate()
@@ -122,7 +229,7 @@ def run(args):
                     digest = campaign.digest(evidence)
                     evidence_path = directory / ("evidence-" + digest + ".json")
                     if evidence_path.exists():
-                        if campaign.digest(campaign.load_json(evidence_path)) != digest:
+                        if campaign.digest(_durable_read(evidence_path)) != digest:
                             raise ValueError("reference_evidence_conflict")
                     else:
                         daily.atomic_json(evidence_path, evidence)
@@ -131,11 +238,16 @@ def run(args):
                     status = "retained"
                 except (ValueError, KeyError, OSError) as exc:
                     status = "invalid_evidence:" + str(exc)
+            if refusal is not None:
+                status = refusal
+            elif shanghai_date() != day:
+                status = "date_changed"
             daily.atomic_json(
                 attempt,
                 dict(
                     operation=operation,
                     params=params,
+                    call_journal=1,
                     status=status,
                     result=str(output) if output.exists() else None,
                 ),
