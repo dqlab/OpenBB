@@ -180,3 +180,48 @@ def test_replay_legacy_v2_receipt(tmp_path):
     raw.capture(root, task, lambda _: raw.RawResponse(b'x' * (mod.LIMIT + 1), http_status=503), response_max_bytes=mod.LIMIT + 1)
     assert not mod.collect(root, 'old', ['IO'], 1, lambda *_: pytest.fail('unexpected fetch'))
     assert not list(root.glob('raw-acquisition-v3/*'))
+
+
+def test_cli_rejects_bound_oversize_state_on_short_body(tmp_path):
+    from openbb_collector_core import raw_acquisition as raw
+    root = tmp_path / 'root'; root.mkdir(mode=0o700)
+    hook = (Path(__file__).parent / 'cffex_review_http_hook.py').read_text().replace("'/tmp/cffex-review-test/calls'", 'os.environ["CALL_LOG"]')
+    (tmp_path / 'sitecustomize.py').write_text(hook)
+    env = {**os.environ, 'PYTHONPATH': str(tmp_path) + os.pathsep + str(Path(mod.__file__).parents[1]), 'CALL_LOG': str(tmp_path / 'calls'), 'MODE': 'ok'}
+    cmd = [sys.executable, '-m', 'openbb_collector_core.cffex_options_raw', '--root', str(root), '--snapshot-id', 'attack', '--products', 'IO', '--max-attempts', '1']
+    first = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    receipt_path = next(p for p in root.glob('raw-acquisition-v3/*/responses/000000/receipt.json') if b'cffex-options-discovery' in (p.parents[2] / 'task.json').read_bytes())
+    receipt = json.loads(receipt_path.read_bytes())
+    assert receipt['size'] < mod.LIMIT
+    receipt['length_state'] = 'oversize_complete_unknown'
+    receipt_path.write_bytes(raw._encode(receipt))
+    terminal_path = receipt_path.parents[2] / 'terminal.json'
+    terminal = json.loads(terminal_path.read_bytes())
+    terminal['receipts'] = [raw._sha(receipt_path.read_bytes())]
+    terminal_path.write_bytes(raw._encode(terminal))
+    durable_path = receipt_path.parents[2] / 'durable.json'
+    durable = json.loads(durable_path.read_bytes())
+    durable['terminal_sha256'] = raw._sha(terminal_path.read_bytes())
+    durable_path.write_bytes(raw._encode(durable))
+    assert raw.read_capture(root, json.loads((receipt_path.parents[2] / 'task.json').read_bytes())['task_id'], '1', version=raw.LENGTH_VERSION)['complete']
+    calls = (tmp_path / 'calls').read_bytes()
+    replay = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    assert replay.returncode != 0
+    assert (tmp_path / 'calls').read_bytes() == calls
+    retry = subprocess.run(cmd + ['--epoch', '1'], env=env, capture_output=True, text=True)
+    assert retry.returncode != 0
+    assert (tmp_path / 'calls').read_bytes() == calls
+
+
+@pytest.mark.parametrize('response', [
+    lambda raw: raw.RawResponse(b'', length_state='oversize_complete_unknown'),
+    lambda raw: raw.RawResponse(b'x', evidence_kind='provider-transformed', transformation='test', length_state='complete'),
+    lambda raw: raw.RawResponse(b'x', length_state='unknown'),
+])
+def test_v3_rejects_inconsistent_length_evidence(tmp_path, response):
+    from openbb_collector_core import raw_acquisition as raw
+    root = tmp_path / 'root'; root.mkdir(mode=0o700)
+    task = {'version': raw.LENGTH_VERSION, 'task_id': 'length-test', 'generation': '1', 'source': {'provider': 'test', 'model': 'test'}, 'requests': [{'request_id': 'one', 'params': {}}]}
+    with pytest.raises(raw.RawAcquisitionError):
+        raw.capture(root, task, lambda _: response(raw))

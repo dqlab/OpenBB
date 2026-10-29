@@ -334,12 +334,23 @@ def _receipt(value: Any, task_sha: str, request: dict, index: int, version: str)
     _require(type(value) is dict, "invalid_fields")
     _keys(
         value,
-        fields + (" http_status" if version in (HTTP_VERSION, LENGTH_VERSION) and "http_status" in value else "")
+        fields
+        + (
+            " http_status"
+            if version in (HTTP_VERSION, LENGTH_VERSION) and "http_status" in value
+            else ""
+        )
         + (" length_state" if version == LENGTH_VERSION else ""),
     )
     if version == LENGTH_VERSION:
-        _require(value["length_state"] in ("complete", "oversize_complete_unknown", "unknown"), "invalid_length_state")
-        _require((value["status"] == "failed") == (value["length_state"] == "unknown"), "invalid_length_state")
+        _require(
+            value["length_state"] in ("complete", "oversize_complete_unknown", "unknown"),
+            "invalid_length_state",
+        )
+        _require(
+            (value["status"] == "failed") == (value["length_state"] == "unknown"),
+            "invalid_length_state",
+        )
     if "http_status" in value:
         _require(
             type(value["http_status"]) is int and 100 <= value["http_status"] <= 599,
@@ -379,6 +390,10 @@ def _receipt(value: Any, task_sha: str, request: dict, index: int, version: str)
     _require(
         value["evidence_kind"] in ("raw-bytes", "provider-transformed"), "invalid_evidence_kind"
     )
+    if version == LENGTH_VERSION:
+        _require(value["evidence_kind"] == "raw-bytes", "invalid_length_evidence")
+        if value["length_state"] == "oversize_complete_unknown":
+            _require(type(value["size"]) is int and value["size"] > 0, "invalid_length_state")
     _require(
         (value["evidence_kind"] == "raw-bytes" and value["transformation"] is None)
         or (value["evidence_kind"] == "provider-transformed" and _text(value["transformation"])),

@@ -172,10 +172,17 @@ def collect(root, snapshot_id, products, max_attempts, sender=fetch, *, epoch=0)
                         continue
                     item = state['responses'][0]
                     receipt, body = item['receipt'], item['body']
+                    if version == raw.LENGTH_VERSION and receipt['status'] == 'captured':
+                        expected = 'oversize_complete_unknown' if len(body) == LIMIT + 1 else 'complete'
+                        if len(body) > LIMIT + 1 or receipt['length_state'] != expected:
+                            raise ValueError('inconsistent response length evidence; preserve and investigate')
                     if body is not None and len(body) > LIMIT:
                         print(f'oversize response; completeness unknown: {kind} {token}, HTTP {receipt.get("http_status")}, retained {len(body)} bytes', file=sys.stderr)
                         continue
-                    if receipt['status'] == 'captured' and receipt.get('http_status') == 200:
+                    if (receipt['status'] == 'captured' and receipt['evidence_kind'] == 'raw-bytes'
+                            and body is not None and len(body) <= LIMIT
+                            and (version != raw.LENGTH_VERSION or receipt['length_state'] == 'complete')
+                            and receipt.get('http_status') == 200):
                         try:
                             value = expiries(body, token) if kind == 'discovery' else valid_quote(body, token)
                             return value if kind == 'discovery' else True
