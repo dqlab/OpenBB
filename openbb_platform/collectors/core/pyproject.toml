@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["pydantic>=2.7,<3"]
 
+[project.scripts]
+dq-cffex-options-raw = "openbb_collector_core.cffex_options_raw:main"
+
 [project.optional-dependencies]
 ssh = ["paramiko>=3.4,<5"]
 openbb = ["openbb-core>=1.6.13,<2"]

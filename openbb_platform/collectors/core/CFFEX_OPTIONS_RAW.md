@@ -1,0 +1,7 @@
+# Independent CFFEX option raw snapshots
+
+Install the collector core package in an isolated environment. Create a local POSIX evidence directory owned by the collector user with mode 0700. Run `dq-cffex-options-raw --root /path/to/private-root --snapshot-id UNIQUE_ID --products IO,HO,MO --max-attempts 2`. The command exits nonzero for incomplete acquisition. It does not install or activate a service, publish data, or invoke downstream delivery.
+
+The ID identifies one logical acquisition, not a time slot: choose a new ID for each new observation. Reusing an ID resumes its immutable product list and successful individual requests without contacting the source again. Attempts are bounded between 1 and 5 per request over the life of the snapshot; raising the bound allows previously failed requests to continue. Interrupted core captures resume their recorded prefix. A process-wide root lock serializes runs. Use a private local filesystem with atomic rename, hard links, flock and fsync; NAS is not qualified.
+
+Each discovery page and each displayed maturity quote has its own raw-acquisition-v2 task and generation. Bodies and receipts, including HTTP status and acquisition clock, remain immutable even for failed HTTP or invalid source content. The source's displayed expiries do not establish the exchange universe; quotes do not supply a reliable event time or contract unit. These are raw observations, not a point-in-time safe canonical dataset. No live-source integration has been verified by the offline tests.

@@ -1,0 +1,14 @@
+[
+  [
+    "IO",
+    "<div class=\"js-select\" id=\"option_suffix\" data-value=\"io2610\">\n                            <span class=\"selected\">io2610</span>\n                            <ul style=\"display: none\">\n                                                                    <li class=\"active\"  data-value=\"io2610\">io2610</li>\n                                                                    <li  data-value=\"io2611\">io2611</li>\n                                                                    <li  data-value=\"io2612\">io2612</li>\n                                                                    <li  data-value=\"io2703\">io2703</li>\n                                                                    <li  data-value=\"io2709\">io2709</li>\n                                                                    <li  data-value=\"io2706\">io2706</li>\n                                                            </ul>\n                        </div>"
+  ],
+  [
+    "HO",
+    "<div class=\"js-select\" id=\"option_suffix\" data-value=\"ho2610\">\n                            <span class=\"selected\">ho2610</span>\n                            <ul style=\"display: none\">\n                                                                    <li class=\"active\"  data-value=\"ho2610\">ho2610</li>\n                                                                    <li  data-value=\"ho2612\">ho2612</li>\n                                                                    <li  data-value=\"ho2611\">ho2611</li>\n                                                                    <li  data-value=\"ho2703\">ho2703</li>\n                                                                    <li  data-value=\"ho2709\">ho2709</li>\n                                                                    <li  data-value=\"ho2706\">ho2706</li>\n                                                            </ul>\n                        </div>"
+  ],
+  [
+    "MO",
+    "<div class=\"js-select\" id=\"option_suffix\" data-value=\"mo2610\">\n                            <span class=\"selected\">mo2610</span>\n                            <ul style=\"display: none\">\n                                                                    <li class=\"active\"  data-value=\"mo2610\">mo2610</li>\n                                                                    <li  data-value=\"mo2612\">mo2612</li>\n                                                                    <li  data-value=\"mo2611\">mo2611</li>\n                                                                    <li  data-value=\"mo2703\">mo2703</li>\n                                                                    <li  data-value=\"mo2706\">mo2706</li>\n                                                                    <li  data-value=\"mo2709\">mo2709</li>\n                                                            </ul>\n                        </div>"
+  ]
+]
