@@ -11,7 +11,7 @@ from pathlib import Path
 from . import baostock_campaign as campaign
 
 
-def make_plan(config, snapshot):
+def make_plan(config, snapshot, *, daily_date=None):
     """Select current provider classifications, preserving literal source identity."""
     expected = {
         "security_type",
@@ -30,6 +30,8 @@ def make_plan(config, snapshot):
         for k in ("security_type", "status", "generation", "fields")
     ):
         raise ValueError("invalid_config_string")
+    if daily_date is not None:
+        config = {**config, "start_date": daily_date, "end_date": daily_date}
     start, end = date.fromisoformat(config["start_date"]), date.fromisoformat(config["end_date"])
     if (
         start.isoformat() != config["start_date"]
@@ -67,12 +69,16 @@ def make_plan(config, snapshot):
         if type(row) is not list or len(row) != len(fields) or any(type(x) is not str for x in row):
             raise ValueError("invalid_stock_basic_row")
         code, _, _, _, security_type, status = row
-        if security_type != config["security_type"] or status != config["status"]:
-            continue
-        if not re.fullmatch(r"(?:sh|sz)\.[0-9]{6}", code) or code in seen:
-            raise ValueError("invalid_or_duplicate_selected_code")
+        if (
+            not re.fullmatch(r"(?:sh|sz)\.[0-9]{6}", code)
+            or code in seen
+            or security_type not in ("1", "2", "3", "4", "5")
+            or status not in ("0", "1")
+        ):
+            raise ValueError("invalid_or_duplicate_stock_basic_identity")
         seen.add(code)
-        codes.append(code)
+        if security_type == config["security_type"] and status == config["status"]:
+            codes.append(code)
     if not codes:
         raise ValueError("empty_selection")
     tasks = []
@@ -106,6 +112,15 @@ def make_plan(config, snapshot):
     return {"tasks": tasks}
 
 
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate_json_key: {key}")
+        result[key] = value
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -118,10 +133,13 @@ def main():
     parser.add_argument(
         "--plan", type=Path, required=True, help="New file; never overwrites an existing plan"
     )
+    parser.add_argument(
+        "--date", help="Explicit ISO date for a single-day plan; overrides both config dates"
+    )
     args = parser.parse_args()
-    config = json.loads(args.config.read_text())
-    snapshot = json.loads(args.snapshot.read_text())
-    plan = make_plan(config, snapshot)
+    config = json.loads(args.config.read_text(), object_pairs_hook=_unique_object)
+    snapshot = json.loads(args.snapshot.read_text(), object_pairs_hook=_unique_object)
+    plan = make_plan(config, snapshot, daily_date=args.date)
     with args.plan.open("x", encoding="utf-8") as out:
         json.dump(plan, out, ensure_ascii=False, indent=2)
         out.write("\n")

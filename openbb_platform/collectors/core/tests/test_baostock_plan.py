@@ -52,3 +52,37 @@ def test_reject_failed_and_duplicate_snapshot():
     snapshot["rows"].append(snapshot["rows"][0])
     with pytest.raises(ValueError):
         make_plan(config, snapshot)
+
+
+def test_daily_date_overrides_both_bounds():
+    config, snapshot = inputs()
+    tasks = make_plan(config, snapshot, daily_date="2026-09-16")["tasks"]
+    assert len(tasks) == 3
+    assert all(
+        t["requests"][0]["params"]["start_date"]
+        == t["requests"][0]["params"]["end_date"]
+        == "2026-09-16"
+        for t in tasks
+    )
+    with pytest.raises(ValueError):
+        make_plan(config, snapshot, daily_date="2026-9-16")
+
+
+def test_unselected_bad_identity_is_not_silently_ignored():
+    config, snapshot = inputs()
+    snapshot["rows"][1][4] = "invalid"
+    with pytest.raises(ValueError):
+        make_plan(config, snapshot)
+    config, snapshot = inputs()
+    snapshot["rows"].append(snapshot["rows"][1][:])
+    with pytest.raises(ValueError):
+        make_plan(config, snapshot)
+
+
+def test_duplicate_json_keys_rejected_at_any_depth():
+    import json
+    from openbb_collector_core.baostock_plan import _unique_object
+
+    for raw in ('{"rows": [], "rows": []}', '{"params": {"a": 1, "a": 2}}'):
+        with pytest.raises(ValueError, match="duplicate_json_key"):
+            json.loads(raw, object_pairs_hook=_unique_object)

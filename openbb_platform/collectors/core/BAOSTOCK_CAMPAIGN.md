@@ -120,3 +120,7 @@ Control metrics 只覆盖 campaign Control read/progress write；page-capture me
 ### 显式历史计划生成
 
 `python -m openbb_collector_core.baostock_plan --config configs/baostock_history_plan.example.json --snapshot stock-basic-query.json --plan new-plan.json` 从保留的单个 `query_stock_basic` SDK 响应（包含 operation、params、error_code、fields、rows）按配置的 type 和 status 选择代码，分割闭区间并为每个复权标志生成 HistoryKDataPlus literal task。输出是普通 campaign plan，之后仍需显式 compile、run、verify。输出文件必须不存在；生成器不读取或修改既有 campaign 结果。示例 type 5/status 1 是 BaoStock 查询时的当前分类，并非完整性保证或历史时点成分；保留原始响应、采集时间和配置以便核对。参数也可选择其他证券类型，历史开始/结束日期、窗口、字段和复权标志均须由操作者明确设置。字段接受不代表源支持或非空：已保存 ETF 日截面样本的 peTTM、pbMRQ、psTTM、pcfNcfTTM 为空，isST=1 的含义未经验证；HistoryKDataPlus 对这四项及 ETF 复权的实际响应尚须单独验证。此工具不安排任务或协调跨主机源请求；不得在未协调的情况下与已有采集重叠。
+
+单日日更可在同一配置上显式传入 `--date YYYY-MM-DD`，覆盖配置的开始和结束日期，生成仅该日的任务；不传时仍使用配置的闭区间。调用者负责选择交易日和日期，工具不会自动判断完整性、补漏或启动采集。输入 JSON 的重复键会被拒绝；快照全体行的代码、类型、状态和代码唯一性均经检查，包括未选行。未知类型或状态会失败，须核对来源后更新支持范围。来源快照分类只决定所选范围，不能证明市场覆盖完整；独立采集本身不以其他下游数据齐备为门槛。
+
+计划生成、compile 和 run 的身份不提供同日跨 plan 去重：不同 plan、run、root 或机器可能重复请求，即使日期相同。只有协调者保证同一范围同日只运行一个计划，才能用于日更；不能依赖本地锁实现跨主机协调。重试应使用既有 run 的恢复流程，重新生成或改变身份不等同去重。未建立与 NAS 的协调前不得启用重叠 timer。
