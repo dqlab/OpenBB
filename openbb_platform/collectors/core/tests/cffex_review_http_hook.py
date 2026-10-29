@@ -12,6 +12,7 @@ def fake(req,timeout):
  if mode=='http503': raise urllib.error.HTTPError(u, 503, 'unavailable', {}, __import__('io').BytesIO(b'failure'))
  if mode=='networkfail': raise urllib.error.URLError('offline')
  if mode=='large': return R(b'x'*1000001,503)
+ if mode=='larger': return R(b'x'*1000002,503)
  if mode=='empty': return R(b'')
  if mode=='204': return R(b'',204)
  if 'getOptionData' in u:

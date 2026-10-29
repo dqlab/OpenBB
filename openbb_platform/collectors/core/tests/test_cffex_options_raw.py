@@ -80,7 +80,7 @@ def test_http_failure_bytes_are_bound(tmp_path):
     from openbb_collector_core import raw_acquisition as raw
     root = tmp_path / 'root'; root.mkdir(mode=0o700)
     assert not mod.collect(root, 'bad', ['IO'], 1, lambda *_: (503, b'raw error'))
-    receipts = list(root.glob('raw-acquisition-v2/*/responses/000000/receipt.json'))
+    receipts = list(root.glob('raw-acquisition-v3/*/responses/000000/receipt.json'))
     assert len(receipts) == 1
     receipt = json.loads(receipts[0].read_text())
     assert receipt['http_status'] == 503
@@ -95,7 +95,7 @@ def test_saved_native_discovery_fragments():
         assert len(found) == 6
         assert set(found) == {product.lower() + month for month in ('2610', '2611', '2612', '2703', '2706', '2709')}
 
-@pytest.mark.parametrize('mode', ['large', 'http503', 'networkfail', 'empty', '204'])
+@pytest.mark.parametrize('mode', ['large', 'larger', 'http503', 'networkfail', 'empty', '204'])
 def test_review_attack_cli_budget_and_evidence(tmp_path, mode):
     root = tmp_path / 'root'; root.mkdir(mode=0o700)
     hook = (Path(__file__).parent / 'cffex_review_http_hook.py').read_text()
@@ -108,23 +108,75 @@ def test_review_attack_cli_budget_and_evidence(tmp_path, mode):
     replay = subprocess.run(cmd, env=env, capture_output=True, text=True)
     assert replay.returncode == 1
     assert len((tmp_path / 'calls').read_text().splitlines()) == 1
-    receipts = list(root.glob('raw-acquisition-v2/*/responses/000000/receipt.json'))
+    receipts = list(root.glob('raw-acquisition-v3/*/responses/000000/receipt.json'))
     assert len(receipts) == 1
     receipt = json.loads(receipts[0].read_text())
-    if mode == 'large':
+    if mode in ('large', 'larger'):
         assert receipt['http_status'] == 503 and receipt['size'] == mod.LIMIT + 1
         assert len((receipts[0].parent / 'body.bin').read_bytes()) == mod.LIMIT + 1
-        assert 'truncated' in first.stderr and 'truncated' in replay.stderr
-        marker = json.loads(next(root.glob('epochs-*/*.truncated')).read_text())
-        assert marker['http_status'] == 503 and marker['complete_response'] is False
+        assert 'completeness unknown' in first.stderr and 'completeness unknown' in replay.stderr
+        assert receipt['length_state'] == 'oversize_complete_unknown'
+        assert not list(root.glob('epochs-*/*.truncated'))
     if mode == 'http503':
         assert receipt['http_status'] == 503
         assert (receipts[0].parent / 'body.bin').read_bytes() == b'failure'
     if mode == 'networkfail':
-        assert receipt['status'] == 'failed'
+        assert receipt['status'] == 'failed' and receipt['length_state'] == 'unknown'
     env['MODE'] = 'ok'
     recovered = subprocess.run(cmd + ['--epoch', '1'], env=env, capture_output=True, text=True)
     assert recovered.returncode == 0, recovered.stderr
     count = len((tmp_path / 'calls').read_text().splitlines())
     assert subprocess.run(cmd + ['--epoch', '1'], env=env, capture_output=True).returncode == 0
     assert len((tmp_path / 'calls').read_text().splitlines()) == count
+
+
+@pytest.mark.parametrize('size,expected', [(mod.LIMIT, 'complete'), (mod.LIMIT + 1, 'oversize_complete_unknown')])
+def test_boundary_and_terminal_binding(tmp_path, size, expected):
+    from openbb_collector_core import raw_acquisition as raw
+    root = tmp_path / 'evidence'; root.mkdir(mode=0o700)
+    assert not mod.collect(root, 'boundary', ['IO'], 1, lambda *_: (503, b'x' * size))
+    receipt_path = next(root.glob('raw-acquisition-v3/*/responses/000000/receipt.json'))
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt['length_state'] == expected
+    terminal = json.loads((receipt_path.parents[2] / 'terminal.json').read_text())
+    assert terminal['receipts'] == [raw._sha(receipt_path.read_bytes())]
+    assert receipt['sha256'] == raw._sha((receipt_path.parent / 'body.bin').read_bytes())
+
+
+def test_kill_after_durable_and_two_snapshots(tmp_path):
+    root = tmp_path / 'evidence'; root.mkdir(mode=0o700)
+    hook = (Path(__file__).parent / 'cffex_review_http_hook.py').read_text().replace("'/tmp/cffex-review-test/calls'", 'os.environ["CALL_LOG"]')
+    hook += """
+from openbb_collector_core import raw_acquisition as raw
+original = raw._establish_durability
+def kill(*args, **kwargs):
+ original(*args, **kwargs)
+ if os.environ.get('KILL_AFTER_DURABLE') == '1': os._exit(77)
+raw._establish_durability = kill
+"""
+    (tmp_path / 'sitecustomize.py').write_text(hook)
+    env = {**os.environ, 'PYTHONPATH': str(tmp_path) + os.pathsep + str(Path(mod.__file__).parents[1]), 'CALL_LOG': str(tmp_path / 'calls'), 'MODE': 'large', 'KILL_AFTER_DURABLE': '1'}
+    cmd = [sys.executable, '-m', 'openbb_collector_core.cffex_options_raw', '--root', str(root), '--snapshot-id', 'one', '--products', 'IO', '--max-attempts', '1']
+    assert subprocess.run(cmd, env=env, capture_output=True).returncode == 77
+    env['KILL_AFTER_DURABLE'] = '0'
+    replay = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    assert replay.returncode == 1 and 'completeness unknown' in replay.stderr
+    assert len((tmp_path / 'calls').read_text().splitlines()) == 1
+    receipt = json.loads(next(root.glob('raw-acquisition-v3/*/responses/000000/receipt.json')).read_text())
+    assert receipt['length_state'] == 'oversize_complete_unknown'
+    cmd[cmd.index('one')] = 'two'
+    assert subprocess.run(cmd, env=env, capture_output=True).returncode == 1
+    assert len(list(root.glob('raw-acquisition-v3/*/responses/000000/receipt.json'))) == 2
+
+
+def test_replay_legacy_v2_receipt(tmp_path):
+    import hashlib
+    from openbb_collector_core import raw_acquisition as raw
+    root = tmp_path / 'evidence'; root.mkdir(mode=0o700)
+    task_id = hashlib.sha256(raw._encode(['old', 'discovery', 'IO'])).hexdigest()
+    task = {'version': raw.HTTP_VERSION, 'task_id': task_id, 'generation': '1', 'source': {'provider': 'sina', 'model': 'cffex-options-discovery'}, 'requests': [{'request_id': 'IO', 'params': {'kind': 'discovery', 'token': 'IO'}}]}
+    epochs = root / ('epochs-' + hashlib.sha256(b'old').hexdigest()); epochs.mkdir(mode=0o700)
+    raw._install(epochs / (task_id + '-1.request'), raw._encode({'task_id': task_id, 'generation': '1'}))
+    raw.capture(root, task, lambda _: raw.RawResponse(b'x' * (mod.LIMIT + 1), http_status=503), response_max_bytes=mod.LIMIT + 1)
+    assert not mod.collect(root, 'old', ['IO'], 1, lambda *_: pytest.fail('unexpected fetch'))
+    assert not list(root.glob('raw-acquisition-v3/*'))

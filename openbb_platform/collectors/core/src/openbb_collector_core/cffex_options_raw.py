@@ -150,8 +150,10 @@ def collect(root, snapshot_id, products, max_attempts, sender=fetch, *, epoch=0)
                 config = raw._decode(raw._read(epochs / (str(e) + '.json'), raw.MAX_META_BYTES))
                 for attempt in range(1, config['max_attempts'] + 1):
                     generation = str(attempt) if e == 0 else f'{e}:{attempt}'
-                    task = {'version': raw.HTTP_VERSION, 'task_id': task_id, 'generation': generation, 'source': {'provider': 'sina', 'model': 'cffex-options-' + kind}, 'requests': [{'request_id': token, 'params': {'kind': kind, 'token': token}}]}
-                    locator = root / raw.capture_locator(task_id, generation, version=raw.HTTP_VERSION)
+                    legacy = root / raw.capture_locator(task_id, generation, version=raw.HTTP_VERSION)
+                    version = raw.HTTP_VERSION if (legacy / 'durable.json').is_file() else raw.LENGTH_VERSION
+                    task = {'version': version, 'task_id': task_id, 'generation': generation, 'source': {'provider': 'sina', 'model': 'cffex-options-' + kind}, 'requests': [{'request_id': token, 'params': {'kind': kind, 'token': token}}]}
+                    locator = root / raw.capture_locator(task_id, generation, version=version)
                     reservation = epochs / (task_id + '-' + generation.replace(':', '-') + '.request')
                     # An uncertain prior call consumes its slot even if the process
                     # died before a receipt could be installed.
@@ -164,19 +166,14 @@ def collect(root, snapshot_id, products, max_attempts, sender=fetch, *, epoch=0)
                         raw._install(reservation, raw._encode({'task_id': task_id, 'generation': generation}))
                     def adapter(_):
                         status, body = sender(kind, token)
-                        return raw.RawResponse(body, http_status=status)
+                        return raw.RawResponse(body, http_status=status, length_state='oversize_complete_unknown' if len(body) > LIMIT else 'complete')
                     state = raw.capture(root, task, adapter, response_max_bytes=LIMIT + 1)
                     if not state['complete']:
                         continue
                     item = state['responses'][0]
                     receipt, body = item['receipt'], item['body']
                     if body is not None and len(body) > LIMIT:
-                        raw._install(reservation.with_suffix('.truncated'), raw._encode({
-                            'task_id': task_id, 'generation': generation,
-                            'http_status': receipt.get('http_status'), 'retained_bytes': len(body),
-                            'complete_response': False, 'reason': 'response_limit_exceeded',
-                        }))
-                        print(f'response truncated: {kind} {token}, HTTP {receipt.get("http_status")}, received at least {len(body)} bytes', file=sys.stderr)
+                        print(f'oversize response; completeness unknown: {kind} {token}, HTTP {receipt.get("http_status")}, retained {len(body)} bytes', file=sys.stderr)
                         continue
                     if receipt['status'] == 'captured' and receipt.get('http_status') == 200:
                         try:

@@ -28,6 +28,7 @@ from .models import ProviderFailure
 
 VERSION = "raw-acquisition-v1"
 HTTP_VERSION = "raw-acquisition-v2"
+LENGTH_VERSION = "raw-acquisition-v3"
 MAX_REQUESTS = 256
 MAX_TASK_BYTES = 262144
 MAX_BODY_BYTES = 16 * 1024 * 1024
@@ -53,6 +54,7 @@ class RawResponse:
     source_time: str | None = None
     media_type: str = "application/octet-stream"
     http_status: int | None = None
+    length_state: str | None = None
 
 
 def _require(condition: bool, code: str = "invalid_raw_evidence") -> None:
@@ -102,7 +104,7 @@ def validate_task(task: dict[str, Any]) -> dict[str, Any]:
     encoded = _encode(task)
     _require(len(encoded) <= MAX_TASK_BYTES, "task_size_limit")
     _keys(task, "version task_id generation source requests")
-    _require(task["version"] in (VERSION, HTTP_VERSION), "unsupported_version")
+    _require(task["version"] in (VERSION, HTTP_VERSION, LENGTH_VERSION), "unsupported_version")
     _require(_text(task["task_id"]) and _text(task["generation"]), "invalid_identity")
     _keys(task["source"], "provider model")
     _require(all(_text(v) for v in task["source"].values()), "invalid_source")
@@ -163,7 +165,7 @@ def plan_process_capture(task: dict[str, Any], source: Any) -> dict:
 
 def capture_locator(task_id: str, generation: str, *, version: str = VERSION) -> str:
     _require(_text(task_id) and _text(generation), "invalid_identity")
-    _require(version in (VERSION, HTTP_VERSION), "unsupported_version")
+    _require(version in (VERSION, HTTP_VERSION, LENGTH_VERSION), "unsupported_version")
     return version + "/" + _sha(_encode([version, task_id, generation]))
 
 
@@ -332,8 +334,12 @@ def _receipt(value: Any, task_sha: str, request: dict, index: int, version: str)
     _require(type(value) is dict, "invalid_fields")
     _keys(
         value,
-        fields + (" http_status" if version == HTTP_VERSION and "http_status" in value else ""),
+        fields + (" http_status" if version in (HTTP_VERSION, LENGTH_VERSION) and "http_status" in value else "")
+        + (" length_state" if version == LENGTH_VERSION else ""),
     )
+    if version == LENGTH_VERSION:
+        _require(value["length_state"] in ("complete", "oversize_complete_unknown", "unknown"), "invalid_length_state")
+        _require((value["status"] == "failed") == (value["length_state"] == "unknown"), "invalid_length_state")
     if "http_status" in value:
         _require(
             type(value["http_status"]) is int and 100 <= value["http_status"] <= 599,
@@ -799,6 +805,8 @@ def capture(
                     "size": None,
                     "error": "provider_failure" if failed else None,
                 }
+                if authority["version"] == LENGTH_VERSION:
+                    receipt["length_state"] = "unknown" if failed else response.length_state
                 body = None
                 if not failed:
                     _require(
