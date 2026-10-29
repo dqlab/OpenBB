@@ -666,38 +666,34 @@ def _recover_pending(directory: Path, state: dict) -> None:
 
 
 @contextmanager
-def _ownership(directory: Path):
+def _ownership(directory: Path, *, retain_for_workers=False):
     import fcntl
 
     lock = _path(directory, ".lock")
     stream = lock.open("a+b")
-    primary, acquired = None, False
+    primary = None
     try:
         try:
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RawAcquisitionError("acquisition_busy") from exc
-        acquired = True
-        yield
+        try:
+            yield stream.fileno()
+        finally:
+            # Campaign spawn workers hold this same open file description.
+            # Legacy raw acquisition may fork persistent children and must unlock.
+            if not retain_for_workers:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
     except BaseException as exc:
         primary = exc
         raise
     finally:
         try:
-            if acquired:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            stream.close()
         except BaseException as secondary:
             if primary is None:
-                primary = secondary
                 raise
-            primary.add_note("ownership_unlock_failed:" + type(secondary).__name__)
-        finally:
-            try:
-                stream.close()
-            except BaseException as secondary:
-                if primary is None:
-                    raise
-                primary.add_note("ownership_close_failed:" + type(secondary).__name__)
+            primary.add_note("ownership_close_failed:" + type(secondary).__name__)
 
 
 @_capture_cancellation()

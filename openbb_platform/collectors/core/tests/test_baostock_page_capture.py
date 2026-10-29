@@ -529,12 +529,16 @@ if os.environ.get("CAMPAIGN_OFFLINE") == "1":
         assert [type(x) for x in row] == [str, bool, int, float]
     h.env["NESTED_CODE"] = shape if persistent else ""
     child, second = h.run()
-    assert child.returncode == (1 if persistent else 0)
+    # Legacy policy closes a page after its unknown-code retry cap, while
+    # recording the source failure separately from the campaign status.
+    assert child.returncode == 0
+    assert second["outcome"] == ("closed_with_failures" if persistent else "complete")
     assert second["source_calls"] == 1 and len(h.queries()) == 2
-    assert h.state()["completed_requests"] == (0 if persistent else 1)
-    assert second["remaining_requests"] == (1 if persistent else 0)
+    assert h.state()["completed_requests"] == 1
+    assert second["remaining_requests"] == 0
     child, replay = h.run()
-    assert child.returncode == (1 if persistent else 0)
+    assert child.returncode == 0
+    assert replay["outcome"] == second["outcome"]
     assert replay["source_calls"] == 0 and len(h.queries()) == 2
     assert {q["start_method"] for q in h.queries()} == {"spawn"}
     assert before == {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}

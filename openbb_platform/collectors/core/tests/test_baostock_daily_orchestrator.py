@@ -7,6 +7,7 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+import pytest
 from test_baostock_campaign import BOOTSTRAP
 from test_baostock_daily_plan import inputs
 
@@ -30,7 +31,10 @@ if os.environ.get("CAMPAIGN_OFFLINE") == "1":
                 result.data = [[params["start_date"], "1"]]
             else:
                 result.fields = ["code", "code_name", "ipoDate", "outDate", "type", "status"]
-                result.data = [["sh.600000", "stock", "", "", "1", "1"]]
+                if os.environ.get("TEST_ETF"):
+                    result.data = [["sh.510300", "ETF", "", "", "5", "1"]]
+                else:
+                    result.data = [["sh.600000", "stock", "", "", "1", "1"]]
             return result
         return query
     helpers.resolve_method = reference_resolve
@@ -427,3 +431,116 @@ def test_full_fields_and_adjustflags_with_call_budget(tmp_path):
     assert {e["params"]["adjustflag"] for e in queries} == {"1", "2", "3"}
     assert all(e["params"]["fields"] == config["fields"] for e in queries)
     assert len(queries) == 3
+
+
+@pytest.mark.parametrize("session_pages", ["0", "1"])
+@pytest.mark.parametrize("policy", ["legacy", "conservative"])
+def test_history_worker_retains_campaign_lock_after_parent_death(tmp_path, session_pages, policy):
+    """An orphaned SDK query must exclude every recovery until it exits."""
+    import signal
+    import time
+
+    cmd, env, calls, _ = setup(tmp_path, history=100)
+    env["SCENARIO"] = "delay"
+    env["TEST_ETF"] = "1"
+    env["OPENBB_CAMPAIGN_SESSION_PAGES"] = session_pages
+    config = json.loads((tmp_path / "config").read_text())
+    config["unknown_attempt_policy"] = policy
+    config["security_type"] = "5"
+    if session_pages == "1":
+        config["adjustflags"] = ["3", "2"]
+    (tmp_path / "config").write_text(json.dumps(config))
+    boot = tmp_path / "bootstrap/sitecustomize.py"
+    boot.write_text(boot.read_text().replace("time.sleep(15)", "time.sleep(60)"))
+    process = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True)
+    worker = None
+    try:
+        for _ in range(400):
+            events = [json.loads(line) for line in calls.read_text().splitlines()]
+            queries = [event for event in events
+                       if event.get("method") == "query_history_k_data_plus"]
+            if queries:
+                worker = queries[0]["pid"]
+                break
+            time.sleep(0.05)
+        assert worker is not None
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+        os.kill(worker, 0)
+        for _ in range(2):
+            retry = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=20)
+            assert retry.returncode == 2
+            assert json.loads(retry.stdout)["error"] == "acquisition_busy"
+            events = [json.loads(line) for line in calls.read_text().splitlines()]
+            assert len([e for e in events if e.get("method") == "query_history_k_data_plus"]) == 1
+        os.kill(worker, signal.SIGKILL)
+        worker = None
+        env["SCENARIO"] = "success"
+        for _ in range(4):
+            result = invoke(cmd, env)
+            if (result["status"] == "complete"
+                    or result.get("reason") == "unknown_attempt_manual_review"):
+                break
+        if policy == "conservative":
+            assert result["status"] == "partial"
+            assert result["reason"] == "unknown_attempt_manual_review"
+            queries = [json.loads(line) for line in calls.read_text().splitlines()]
+            queries = [e for e in queries if e.get("method") == "query_history_k_data_plus"]
+            assert len(queries) == (2 if session_pages == "1" else 1)
+            assert result["campaign"]["unknown_attempts"] == 1
+        else:
+            assert result["status"] == "complete"
+        before = calls.read_text()
+        replay = invoke(cmd, env)
+        assert replay["status"] == ("partial" if policy == "conservative" else "complete")
+        assert calls.read_text() == before
+    finally:
+        if worker is not None:
+            try:
+                os.kill(worker, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+
+def test_conservative_reference_reservation_is_unknown(tmp_path):
+    cmd, env, calls, day = setup(tmp_path)
+    config_path = tmp_path / "config"
+    config = json.loads(config_path.read_text())
+    config["unknown_attempt_policy"] = "conservative"
+    config_path.write_text(json.dumps(config))
+    # A durable reservation can precede process start; no source dispatch is proven.
+    refs = tmp_path / "work" / "references" / day
+    refs.mkdir(parents=True)
+    (refs / "attempt-reserved.json").write_text(json.dumps({
+        "operation": "BaostockTradeDates", "params": {},
+        "status": "reserved", "call_journal": 1,
+    }))
+    result = invoke(cmd, env)
+    assert result["reason"] == "unknown_attempt_manual_review"
+    # Even a visible pointer cannot turn the unterminated reservation into success.
+    (refs / "calendar.json").write_text("{}")
+    assert invoke(cmd, env)["reason"] == "unknown_attempt_manual_review"
+    assert calls.read_text() == ""
+    assert (refs / "attempt-reserved.json").exists()
+
+
+def test_worker_lock_descriptor_excludes_nested_owners_until_last_close(tmp_path):
+    from openbb_collector_core import raw_acquisition as raw
+
+    with raw._ownership(tmp_path, retain_for_workers=True) as fd:
+        duplicate = os.dup(fd)
+        with pytest.raises(raw.RawAcquisitionError, match="acquisition_busy"):
+            with raw._ownership(tmp_path, retain_for_workers=True):
+                pass
+    try:
+        with pytest.raises(raw.RawAcquisitionError, match="acquisition_busy"):
+            with raw._ownership(tmp_path, retain_for_workers=True):
+                pass
+    finally:
+        os.close(duplicate)
+    with raw._ownership(tmp_path, retain_for_workers=True):
+        pass

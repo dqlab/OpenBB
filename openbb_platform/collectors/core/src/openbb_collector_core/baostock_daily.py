@@ -44,6 +44,9 @@ def launch(args):
     if day != execution_day and not args.correct_closed:
         raise ValueError("historical_correction_requires_authorization")
     config = campaign.load_json(args.config)
+    unknown_policy = config.get("unknown_attempt_policy", "legacy")
+    if unknown_policy not in ("legacy", "conservative"):
+        raise ValueError("invalid_unknown_attempt_policy")
     start = date.fromisoformat(config["start_date"])
     end = date.fromisoformat(config["end_date"])
     if (
@@ -222,6 +225,7 @@ def launch(args):
                 args.root,
                 run_key,
                 slot,
+                unknown_attempt_policy=unknown_policy,
                 source_allowed=lambda: (
                     time.monotonic() < deadline and shanghai_date() == execution_day
                 ),
@@ -243,7 +247,9 @@ def launch(args):
             gap_history_known=bool(previous),
             campaign=last,
             reason=(
-                "date_changed"
+                "unknown_attempt_manual_review"
+                if last and last.get("unknown_attempts") and unknown_policy == "conservative"
+                else "date_changed"
                 if shanghai_date() != execution_day
                 else "time_budget"
                 if time.monotonic() >= deadline

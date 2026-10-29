@@ -66,6 +66,8 @@ source-call deadline 默认 180 秒、页 durable-drain allowance 120 秒、整�
 
 SIGTERM/SIGINT latch 阻止后续新 source effect；已返回页可以在 bounded drain 内继续落盘，再拒绝 next。deadline/hard death 只保证已 durable ACK 的 fragment/page，不保证尚在 SDK 内存或管道里的字节。超期、取消或异常需要回收时，仍存活的 worker 依次 terminate、最多 join 2 秒；仍存活才 kill、最多再 join 2 秒。每次回收至多这两个等待（共 4 秒），可能超过业务截止，不会在 finally 重新赠予一套等待；已经退出的 worker 立即 reap，不为凑足 grace 等待。无法确认 reap 则报错，不授予成功。上述是请求给 OS 的等待上界，不是调度、信号调用、不可中断内核 I/O 或最终持久化的硬实时墙钟保证。源异常与 sink/文件系统异常分开；cleanup 不覆盖 primary operational error 或 cancellation。
 
+历史 page/session worker 在调用来源前取得父进程持有的同一 root flock 的文件描述副本；即使父进程被杀，锁也由仍在执行的 worker 持有，恢复和 verifier 在 worker 退出前返回 busy。worker 退出后内核释放锁，无需删除锁文件或依赖 PID；spawn 描述符传递失败时 worker 不会调用来源。独立日采集恢复也使用同一 root 锁。此保证限定同一 root 与同一主机的合格文件系统。
+
 同一活会话只有一次 query，后续为同一 ResultData.next()。SDK 未提供可信跨 session resume token：**死会话的新 attempt 可以重取不完整 request 的 prefix**。新 authority 记录 restart_of、refetch=true、新 clock，不能把两个会话拼成一个连续响应；成功的其它 REQUESTS 仍零重取。CLI 的 refetch/refetch_attempts 是本次 invocation 的 restart dispatch 事实，retry_semantics 明示该限制。
 
 source_calls 是 campaign dispatch 数；sdk_query_calls/sdk_next_calls 来自返回的 provider summary。worker 死亡/未交 summary 时输出 null，而不是把 admission 当成已知实际调用数；每 attempt metrics 另留 source_*_admissions。offline SDK 日志独立计量真实 query/next。completed replay 不增加这些调用。
@@ -124,3 +126,5 @@ Control metrics 只覆盖 campaign Control read/progress write；page-capture me
 单日日更可在同一配置上显式传入 `--date YYYY-MM-DD`，覆盖配置的开始和结束日期，生成仅该日的任务；不传时仍使用配置的闭区间。调用者负责选择交易日和日期，工具不会自动判断完整性、补漏或启动采集。输入 JSON 的重复键会被拒绝；快照全体行的代码、类型、状态和代码唯一性均经检查，包括未选行。未知类型或状态会失败，须核对来源后更新支持范围。来源快照分类只决定所选范围，不能证明市场覆盖完整；独立采集本身不以其他下游数据齐备为门槛。
 
 计划生成、compile 和 run 的身份不提供同日跨 plan 去重：不同 plan、run、root 或机器可能重复请求，即使日期相同。只有协调者保证同一范围同日只运行一个计划，才能用于日更；不能依赖本地锁实现跨主机协调。重试应使用既有 run 的恢复流程，重新生成或改变身份不等同去重。未建立与 NAS 的协调前不得启用重叠 timer。
+
+Daily 配置可显式设置 `"unknown_attempt_policy": "conservative"`。任何没有 terminal 的已有历史 attempt（包括尚未创建 authority 的预留）保持 unknown，停止该请求的自动重试并报告 `unknown_attempt_manual_review`；即使实际未派发也可能告警。引用数据的未结束预留同样要求人工核查。其他可执行的同页请求仍继续；unknown 既非成功也非失败，页面不会完成。证据保留供核查，不自动删除。默认 `legacy` 保持原有重试行为，策略包含在日配置身份中，不可在已有日期静默切换。锁仅在 worker 存活期间阻止恢复，退出后由保守策略阻止未知请求重取。

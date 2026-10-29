@@ -12,6 +12,7 @@ import json
 import multiprocessing as mp
 import os
 import time
+from multiprocessing.reduction import recv_handle, send_handle
 from pathlib import Path
 from threading import Event
 
@@ -131,6 +132,16 @@ def _frames(envelope):
                 buffer.clear()
     if buffer:
         yield bytes(buffer)
+
+
+def _locked_worker(target, conn, *args):
+    # The descriptor is transferred over the worker's socket before any source
+    # call. A broken transfer exits without invoking the provider.
+    fd = recv_handle(conn)
+    try:
+        target(conn, *args)
+    finally:
+        os.close(fd)
 
 
 def _worker(conn, task):
@@ -471,8 +482,14 @@ def _capacity_bytes(limits):
     )
 
 
-def capture_process(root, task, *, stop=None, restart_of=None, limits=None, source_allowed=None):
+def capture_process(root, task, *, stop=None, restart_of=None, limits=None, source_allowed=None,
+                    lock_fd=None):
     """Caller holds the campaign root lock. Existing attempt means read, not refetch."""
+    if lock_fd is None:
+        raw._mkdir(Path(root))
+        with raw._ownership(Path(root), retain_for_workers=True) as owned_fd:
+            return capture_process(root, task, stop=stop, restart_of=restart_of, limits=limits,
+                                   source_allowed=source_allowed, lock_fd=owned_fd)
     task = task_check(task)
     limits = limits_check(DEFAULT_LIMITS if limits is None else limits)
     require(
@@ -543,8 +560,11 @@ def capture_process(root, task, *, stop=None, restart_of=None, limits=None, sour
         else:
             context = mp.get_context("spawn")
             parent, child = context.Pipe()
-            process = context.Process(target=_worker, args=(child, task))
+            process = context.Process(
+                target=_locked_worker, args=(_worker, child, task)
+            )
             process.start()
+            send_handle(parent, lock_fd, process.pid)
             child.close()
             child = None
             while True:
@@ -1032,7 +1052,7 @@ def _session_worker(conn, tasks):
 
 
 def capture_session(root, tasks, *, stop=None, limits=None, on_capture=None, on_task=None,
-                    source_allowed=None):
+                    source_allowed=None, lock_fd=None):
     """One SDK session, one attempt per task, each installed before the next.
 
     The login is paid once for the whole task list; every task still owns its
@@ -1042,6 +1062,11 @@ def capture_session(root, tasks, *, stop=None, limits=None, on_capture=None, on_
     `on_capture(index, captured)` runs after each attempt is durable and its
     return value decides whether the next task is admitted at all.
     """
+    if lock_fd is None:
+        raw._mkdir(Path(root))
+        with raw._ownership(Path(root), retain_for_workers=True) as owned_fd:
+            return capture_session(root, tasks, stop=stop, limits=limits, on_capture=on_capture,
+                                   on_task=on_task, source_allowed=source_allowed, lock_fd=owned_fd)
     require(type(tasks) is list and 1 <= len(tasks) <= 16, "page_session_tasks")
     tasks = [task_check(task) for task in tasks]
     limits = limits_check(DEFAULT_LIMITS if limits is None else limits)
@@ -1207,8 +1232,11 @@ def capture_session(root, tasks, *, stop=None, limits=None, on_capture=None, on_
     try:
         context = mp.get_context("spawn")
         parent, child = context.Pipe()
-        process = context.Process(target=_session_worker, args=(child, tasks))
+        process = context.Process(
+            target=_locked_worker, args=(_session_worker, child, tasks)
+        )
         process.start()
+        send_handle(parent, lock_fd, process.pid)
         child.close()
         child = None
         while True:

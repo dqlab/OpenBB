@@ -768,7 +768,8 @@ def linked_capture(root, binding, page_index, original, request, link):
         task = attempt_task(binding, page_index, original, request, link["attempt"])
         locator = page_capture.capture_locator(task)
         require(link["locator"] == locator, "locator_binding")
-        if link["status"] == "unknown" and not raw._path(root, locator).exists():
+        if (link["status"] == "unknown"
+                and not (raw._path(root, locator) / "authority.json").exists()):
             require(
                 link["receipt_sha256"] is None
                 and link["terminal_sha256"] is None
@@ -779,6 +780,7 @@ def linked_capture(root, binding, page_index, original, request, link):
         captured = page_capture.read_capture(root, task, expected=link["receipt_sha256"])
         require(
             (captured["status"] == link["status"]
+             or (link["status"] == "unknown" and captured["terminal"] is None)
              or (link["status"] == "failed" and captured["status"] == "unknown"
                  and captured["terminal"] is None))
             and captured["terminal_sha256"] == link["terminal_sha256"]
@@ -1070,8 +1072,10 @@ def retained_handoff(root, directory, state, binding, header):
     return handoff
 
 
-def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
+def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None,
+        unknown_attempt_policy="legacy"):
     """One bounded page pass; retries happen on later explicit invocations."""
+    require(unknown_attempt_policy in ("legacy", "conservative"), "invalid_unknown_attempt_policy")
     stop = stop if stop is not None else Event()
     require(raw._text(run_key) and raw._text(slot), "explicit_run_and_slot_required")
     io = Control()
@@ -1137,7 +1141,7 @@ def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
         require(encode(io.read(authority_path)) == encode(authority), "immutable_run_conflict")
         # Mutable progress/eligibility must only be sampled with ownership.
     raw._mkdir(root)
-    with raw._ownership(root):
+    with raw._ownership(root, retain_for_workers=True) as lock_fd:
         if directory.exists():
             require(encode(io.read(authority_path)) == encode(authority), "immutable_run_conflict")
             state = io.state(progress_path)
@@ -1241,7 +1245,10 @@ def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
 
         def summary():
             successes = sum(
-                bool(e["links"] and e["links"][-1]["status"] == "success") for e in state["entries"]
+                bool(e["links"] and e["links"][-1]["status"] == "success"
+                     and (unknown_attempt_policy != "conservative"
+                          or all(link["status"] != "unknown" for link in e["links"])))
+                for e in state["entries"]
             )
             pending = header["request_count"] - state["completed_requests"] - successes
             progress_binding(state, binding, header, prior_handoff)
@@ -1269,7 +1276,12 @@ def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
                 page=state["page"],
                 handoff_sha256=state["last_handoff"],
                 capture_kind=page_capture.VERSION,
-                retry_semantics="incomplete-request-new-session-may-refetch-prefix",
+                retry_semantics=(
+                    "unknown-requires-manual-review" if unknown_attempt_policy == "conservative"
+                    else "incomplete-request-new-session-may-refetch-prefix"
+                ),
+                unknown_attempts=sum(sum(link["status"] == "unknown" for link in e["links"])
+                                     for e in state["entries"]),
                 daily_budget_exhausted=daily_exhausted,
                 daily_calls=int(budget["calls"]),
                 session=session_hold["record"],
@@ -1341,7 +1353,10 @@ def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
             for (task, _, request), entry in zip(flat, state["entries"], strict=True):
                 for link in entry["links"]:
                     actual = linked_capture(root, binding, state["page"], task, request, link)
-                    if actual == "unknown" and link["status"] == "failed":
+                    if ((actual == "unknown" and link["status"] == "failed")
+                        or (unknown_attempt_policy == "conservative"
+                            and link.get("terminal_sha256") is None
+                            and link["status"] != "unknown")):
                         link["status"] = "unknown"
                         corrected_legacy = True
             if corrected_legacy:
@@ -1351,6 +1366,10 @@ def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
                 original, _, request = flat[index]
                 task = attempt_task(binding, state["page"], original, request, attempt)
                 status = captured["status"] if captured is not None else "unknown"
+                if unknown_attempt_policy == "conservative" and (
+                    captured is None or captured["terminal"] is None
+                ):
+                    status = "unknown"
                 if captured is not None:
                     require(encode(captured["task"]) == encode(task), "page_attempt_binding")
                 link = dict(
@@ -1406,7 +1425,7 @@ def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
                 task = attempt_task(binding, state["page"], original, request, attempt)
                 locator = page_capture.capture_locator(task)
                 captured = None
-                if raw._path(root, locator).exists():
+                if (raw._path(root, locator) / "authority.json").exists():
                     # Exact read-only recovery. A dead SDK session is never
                     # restarted under this attempt identity or fabricated cursor.
                     captured = page_capture.recover_capture(root, task)
@@ -1421,6 +1440,8 @@ def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
                 entry = state["entries"][index]
                 if (
                     index in settled
+                    or (unknown_attempt_policy == "conservative"
+                        and any(link["status"] == "unknown" for link in entry["links"]))
                     or index == recovered
                     or (entry["links"] and entry["links"][-1]["status"] == "success")
                 ):
@@ -1606,6 +1627,7 @@ def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
                     else:
                         session = page_capture.capture_session(
                             root, tasks, stop=stop, on_task=admit, on_capture=capture,
+                            lock_fd=lock_fd,
                             source_allowed=admit_source if source_allowed is not None else None
                         )
                         session_hold["record"] = dict(
@@ -1684,6 +1706,7 @@ def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
                 captured = page_capture.capture_process(
                     root,
                     task,
+                    lock_fd=lock_fd,
                     stop=stop,
                     source_allowed=admit_source if source_allowed is not None else None,
                     restart_of=(
@@ -1694,7 +1717,11 @@ def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
                 )
                 if settle(index, attempt, captured, time.monotonic() - started, 2) == "stop":
                     break
-            if not state["cancelled"] and all(
+            if (not state["cancelled"]
+                and (unknown_attempt_policy != "conservative" or not any(
+                    link["status"] == "unknown"
+                    for entry in state["entries"] for link in entry["links"]
+                )) and all(
                 entry_terminal(
                     e,
                     header["policy"]["max_attempts"],
@@ -1702,7 +1729,7 @@ def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
                     transport_cap,
                 )
                 for i, e in enumerate(state["entries"])
-            ):
+            )):
                 handoff_path = directory / f"handoff-{state['page']:06d}.json"
                 version = (raw._decode(raw._read(handoff_path, MAX_CONTROL))["version"]
                            if handoff_path.exists() else HANDOFF_VERSION)

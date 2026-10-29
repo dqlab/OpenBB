@@ -83,6 +83,9 @@ def run(args):
     if args.date and args.date != day:
         raise ValueError("date_must_be_current_shanghai_day")
     config = campaign.load_json(args.config)
+    unknown_policy = config.get("unknown_attempt_policy", "legacy")
+    if unknown_policy not in ("legacy", "conservative"):
+        raise ValueError("invalid_unknown_attempt_policy")
     if (
         not date.fromisoformat(config["start_date"])
         <= date.fromisoformat(day)
@@ -131,6 +134,12 @@ def run(args):
         )
         retained = {}
         for name, operation, params, fields in specs:
+            if unknown_policy == "conservative" and any(
+                record.get("operation") == operation and record.get("status") == "reserved"
+                for record in (_durable_read(p) for p in directory.glob("attempt-*.json"))
+            ):
+                return dict(status="partial", date=day,
+                            reason="unknown_attempt_manual_review", source=name)
             pinned = directory / (name + ".json")
             if pinned.exists():
                 pointer = _durable_read(pinned)

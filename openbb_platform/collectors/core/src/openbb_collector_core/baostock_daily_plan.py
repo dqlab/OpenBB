@@ -69,7 +69,9 @@ def daily_plan(config, day, calendar, stock_basic):
     snapshot = dict(
         operation="query_stock_basic", params={}, error_code="0", fields=fields, rows=rows
     )
-    return {"status": "planned", "date": day, "plan": make_plan(config, snapshot, daily_date=day)}
+    plan_config = {k: v for k, v in config.items() if k != "unknown_attempt_policy"}
+    return {"status": "planned", "date": day,
+            "plan": make_plan(plan_config, snapshot, daily_date=day)}
 
 
 def verify_campaign(manifest, root, run_key, slot):

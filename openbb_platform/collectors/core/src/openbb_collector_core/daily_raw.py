@@ -115,16 +115,19 @@ def acquire(config, day, attempt=1, *, client=None):
         if limits or config.get("credentials_env"):
             raise ValueError("ETF page capture does not support generic limits or credentials_env")
         from . import baostock_page_capture as pages
+        from . import raw_acquisition as raw
         root = Path(config["root"])
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (root / ".daily-pages.lock").open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            path = root / pages.capture_locator(task)
-            legacy = root / capture_locator(task["task_id"], task["generation"])
-            if legacy.exists() and not path.exists():
-                return _classify(read_capture(root, task["task_id"], task["generation"]), task)
-            state = pages.recover_capture(root, task) if path.exists() else pages.capture_process(root, task)
-            return _page_state(state)
+            with raw._ownership(root, retain_for_workers=True) as lock_fd:
+                path = root / pages.capture_locator(task)
+                legacy = root / capture_locator(task["task_id"], task["generation"])
+                if legacy.exists() and not path.exists():
+                    return _classify(read_capture(root, task["task_id"], task["generation"]), task)
+                state = (pages.recover_capture(root, task) if path.exists()
+                         else pages.capture_process(root, task, lock_fd=lock_fd))
+                return _page_state(state)
     return _classify(capture_process(config["root"], task, source, client=client), task)
 
 
@@ -158,12 +161,14 @@ def schedule(config, now=None, *, client=None):
             task = make_task(config, day.isoformat(), attempt)
             if _is_etf(task) and client is None:
                 from . import baostock_page_capture as pages
+                from . import raw_acquisition as raw
                 path = root / pages.capture_locator(task)
                 if path.exists():
                     if (path / "authority.json").exists():
                         with (root / ".daily-pages.lock").open("a+") as page_lock:
                             fcntl.flock(page_lock, fcntl.LOCK_EX)
-                            state = _page_state(pages.recover_capture(root, task))
+                            with raw._ownership(root, retain_for_workers=True):
+                                state = _page_state(pages.recover_capture(root, task))
                         if state["complete"] and state["status"] == "captured":
                             return state
                     continue
