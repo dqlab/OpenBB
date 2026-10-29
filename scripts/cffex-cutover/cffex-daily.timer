@@ -1,0 +1,11 @@
+[Unit]
+Description=Check CFFEX current-day acquisition and outstanding obligations
+
+[Timer]
+OnCalendar=*-*-* *:0/10:00
+Persistent=true
+AccuracySec=1s
+Unit=cffex-daily.service
+
+[Install]
+WantedBy=timers.target

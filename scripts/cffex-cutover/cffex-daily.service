@@ -1,0 +1,7 @@
+[Unit]
+Description=CFFEX current-day private raw acquisition
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=%h/cffex-standalone-dfef415-20261029/venv/bin/python %h/cffex-standalone-dfef415-20261029/venv/bin/cffex-daily-cutover --config %h/.config/cffex-daily/config.json
