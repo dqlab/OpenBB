@@ -115,21 +115,19 @@ def fetch(kind, token):
             response = exc
         with response:
             body = response.read(LIMIT + 1)
-            if len(body) > LIMIT:
-                raise ValueError('response too large')
             return response.status, body
     except (URLError, TimeoutError, OSError) as exc:
         raise ProviderFailure('source_unavailable') from exc
 
 
-def collect(root, snapshot_id, products, max_attempts, sender=fetch):
+def collect(root, snapshot_id, products, max_attempts, sender=fetch, *, epoch=0):
     root = Path(os.path.abspath(root))
     if any(p.is_symlink() for p in (root, *root.parents)) or not root.is_dir():
         raise ValueError('evidence root must be an existing private directory')
     st = root.stat()
     if st.st_uid != os.geteuid() or stat.S_IMODE(st.st_mode) != 0o700:
         raise ValueError('evidence root must be owned by user and mode 0700')
-    if not isinstance(snapshot_id, str) or not 1 <= len(snapshot_id) <= 128 or not products or len(set(products)) != len(products) or any(p not in DISCOVERY for p in products) or type(max_attempts) is not int or not 1 <= max_attempts <= 5:
+    if not isinstance(snapshot_id, str) or not 1 <= len(snapshot_id) <= 128 or not products or len(set(products)) != len(products) or any(p not in DISCOVERY for p in products) or type(max_attempts) is not int or not 1 <= max_attempts <= 5 or type(epoch) is not int or not 0 <= epoch <= 1000:
         raise ValueError('invalid arguments')
     # One owner serializes the immutable authority and all captures under the root.
     with open(root / '.cffex-options.lock', 'a+b') as lock:
@@ -138,24 +136,54 @@ def collect(root, snapshot_id, products, max_attempts, sender=fetch):
         authority = root / ('snapshot-' + identity + '.json')
         raw._install(authority, raw._encode({'snapshot_id': snapshot_id, 'products': products}))
 
+        # Each explicit epoch is an immutable operator authorization with its own
+        # budget. Previous epochs and their successes remain available for replay.
+        epochs = root / ('epochs-' + identity)
+        raw._mkdir(epochs)
+        if epoch and not (epochs / (str(epoch - 1) + '.json')).is_file():
+            raise ValueError('previous epoch missing')
+        raw._install(epochs / (str(epoch) + '.json'), raw._encode({'epoch': epoch, 'max_attempts': max_attempts}))
+
         def acquire(kind, token):
             task_id = hashlib.sha256(raw._encode([snapshot_id, kind, token])).hexdigest()
-            for attempt in range(1, max_attempts + 1):
-                task = {'version': raw.HTTP_VERSION, 'task_id': task_id, 'generation': str(attempt), 'source': {'provider': 'sina', 'model': 'cffex-options-' + kind}, 'requests': [{'request_id': token, 'params': {'kind': kind, 'token': token}}]}
-                def adapter(_):
-                    status, body = sender(kind, token)
-                    return raw.RawResponse(body, http_status=status)
-                state = raw.capture(root, task, adapter, response_max_bytes=LIMIT)
-                if not state['complete']:
-                    return None
-                item = state['responses'][0]
-                receipt, body = item['receipt'], item['body']
-                if receipt['status'] == 'captured' and receipt.get('http_status') == 200:
-                    try:
-                        value = expiries(body, token) if kind == 'discovery' else valid_quote(body, token)
-                        return value if kind == 'discovery' else True
-                    except (ValueError, KeyError, TypeError, UnicodeError, json.JSONDecodeError):
-                        pass
+            for e in range(epoch + 1):
+                config = raw._decode(raw._read(epochs / (str(e) + '.json'), raw.MAX_META_BYTES))
+                for attempt in range(1, config['max_attempts'] + 1):
+                    generation = str(attempt) if e == 0 else f'{e}:{attempt}'
+                    task = {'version': raw.HTTP_VERSION, 'task_id': task_id, 'generation': generation, 'source': {'provider': 'sina', 'model': 'cffex-options-' + kind}, 'requests': [{'request_id': token, 'params': {'kind': kind, 'token': token}}]}
+                    locator = root / raw.capture_locator(task_id, generation, version=raw.HTTP_VERSION)
+                    reservation = epochs / (task_id + '-' + generation.replace(':', '-') + '.request')
+                    # An uncertain prior call consumes its slot even if the process
+                    # died before a receipt could be installed.
+                    if reservation.exists():
+                        if not (locator / 'durable.json').is_file():
+                            continue
+                    elif e < epoch:
+                        continue
+                    else:
+                        raw._install(reservation, raw._encode({'task_id': task_id, 'generation': generation}))
+                    def adapter(_):
+                        status, body = sender(kind, token)
+                        return raw.RawResponse(body, http_status=status)
+                    state = raw.capture(root, task, adapter, response_max_bytes=LIMIT + 1)
+                    if not state['complete']:
+                        continue
+                    item = state['responses'][0]
+                    receipt, body = item['receipt'], item['body']
+                    if body is not None and len(body) > LIMIT:
+                        raw._install(reservation.with_suffix('.truncated'), raw._encode({
+                            'task_id': task_id, 'generation': generation,
+                            'http_status': receipt.get('http_status'), 'retained_bytes': len(body),
+                            'complete_response': False, 'reason': 'response_limit_exceeded',
+                        }))
+                        print(f'response truncated: {kind} {token}, HTTP {receipt.get("http_status")}, received at least {len(body)} bytes', file=sys.stderr)
+                        continue
+                    if receipt['status'] == 'captured' and receipt.get('http_status') == 200:
+                        try:
+                            value = expiries(body, token) if kind == 'discovery' else valid_quote(body, token)
+                            return value if kind == 'discovery' else True
+                        except (ValueError, KeyError, TypeError, UnicodeError, json.JSONDecodeError):
+                            pass
             return None
 
         ok = True
@@ -176,9 +204,10 @@ def main():
     parser.add_argument('--snapshot-id', required=True)
     parser.add_argument('--products', default='IO,HO,MO')
     parser.add_argument('--max-attempts', type=int, default=2)
+    parser.add_argument('--epoch', type=int, default=0, help='explicitly authorize this numbered retry epoch')
     args = parser.parse_args()
     try:
-        success = collect(args.root, args.snapshot_id, args.products.split(','), args.max_attempts)
+        success = collect(args.root, args.snapshot_id, args.products.split(','), args.max_attempts, epoch=args.epoch)
     except Exception as exc:
         print('acquisition error: ' + type(exc).__name__ + ': ' + str(exc), file=sys.stderr)
         return 1
