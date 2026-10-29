@@ -59,6 +59,46 @@ def make_task(config, day, attempt=1):
                           "requests": [{"request_id": "daily", "params": params}]})
 
 
+def _is_etf(task):
+    return task["source"] == {"provider": "baostock", "model": "BaostockDailyHistoryKETFSource"}
+
+
+def _classify(state, task):
+    """Keep raw transport status separate from the source verdict."""
+    if not _is_etf(task):
+        return state
+    state = dict(state)
+    state["transport_status"] = state["status"]
+    verdict = None
+    if state.get("complete") and state["status"] == "captured":
+        try:
+            rows = json.loads(state["responses"][0]["body"])["rows"]
+            if len(rows) == 1 and isinstance(rows[0].get("evidence"), dict):
+                evidence = rows[0]["evidence"]
+                verdict = evidence.get("status")
+                pages = evidence.get("pages")
+                if verdict == "complete" and (type(pages) is not list or len(pages) != 1
+                        or type(pages[0].get("rows")) is not list
+                        or len(pages[0]["rows"]) >= 20000):
+                    verdict = "partial"
+        except (KeyError, TypeError, ValueError, IndexError, AttributeError):
+            pass
+    state["source_status"] = verdict if verdict in ("complete", "partial", "failed") else "unknown"
+    if state["status"] == "captured" and verdict != "complete":
+        state["status"] = "partial" if verdict == "partial" else "failed"
+        state["reason"] = "source_" + state["source_status"]
+    return state
+
+
+def _page_state(state):
+    terminal = state.get("terminal") or {}
+    summary = terminal.get("summary") or {}
+    return {**state, "transport_status": "captured" if summary else ("failed" if terminal else "interrupted"),
+            "source_status": summary.get("status", "unknown"),
+            "status": "captured" if state["complete"] else ("partial" if state["pages"] else "failed"),
+            "reason": terminal.get("reason", "interrupted")}
+
+
 def acquire(config, day, attempt=1, *, client=None):
     task = make_task(config, day, attempt)
     limits = config.get("limits", {})
@@ -71,7 +111,21 @@ def acquire(config, day, attempt=1, *, client=None):
             or any(type(k) is not str or not k or type(v) is not str or not v
                    for k, v in source.credentials_env.items())):
         raise ValueError("invalid source limits")
-    return capture_process(config["root"], task, source, client=client)
+    if _is_etf(task) and client is None:
+        if limits or config.get("credentials_env"):
+            raise ValueError("ETF page capture does not support generic limits or credentials_env")
+        from . import baostock_page_capture as pages
+        root = Path(config["root"])
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with (root / ".daily-pages.lock").open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            path = root / pages.capture_locator(task)
+            legacy = root / capture_locator(task["task_id"], task["generation"])
+            if legacy.exists() and not path.exists():
+                return _classify(read_capture(root, task["task_id"], task["generation"]), task)
+            state = pages.recover_capture(root, task) if path.exists() else pages.capture_process(root, task)
+            return _page_state(state)
+    return _classify(capture_process(config["root"], task, source, client=client), task)
 
 
 def schedule(config, now=None, *, client=None):
@@ -102,12 +156,31 @@ def schedule(config, now=None, *, client=None):
         fcntl.flock(lock, fcntl.LOCK_EX)
         for attempt in range(1, attempts + 1):
             task = make_task(config, day.isoformat(), attempt)
-            path = root / capture_locator(task["task_id"], task["generation"])
-            if path.exists():
-                state = read_capture(root, task["task_id"], task["generation"])
-                if state["complete"] and state["status"] == "captured":
-                    return state
-                if state["complete"] or state["reason"] == "cancelled":
+            if _is_etf(task) and client is None:
+                from . import baostock_page_capture as pages
+                path = root / pages.capture_locator(task)
+                if path.exists():
+                    if (path / "authority.json").exists():
+                        with (root / ".daily-pages.lock").open("a+") as page_lock:
+                            fcntl.flock(page_lock, fcntl.LOCK_EX)
+                            state = _page_state(pages.recover_capture(root, task))
+                        if state["complete"] and state["status"] == "captured":
+                            return state
+                    continue
+                legacy = root / capture_locator(task["task_id"], task["generation"])
+                if legacy.exists():
+                    if (legacy / "task.json").exists():
+                        state = _classify(read_capture(root, task["task_id"], task["generation"]), task)
+                        if state["complete"] and state["status"] == "captured":
+                            return state
+                    continue
+            else:
+                path = root / capture_locator(task["task_id"], task["generation"])
+                if path.exists():
+                    if (path / "task.json").exists():
+                        state = _classify(read_capture(root, task["task_id"], task["generation"]), task)
+                        if state["complete"] and state["status"] == "captured":
+                            return state
                     continue
             return acquire(config, day.isoformat(), attempt, client=client)
         return {"status": "exhausted"}
@@ -116,7 +189,20 @@ def schedule(config, now=None, *, client=None):
 def report(config, day, attempt):
     """Read-only structural report; never gates capture or asserts market completeness."""
     task = make_task(config, day, attempt)
-    state = read_capture(config["root"], task["task_id"], task["generation"])
+    if _is_etf(task):
+        from . import baostock_page_capture as pages
+        path = Path(config["root"]) / pages.capture_locator(task)
+        if path.exists():
+            state = _page_state(pages.read_capture(config["root"], task))
+            evidence = [pages.read_page(path, item["page"], decode=False) for item in state["pages"]]
+            return {"task_id": task["task_id"], "generation": task["generation"],
+                    "status": state["status"], "complete": state["complete"],
+                    "transport_status": state["transport_status"], "source_status": state["source_status"],
+                    "source_evidence": [{"status": item.get("status"), "reason": item.get("reason"),
+                                         "page_count": len(item.get("pages", [])),
+                                         "source_row_count": sum(len(p.get("rows") or []) for p in item.get("pages", []))}
+                                        for item in evidence], "market_completeness": "not assessed"}
+    state = _classify(read_capture(config["root"], task["task_id"], task["generation"]), task)
     rows = [json.loads(item["body"])["rows"] for item in state["responses"]
             if item["body"] is not None]
     evidence = [row["evidence"] for response in rows for row in response
@@ -128,6 +214,8 @@ def report(config, day, attempt):
                       for item in evidence]
     return {"task_id": task["task_id"], "generation": task["generation"],
             "status": state["status"], "complete": state["complete"],
+            **({"transport_status": state["transport_status"], "source_status": state["source_status"]}
+               if _is_etf(task) else {}),
             "response_count": len(rows), "row_counts": [len(r) for r in rows],
             "source_evidence": source_reports, "market_completeness": "not assessed"}
 
@@ -149,7 +237,7 @@ def main(argv=None):
             result = report(config, args.date, args.attempt)
         else:
             result = acquire(config, args.date, args.attempt)
-        output = {k: result[k] for k in ("status", "complete", "reason", "locator") if k in result}
+        output = {k: result[k] for k in ("status", "complete", "reason", "locator", "transport_status", "source_status") if k in result}
         if args.command == "report":
             output = result
         print(json.dumps(output))

@@ -62,7 +62,8 @@ explicitly; the dispatcher never silently substitutes sequential calls.
 ## Independent daily raw acquisition (0.1.6)
 
 `dq-daily-raw` captures one configured source request for one explicit date via
-`raw-acquisition-v1` and the registered OpenBB provider/model. Install this
+`raw-acquisition-v1` and the registered OpenBB provider/model. BaoStock ETF
+uses the separate `baostock-page-capture-v1` durable SDK observation protocol. Install this
 package with its `openbb` extra and the selected provider. For BaoStock's
 all-market ETF daily SDK operation use the registered source-evidence model:
 
@@ -99,12 +100,20 @@ current local trading date at or after the configured time; missed days require
 explicit acquisition. Each invocation makes at most one attempt. A lock serializes
 scheduler invocations, and durable evidence is the retry ledger: completed success
 is retained, failed/cancelled attempts remain available and a later invocation
-uses the next generation up to `max_attempts`. Interrupted attempts resume their
-same generation. Manual retries use `--attempt N`; replaying the same task never
+uses the next generation up to `max_attempts`. Interrupted attempts consume a
+generation and remain preserved; they are not reissued in place. Manual retries use `--attempt N`; replaying the same task never
 re-fetches a terminal failure. Changing source, parameters or date creates a
 new task identity. Schedule limits do not constrain manually selected attempts.
 
-Captured bytes are the provider-transformed process response, not wire bytes.
+For ETF, each SDK observation is durably journaled before any next request; the
+SDK operation is a single response and never issues a pagination request. At or
+above 20,000 rows its completeness is unknown and the attempt remains partial.
+The page capture has its own bounded resource limits; generic `limits` do not
+control those limits; ETF rejects `limits` and `credentials_env` rather than ignoring them. Source status and transport status are separate; only a
+complete source capture can satisfy the schedule. Existing raw-v1 attempts
+remain readable and count toward the retry budget.
+
+Captured bytes are SDK representations or provider-transformed process responses, not wire bytes.
 The source-evidence envelope retains SDK fields, rows and protocol metadata;
 source availability and correction history are not established. `report` reads
 the archived evidence separately and reports response/row counts and, for source

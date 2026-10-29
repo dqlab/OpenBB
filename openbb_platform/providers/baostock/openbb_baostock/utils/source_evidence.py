@@ -307,6 +307,12 @@ def _query_values(operation, params, session=None):
                     break
                 # Retain duplicate fields and irregular rows verbatim. This is
                 # protocol completion, never a business quality decision.
+                if operation == "BaostockDailyHistoryKETF":
+                    if len(rows) < 20000:
+                        envelope.update(status="complete", reason="exhausted")
+                    else:
+                        envelope["reason"] = "single_response_cap"
+                    break
                 if len(rows) != helpers.BAOSTOCK_PER_PAGE_COUNT:
                     envelope.update(status="complete", reason="exhausted")
                     break
@@ -582,6 +588,12 @@ def _query_stream(operation, params, sink, session=None):
                     break
                 if any(item["type"] == "unrepresentable" for item in _encoding(page)[1]):
                     summary.update(status="partial", reason="sdk_value_unrepresentable")
+                    break
+                if operation == "BaostockDailyHistoryKETF":
+                    if len(page["rows"]) < 20000:
+                        summary.update(status="complete", reason="exhausted")
+                    else:
+                        summary.update(status="partial", reason="single_response_cap")
                     break
                 if len(page["rows"]) != helpers.BAOSTOCK_PER_PAGE_COUNT:
                     summary.update(status="complete", reason="exhausted")

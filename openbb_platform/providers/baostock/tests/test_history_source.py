@@ -435,3 +435,27 @@ def test_daily_etf_literal_and_sdk_evidence(sdk, monkeypatch):
     for bad in ({}, {"date": "2026-02-30"}, {"date": "2026-09-16", "extra": "x"}):
         with pytest.raises(ValueError):
             validate_literal("BaostockDailyHistoryKETF", bad)
+
+@pytest.mark.parametrize("count,expected", [(1999, "complete"), (2000, "complete"),
+                                             (2001, "complete"), (20000, "partial"),
+                                             (20001, "partial")])
+def test_daily_etf_single_response_cap(sdk, monkeypatch, count, expected):
+    result = Result()
+    result.data = [["x"]] * count
+    result.next = lambda: pytest.fail("ETF operation must not paginate")
+    monkeypatch.setattr(helpers, "resolve_method", lambda method: lambda **kw: result)
+    env = evidence._query("BaostockDailyHistoryKETF", {"date": "2024-01-02"})
+    assert env["status"] == expected
+    assert len(env["pages"][0]["rows"]) == count
+    class Sink(evidence.EvidenceSinkV1):
+        def __init__(self): self.pages = []
+        def source_call(self, kind):
+            assert kind != "next"
+            return True
+        def observe(self, envelope, metadata):
+            self.pages.append(envelope)
+            return True
+    sink = Sink()
+    summary = evidence._query_stream("BaostockDailyHistoryKETF", {"date": "2024-01-02"}, sink)
+    assert summary["status"] == expected
+    assert summary["next_calls"] == 0 and len(sink.pages[0]["pages"][0]["rows"]) == count

@@ -132,6 +132,7 @@ def test_cli_registered_baostock_source_offline(tmp_path):
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(json.dumps(cfg))
     (tmp_path / "sitecustomize.py").write_text('''\
+import os
 from openbb_baostock.utils import helpers
 class Result:
     error_code = "0"
@@ -143,6 +144,7 @@ def resolve(method):
     assert method == "query_daily_history_k_ETF"
     def query(**params):
         assert params == {"date": "2024-01-02"}
+        with open(os.environ["ETF_CALLS"], "a") as stream: stream.write("query\\n")
         return Result()
     return query
 helpers.resolve_method = resolve
@@ -150,14 +152,54 @@ helpers.resolve_method = resolve
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join([str(tmp_path), str(Path(__file__).parents[1] / "src"),
                                         env.get("PYTHONPATH", "")])
+    env["ETF_CALLS"] = str(tmp_path / "etf_calls")
     cmd = [sys.executable, "-m", "openbb_collector_core.daily_raw", "acquire", "--config",
            str(cfg_path), "--date", "2024-01-02"]
     result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
     assert json.loads(result.stdout)["status"] == "captured"
-    from openbb_collector_core.raw_acquisition import read_capture
+    replay = subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
+    assert json.loads(replay.stdout)["status"] == "captured"
+    assert (tmp_path / "etf_calls").read_text().splitlines() == ["query"]
+    from openbb_collector_core import baostock_page_capture as pages
     task = make_task(cfg, "2024-01-02")
-    state = read_capture(cfg["root"], task["task_id"], task["generation"])
-    evidence = json.loads(state["responses"][0]["body"])["rows"][0]["evidence"]
-    assert evidence["status"] == "complete"
+    state = pages.read_capture(cfg["root"], task)
+    evidence = pages.read_page(Path(cfg["root"]) / state["locator"], 0)
+    assert state["complete"]
+    assert state["terminal"]["metrics"]["source_query_calls"] == 1
+    assert state["terminal"]["metrics"]["source_next_calls"] == 0
     assert evidence["pages"][0]["fields"] == ["date", "code", "extra", "extra"]
     assert evidence["pages"][0]["rows"] == [["2024-01-02", "synthetic", "", "1.000"]]
+
+@pytest.mark.parametrize("source_status", ["partial", "failed"])
+def test_etf_source_failure_retries_with_evidence(tmp_path, source_status):
+    cfg = config(tmp_path)
+    cfg.update(source={"provider": "baostock", "model": "BaostockDailyHistoryKETFSource"},
+               params={"literal": {}}, date_path=["literal", "date"])
+    client = Client()
+    client.fetch = lambda *args: (setattr(client, "calls", client.calls + 1) or
+        Response([{"evidence": {"status": source_status, "reason": "source_error", "pages": []}}]))
+    now = datetime(2024, 1, 2, 17, tzinfo=ZoneInfo("Asia/Shanghai"))
+    for _ in range(2):
+        result = schedule(cfg, now, client=client)
+        assert result["status"] == source_status
+        assert result["transport_status"] == "captured"
+        assert result["source_status"] == source_status
+    assert schedule(cfg, now, client=client)["status"] == "exhausted"
+    assert client.calls == 2
+    assert report(cfg, "2024-01-02", 1)["source_evidence"][0]["status"] == source_status
+
+
+def test_interruption_is_bounded_and_preserved(tmp_path):
+    cfg = config(tmp_path)
+    client = Client()
+    def interrupt(*args):
+        client.calls += 1
+        raise RuntimeError("interrupted")
+    client.fetch = interrupt
+    now = datetime(2024, 1, 2, 17, tzinfo=ZoneInfo("Asia/Shanghai"))
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            schedule(cfg, now, client=client)
+    assert schedule(cfg, now, client=client)["status"] == "exhausted"
+    assert client.calls == 2
+    assert report(cfg, "2024-01-02", 1)["complete"] is False

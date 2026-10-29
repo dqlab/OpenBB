@@ -359,7 +359,9 @@ def read_capture(root, task, expected=None):
                     envelope["pages"]
                     and type(envelope["pages"][-1]["fields"]) is list
                     and type(envelope["pages"][-1]["rows"]) is list
-                    and len(envelope["pages"][-1]["rows"]) != 2000
+                    and (len(envelope["pages"][-1]["rows"]) < 20000
+                         if envelope["operation"] == "BaostockDailyHistoryKETF"
+                         else len(envelope["pages"][-1]["rows"]) != 2000)
                 ),
                 body_path=prefix["body_path"],
             )
