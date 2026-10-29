@@ -18,7 +18,13 @@ from threading import Event
 from .raw_acquisition import capture_process, plan_process_capture, validate_task
 
 MODELS = frozenset(
-    {"BaostockStockBasic", "BaostockTradeDates", "BaostockHistoryKDataPlus", "BaostockAdjustFactor"}
+    {
+        "BaostockStockBasic",
+        "BaostockTradeDates",
+        "BaostockHistoryKDataPlus",
+        "BaostockAdjustFactor",
+        "BaostockDailyHistoryKETF",
+    }
 )
 
 

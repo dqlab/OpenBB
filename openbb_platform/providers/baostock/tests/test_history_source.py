@@ -175,7 +175,7 @@ def test_reference_registered_dispatch_and_failure(sdk, monkeypatch):
         )
         env = result[0].evidence
         assert env["status"] == "failed" and env["error_code"] == "503" and env["params"] == params
-    assert len(SOURCE_FETCHERS) == 4
+    assert len(SOURCE_FETCHERS) == 5
 
 
 def test_stream_sink_validation_and_failure_provenance(sdk):
@@ -418,3 +418,20 @@ def test_nested_code_sidecar_conflicts_still_refuse(damage):
                             short="7ff0", nonhex="x" * 16, bits_type=7)[damage]
     with pytest.raises(ValueError):
         evidence.decode_evidence(env)
+
+
+def test_daily_etf_literal_and_sdk_evidence(sdk, monkeypatch):
+    """The daily operation requires a literal date and preserves SDK pages."""
+    calls = []
+    def resolve(method):
+        calls.append(method)
+        return lambda **kwargs: Result()
+    monkeypatch.setattr(helpers, "resolve_method", resolve)
+    params = {"date": "2026-09-16"}
+    assert validate_literal("BaostockDailyHistoryKETF", params) == params
+    result = evidence._query("BaostockDailyHistoryKETF", params)
+    assert calls == ["query_daily_history_k_ETF"]
+    assert result["params"] == params and result["pages"][0]["rows"] == Result.data
+    for bad in ({}, {"date": "2026-02-30"}, {"date": "2026-09-16", "extra": "x"}):
+        with pytest.raises(ValueError):
+            validate_literal("BaostockDailyHistoryKETF", bad)

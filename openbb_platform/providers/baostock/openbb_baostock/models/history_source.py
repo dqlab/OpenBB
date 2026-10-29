@@ -40,6 +40,7 @@ def validate_literal(operation, params):
         "BaostockAdjustFactor": {"code", "start_date", "end_date"},
         "BaostockStockBasic": {"code", "code_name"},
         "BaostockTradeDates": {"start_date", "end_date"},
+        "BaostockDailyHistoryKETF": {"date"},
     }
     if operation not in allowed or type(params) is not dict or set(params) - allowed[operation]:
         raise ValueError("unsupported_literal_parameters")
@@ -50,7 +51,7 @@ def validate_literal(operation, params):
         raise ValueError("explicit_parameters_required")
     if "code" in params and not re.fullmatch(r"(?:sh|sz)\.[0-9]{6}", params["code"]):
         raise ValueError("literal_code_required")
-    for key in ("start_date", "end_date"):
+    for key in ("date", "start_date", "end_date"):
         if key in params and date.fromisoformat(params[key]).isoformat() != params[key]:
             raise ValueError("literal_date_required")
     if params.get("start_date", "") > params.get("end_date", "9999"):

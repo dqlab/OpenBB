@@ -21,6 +21,7 @@ OPERATIONS = {
     "BaostockAdjustFactor": "query_adjust_factor",
     "BaostockStockBasic": "query_stock_basic",
     "BaostockTradeDates": "query_trade_dates",
+    "BaostockDailyHistoryKETF": "query_daily_history_k_ETF",
 }
 # Reserve one whole maximum admitted page before advancing the SDK. The SDK
 # has no enforceable wire limit; an individual oversize result remains subject

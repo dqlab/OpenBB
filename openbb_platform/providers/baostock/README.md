@@ -218,3 +218,12 @@ Anonymous live requests through that interface returned:
 All 64 live history rows passed the symbol, date-window, adjustment, and duplicate
 checks; no rows were rejected. These bounded checks do not establish full-market
 coverage. The 15/30/60 minute variants and failure paths were tested offline.
+
+The source-evidence operation `BaostockDailyHistoryKETFSource` accepts an
+explicit ISO `date` and retains the SDK result fields and rows as returned. It
+is an observation of the SDK response, not a wire capture or a completeness
+claim. Empty values and ETF-inapplicable fields remain source values; do not
+infer their meaning. The source's type-5 active security list is not an
+independent exchange universe, and historical membership, availability time,
+revisions and suspended or missing instruments require separate reconciliation.
+No schedule or publication is enabled by this operation.
