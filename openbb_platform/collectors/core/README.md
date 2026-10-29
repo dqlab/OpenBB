@@ -58,3 +58,56 @@ The worker accepts one list envelope, enforces `max_rows` on every item and
 killable timeout, stop handling and pacing between calls. A provider must also
 pace its own wire requests inside the batch. Unsupported batch hooks fail
 explicitly; the dispatcher never silently substitutes sequential calls.
+
+## Independent daily raw acquisition (0.1.6)
+
+`dq-daily-raw` captures one configured source request for one explicit date via
+`raw-acquisition-v1` and the registered OpenBB provider/model. Install this
+package with its `openbb` extra and the selected provider. For BaoStock's
+all-market ETF daily SDK operation use the registered source-evidence model:
+
+```json
+{
+  "root": "/local/private/raw",
+  "source": {"provider": "baostock", "model": "BaostockDailyHistoryKETFSource"},
+  "params": {"literal": {}},
+  "date_path": ["literal", "date"],
+  "schedule": {
+    "timezone": "Asia/Shanghai", "time": "16:30",
+    "calendar": "/local/private/trading-calendar.json", "max_attempts": 3
+  }
+}
+```
+
+The calendar is an explicit JSON object with `coverage_start`, `coverage_end`,
+and `trading_dates` (ISO dates). Supply and maintain the authoritative calendar;
+no calendar, instrument list, central database or production scheduler is installed
+by this package. `limits` optionally configures `timeout_seconds`,
+`min_interval_seconds`, `max_response_bytes` (at most 50 MB), and `max_rows`. `credentials_env` optionally maps provider credential names to
+environment variable names; values are never stored in task identities.
+Use a private POSIX local filesystem with atomic rename/link, flock and fsync;
+NAS is not qualified by the raw protocol.
+
+```sh
+dq-daily-raw acquire --config daily.json --date 2024-01-02
+dq-daily-raw report --config daily.json --date 2024-01-02 --attempt 1
+dq-daily-raw schedule --config daily.json
+```
+
+Invoke `schedule` externally at the desired frequency. It only processes the
+current local trading date at or after the configured time; missed days require
+explicit acquisition. Each invocation makes at most one attempt. A lock serializes
+scheduler invocations, and durable evidence is the retry ledger: completed success
+is retained, failed/cancelled attempts remain available and a later invocation
+uses the next generation up to `max_attempts`. Interrupted attempts resume their
+same generation. Manual retries use `--attempt N`; replaying the same task never
+re-fetches a terminal failure. Changing source, parameters or date creates a
+new task identity. Schedule limits do not constrain manually selected attempts.
+
+Captured bytes are the provider-transformed process response, not wire bytes.
+The source-evidence envelope retains SDK fields, rows and protocol metadata;
+source availability and correction history are not established. `report` reads
+the archived evidence separately and reports response/row counts and, for source
+evidence envelopes, SDK status, reason and page counts; it does not
+assert market completeness, and its failure cannot prevent evidence capture.
+Provider response limits and source errors can prevent a complete capture.
