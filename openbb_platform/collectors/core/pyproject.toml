@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = ["pydantic>=2.7,<3"]
 
 [project.scripts]
+dq-cffex-options-schedule = "openbb_collector_core.cffex_options_schedule:main"
 dq-cffex-options-raw = "openbb_collector_core.cffex_options_raw:main"
 
 [project.optional-dependencies]

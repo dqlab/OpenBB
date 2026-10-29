@@ -1,0 +1,11 @@
+[Unit]
+Description=Check CFFEX options snapshot slots
+
+[Timer]
+OnCalendar=*-*-* *:00/5:00
+AccuracySec=1s
+Persistent=true
+Unit=cffex-options.service
+
+[Install]
+WantedBy=timers.target

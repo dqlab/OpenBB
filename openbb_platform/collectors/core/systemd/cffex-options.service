@@ -1,0 +1,7 @@
+[Unit]
+Description=CFFEX options current snapshots
+
+[Service]
+Type=oneshot
+ExecStart=%h/cffex-options-scheduled/venv/bin/python -m openbb_collector_core.cffex_options_schedule --config %h/.config/cffex-options/config.json
+TimeoutStartSec=35min
