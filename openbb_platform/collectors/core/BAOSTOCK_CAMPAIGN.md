@@ -116,3 +116,7 @@ reader 不补 fsync，也不能从可见文件推断另一进程失败或未返�
 Control metrics 只覆盖 campaign Control read/progress write；page-capture metrics 单独记录 body/journal 写入、fragment fsync、元数据安装/字节、最大 frame、elapsed、worker peak RSS（本 Linux/WSL 环境的 KiB）。fragment_fsyncs 不包括 authority/receipt/directory/capacity fsync。posix_fallocate 与 repeated readback 都有真实成本，不能用小夹具证明 NAS、Windows、断电或生产量级吞吐。
 
 实现者离线 fixtures 只合成 SDK 返回，CLI、spawn、selected QueryExecutor、IPC、真实临时文件系统不替代。独立 SPEC → QUALITY → 父级实际执行仍是不同 gate；源码实现/测试绿色不是自批、安装或部署许可。生产 literal export 许可未获批，数据库/服务/调度器未触及。
+
+### 显式历史计划生成
+
+`python -m openbb_collector_core.baostock_plan --config configs/baostock_history_plan.example.json --snapshot stock-basic-query.json --plan new-plan.json` 从保留的单个 `query_stock_basic` SDK 响应（包含 operation、params、error_code、fields、rows）按配置的 type 和 status 选择代码，分割闭区间并为每个复权标志生成 HistoryKDataPlus literal task。输出是普通 campaign plan，之后仍需显式 compile、run、verify。输出文件必须不存在；生成器不读取或修改既有 campaign 结果。示例 type 5/status 1 是 BaoStock 查询时的当前分类，并非完整性保证或历史时点成分；保留原始响应、采集时间和配置以便核对。参数也可选择其他证券类型，历史开始/结束日期、窗口、字段和复权标志均须由操作者明确设置。字段接受不代表源支持或非空：已保存 ETF 日截面样本的 peTTM、pbMRQ、psTTM、pcfNcfTTM 为空，isST=1 的含义未经验证；HistoryKDataPlus 对这四项及 ETF 复权的实际响应尚须单独验证。此工具不安排任务或协调跨主机源请求；不得在未协调的情况下与已有采集重叠。
