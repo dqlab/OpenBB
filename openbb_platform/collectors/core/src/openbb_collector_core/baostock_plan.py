@@ -23,7 +23,7 @@ def make_plan(config, snapshot, *, daily_date=None):
         "adjustflags",
         "generation",
     }
-    if type(config) is not dict or set(config) != expected:
+    if type(config) is not dict or set(config) not in (expected, expected | {"markets"}):
         raise ValueError("invalid_config")
     if any(
         type(config[k]) is not str or not config[k]
@@ -63,6 +63,14 @@ def make_plan(config, snapshot, *, daily_date=None):
         or type(rows) is not list
     ):
         raise ValueError("invalid_stock_basic_shape")
+    markets = config.get("markets", ["sh", "sz"])
+    if (
+        type(markets) is not list
+        or not markets
+        or any(type(m) is not str or m not in ("sh", "sz") for m in markets)
+        or len(set(markets)) != len(markets)
+    ):
+        raise ValueError("invalid_markets")
     codes = []
     seen = set()
     for row in rows:
@@ -77,7 +85,11 @@ def make_plan(config, snapshot, *, daily_date=None):
         ):
             raise ValueError("invalid_or_duplicate_stock_basic_identity")
         seen.add(code)
-        if security_type == config["security_type"] and status == config["status"]:
+        if (
+            security_type == config["security_type"]
+            and status == config["status"]
+            and code[:2] in markets
+        ):
             codes.append(code)
     if not codes:
         raise ValueError("empty_selection")

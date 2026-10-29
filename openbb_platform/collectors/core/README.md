@@ -120,3 +120,26 @@ the archived evidence separately and reports response/row counts and, for source
 evidence envelopes, SDK status, reason and page counts; it does not
 assert market completeness, and its failure cannot prevent evidence capture.
 Provider response limits and source errors can prevent a complete capture.
+
+### BaoStock daily campaign
+
+Install the BaoStock provider and collector in the same Python environment. Run
+`dq-baostock-daily-source --output PRIVATE/source --timeout 180` to retain
+separate calendar and stock-basic attempts for the current Shanghai date. Its
+JSON output identifies each file; `retained` means an SDK envelope was saved,
+not that the source response was complete. Timeouts and process failures are
+also saved as independent attempt records. Existing files are never replaced.
+
+Run `dq-baostock-daily --config CONFIG.json --calendar CALENDAR.json --universe
+UNIVERSE.json --work PRIVATE/daily --root PRIVATE/captures --request-budget N
+--seconds N`. The config uses the `baostock_plan` fields, including an explicit
+inclusive start/end authorization range. The launcher rejects a date outside that
+range, incomplete source evidence, and a changed daily identity. It publishes a
+single immutable daily manifest and reuses it on restart. It verifies all pages
+before reporting success; terminal failures and unfinished work exit nonzero.
+A closed trading day needs no universe file. `gaps` lists calendar dates since
+the last retained day; their trading status is unknown and no backfill is run.
+The time limit is checked between bounded campaign passes, so a pass can exceed
+it. Campaign request budget and its separate daily source-call budget still
+apply. Keep the same work and capture roots for restart, and retain the exact
+source evidence and configuration for the lifetime of the daily run.

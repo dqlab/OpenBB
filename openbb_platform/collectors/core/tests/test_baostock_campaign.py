@@ -1331,3 +1331,21 @@ def test_d1_later_page_storage_failure_preserves_prior_success(tmp_path):
     child, replay = h.run()
     assert child.returncode == 0 and replay['source_calls'] == 0
     assert q2_verify(h, directory/'handoff-000001.json', replay['handoff_sha256']).returncode == 0
+
+
+def test_daily_verification_checks_failure_on_earlier_page(tmp_path):
+    from openbb_collector_core.baostock_daily_plan import verify_campaign
+
+    tasks = [task(f"sh.{i:06d}", ("2" if i == 0 else "3",)) for i in range(9)]
+    h = Harness(tmp_path, tasks=tasks, attempts=1)
+    _, first = h.run("flag2")
+    assert first["page"] == 1 and first["outcome"] == "closed_with_failures"
+    _, final = h.run()
+    assert final["status"] == "complete" and final["outcome"] == "complete"
+    result = verify_campaign(h.manifest, h.private, "run1", "slot1")
+    assert result["status"] == "failed"
+    assert [failure["page"] for failure in result["failures"]] == [0]
+    before = len(h.queries())
+    _, repeated = h.run()
+    assert repeated["status"] == "complete" and len(h.queries()) == before
+    assert verify_campaign(h.manifest, h.private, "run1", "slot1") == result

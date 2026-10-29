@@ -4,13 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openbb-collector-core"
-version = "0.1.8"
+version = "0.1.9"
 description = "Shared contracts and provider dispatch for OpenBB collection engines."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["pydantic>=2.7,<3"]
 
 [project.scripts]
+dq-baostock-daily = "openbb_collector_core.baostock_daily:main"
+dq-baostock-daily-source = "openbb_collector_core.baostock_daily_source:main"
 dq-daily-raw = "openbb_collector_core.daily_raw:main"
 dq-cffex-options-schedule = "openbb_collector_core.cffex_options_schedule:main"
 dq-cffex-options-raw = "openbb_collector_core.cffex_options_raw:main"
