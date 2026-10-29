@@ -38,10 +38,10 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from pathlib import Path
 from threading import Event
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from . import baostock_page_capture as page_capture
 from . import raw_acquisition as raw
@@ -785,7 +785,7 @@ def linked_capture(root, binding, page_index, original, request, link):
             and captured["last_page_root"] == link["last_page_root"],
             "page_link_binding",
         )
-        return
+        return captured["status"]
     task = attempt_task(
         binding, page_index, original, request, link["attempt"], version=LEGACY_VERSION
     )
@@ -933,7 +933,8 @@ def _verify_handoff(root, path, expected):
         else:
             require(entry["links"][-1]["status"] == "success", "incomplete_handoff")
         for link in entry["links"]:
-            linked_capture(Path(root), document["binding"], document["page"], task, request, link)
+            actual = linked_capture(Path(root), document["binding"], document["page"], task, request, link)
+            require(actual is None or actual == link["status"], "page_link_binding")
     return document
 
 
@@ -1336,9 +1337,15 @@ def run(manifest, root, run_key, slot, *, stop=None, source_allowed=None):
             if not state["entries"]:
                 state["entries"] = initial_entries(page)
             require(len(flat) == len(state["entries"]), "page_progress_shape")
+            corrected_legacy = False
             for (task, _, request), entry in zip(flat, state["entries"], strict=True):
                 for link in entry["links"]:
-                    linked_capture(root, binding, state["page"], task, request, link)
+                    actual = linked_capture(root, binding, state["page"], task, request, link)
+                    if actual == "unknown" and link["status"] == "failed":
+                        link["status"] = "unknown"
+                        corrected_legacy = True
+            if corrected_legacy:
+                save()
 
             def finish(index, attempt, captured):
                 original, _, request = flat[index]

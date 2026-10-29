@@ -144,7 +144,10 @@ including shared-session login, query, and pagination. A call already in flight
 may return after the limit; its durable observations remain, but no subsequent
 source call is admitted. An interrupted attempt remains unknown and consumes its
 reservation; restart uses the same work and capture roots, and successful entries
-are not refetched. Cleanup can extend past the limit. Campaign request budget and
+are not refetched. Older progress that recorded an unterminated capture as failed
+is recovered as unknown and does not consume a data-failure attempt. Closed-day
+correction resumes only when both the retained original calendar and the corrected
+calendar and universe still match their bound identities. Cleanup can extend past the limit. Campaign request budget and
 its separate daily source-call budget still apply.
 
 If retained evidence originally marked today closed and corrected calendar evidence

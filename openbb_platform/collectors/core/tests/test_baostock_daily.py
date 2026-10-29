@@ -5,10 +5,10 @@ import os
 import subprocess
 import sys
 import time
-
-import pytest
+from datetime import UTC
 from pathlib import Path
 
+import pytest
 from test_baostock_campaign import BOOTSTRAP
 from test_baostock_daily_plan import inputs
 
@@ -24,7 +24,7 @@ def test_launcher_real_process_resume(tmp_path):
     config, _, calendar, stock = inputs()
     config.update(start_date=day, end_date=day, adjustflags=["3", "2"])
     calendar["params"] = dict(start_date=day, end_date=day)
-    calendar["pages"][0]["rows"] = [[day, "1"]]
+    calendar["pages"][0]["rows"] = [[day, "0"]]
     for name, value in [("config", config), ("calendar", calendar), ("universe", stock)]:
         (tmp_path / name).write_text(json.dumps(value))
     bootstrap = tmp_path / "bootstrap"
@@ -52,9 +52,16 @@ def test_launcher_real_process_resume(tmp_path):
     for name in ("config", "calendar", "universe", "work", "root"):
         command += ["--" + name, str(tmp_path / name)]
     command += ["--request-budget", "10", "--seconds", "60", "--backoff-seconds", "0"]
-    first = subprocess.run(command, env=env, capture_output=True, text=True, timeout=90)
+    closed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=90)
+    assert closed.returncode == 0 and json.loads(closed.stdout)["status"] == "closed"
+    assert not calls.read_text()
+    retained = (tmp_path / "work" / "days" / day / "calendar.json").read_bytes()
+    calendar["pages"][0]["rows"] = [[day, "1"]]
+    (tmp_path / "calendar").write_text(json.dumps(calendar))
+    first = subprocess.run(command + ["--correct-closed", "--reason", "offline correction"], env=env, capture_output=True, text=True, timeout=90)
     assert first.returncode == 0, first.stdout + first.stderr
     assert json.loads(first.stdout)["status"] == "complete"
+    assert (tmp_path / "work" / "days" / day / "calendar.json").read_bytes() == retained
     before = calls.read_text()
     queries = [
         json.loads(line) for line in before.splitlines() if json.loads(line)["event"] == "query"
@@ -124,6 +131,7 @@ def test_source_timeout_keeps_existing_evidence(tmp_path):
 @pytest.mark.parametrize("boundary", ["time", "midnight"])
 def test_soft_deadline_real_process_and_resume(tmp_path, session_pages, boundary):
     import openbb_baostock
+
     import openbb_collector_core
 
     day = shanghai_date()
@@ -136,7 +144,7 @@ def test_soft_deadline_real_process_and_resume(tmp_path, session_pages, boundary
         (tmp_path / name).write_text(json.dumps(value))
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
-    (bootstrap / "sitecustomize.py").write_text(BOOTSTRAP + '''\nif os.environ.get("CAMPAIGN_OFFLINE") == "1":\n    old_resolve = helpers.resolve_method\n    def delayed_resolve(method):\n        original = old_resolve(method)\n        def query(**params):\n            result = original(**params)\n            if os.environ.get("SLOW_QUERY") == "1":\n                time.sleep(5)\n                if os.environ.get("CROSS_DAY") == "1":\n                    Path(os.environ["DAY_MARKER"]).touch()\n            return result\n        return query\n    helpers.resolve_method = delayed_resolve\n''')
+    (bootstrap / "sitecustomize.py").write_text(BOOTSTRAP + '''\nif os.environ.get("CAMPAIGN_OFFLINE") == "1":\n    old_resolve = helpers.resolve_method\n    def delayed_resolve(method):\n        original = old_resolve(method)\n        def query(**params):\n            result = original(**params)\n            if os.environ.get("SLOW_QUERY") == "1":\n                while not Path(os.environ["DAY_MARKER"]).exists():\n                    time.sleep(0.02)\n            return result\n        return query\n    helpers.resolve_method = delayed_resolve\n''')
     calls = tmp_path / "calls"
     calls.touch()
     env = dict(os.environ, OPENBB_AUTO_BUILD="false", PYTHONDONTWRITEBYTECODE="1",
@@ -148,19 +156,19 @@ def test_soft_deadline_real_process_and_resume(tmp_path, session_pages, boundary
     marker = tmp_path / "day-changed"
     env["DAY_MARKER"] = str(marker)
     env["CROSS_DAY"] = "1" if boundary == "midnight" else "0"
-    if boundary == "midnight":
-        from datetime import date, timedelta
-        tomorrow = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
-        runner = ("import os; from pathlib import Path; "
-                  "from openbb_collector_core import baostock_daily as d; "
-                  f"d.shanghai_date=lambda: {tomorrow!r} if Path(os.environ['DAY_MARKER']).exists() else {day!r}; "
-                  "raise SystemExit(d.main())")
-        command = [sys.executable, "-c", runner]
-    else:
-        command = [sys.executable, "-m", "openbb_collector_core.baostock_daily"]
+    from datetime import date, timedelta
+    tomorrow = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+    runner = ("import os, time; from pathlib import Path; from types import SimpleNamespace; "
+              "from openbb_collector_core import baostock_daily as d; "
+              "marker=Path(os.environ['DAY_MARKER']); "
+              + (f"d.shanghai_date=lambda: {tomorrow!r} if marker.exists() else {day!r}; "
+                 if boundary == "midnight" else
+                 "d.time=SimpleNamespace(monotonic=lambda: 1000 if marker.exists() else 0, time_ns=time.time_ns); ")
+              + "raise SystemExit(d.main())")
+    command = [sys.executable, "-c", runner]
     for name in ("config", "calendar", "universe", "work", "root"):
         command += ["--" + name, str(tmp_path / name)]
-    command += ["--request-budget", "10", "--seconds", "3" if boundary == "time" else "60", "--backoff-seconds", "0", "--max-attempts", "1"]
+    command += ["--request-budget", "10", "--seconds", "60", "--backoff-seconds", "0", "--max-attempts", "1"]
     first = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     until = time.monotonic() + 20
     while time.monotonic() < until and '"event": "query"' not in calls.read_text():
@@ -168,6 +176,7 @@ def test_soft_deadline_real_process_and_resume(tmp_path, session_pages, boundary
     assert '"event": "query"' in calls.read_text()
     parallel = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
     assert parallel.returncode == 2, parallel.stdout + parallel.stderr
+    marker.touch()
     stdout, stderr = first.communicate(timeout=40)
     assert first.returncode == 1, stdout + stderr
     assert json.loads(stdout)["reason"] == ("time_budget" if boundary == "time" else "date_changed")
@@ -178,6 +187,16 @@ def test_soft_deadline_real_process_and_resume(tmp_path, session_pages, boundary
     from openbb_collector_core import baostock_campaign as campaign
     assert campaign.Control().state(budget_file)["calls"] == 3
     assert not list((tmp_path / "root").rglob("terminal.json"))
+    # Reproduce the previously persisted soft-deadline encoding. The retained
+    # capture has no terminal; it must remain unknown and not consume data retry.
+    progress = next((tmp_path / "root").rglob("progress.json"))
+    io = campaign.Control()
+    state = io.state(progress)
+    if session_pages == "0":
+        link = state["entries"][0]["links"][-1]
+        assert link["status"] == "unknown" and link["terminal_sha256"] is None
+        link["status"] = "failed"
+        io.write(progress, state)
     marker.unlink(missing_ok=True)
     env["CROSS_DAY"] = "0"
     env["SLOW_QUERY"] = "0"
@@ -202,6 +221,7 @@ def test_soft_deadline_real_process_and_resume(tmp_path, session_pages, boundary
 
 def test_closed_correction_is_explicit_and_retains_original(tmp_path, monkeypatch):
     from argparse import Namespace
+
     from openbb_collector_core import baostock_daily as daily
 
     day = shanghai_date()
@@ -240,16 +260,26 @@ def test_closed_correction_is_explicit_and_retains_original(tmp_path, monkeypatc
     assert audit["reason"] == args.reason
     args.correct_closed, args.reason = False, None
     assert daily.launch(args)["status"] == "partial"
+    for path, error in [(daydir / "calendar.json", "original_calendar_evidence_conflict"),
+                        (daydir / "closed-correction" / "universe.json", "daily_correction_evidence_conflict")]:
+        saved = path.read_bytes()
+        path.write_text("{}")
+        with pytest.raises(ValueError, match=error):
+            daily.launch(args)
+        path.write_bytes(saved)
+    assert (daydir / "identity.json").read_bytes() == original
+    assert (daydir / "calendar.json").read_bytes() == retained_calendar
 
 
 def test_budget_migrates_without_refunding_and_uses_shanghai(tmp_path, monkeypatch):
+    from datetime import datetime
+
     from openbb_collector_core import baostock_campaign as campaign
-    from datetime import datetime, timezone
 
     class FrozenDateTime(datetime):
         @classmethod
         def now(cls, tz=None):
-            return datetime(2026, 10, 30, 16, 30, tzinfo=timezone.utc).astimezone(tz)
+            return datetime(2026, 10, 30, 16, 30, tzinfo=UTC).astimezone(tz)
 
     monkeypatch.setattr(campaign, "datetime", FrozenDateTime)
     io = campaign.Control()
@@ -263,6 +293,7 @@ def test_budget_migrates_without_refunding_and_uses_shanghai(tmp_path, monkeypat
 def test_correction_refuses_changed_capture_root(tmp_path, monkeypatch):
     # Root binding is installed with a new daily identity, before source work.
     from argparse import Namespace
+
     from openbb_collector_core import baostock_daily as daily
 
     day = shanghai_date()
@@ -285,6 +316,7 @@ def test_correction_refuses_changed_capture_root(tmp_path, monkeypatch):
 def test_historical_correction_requires_explicit_date_and_authorization(tmp_path, monkeypatch):
     from argparse import Namespace
     from datetime import date, timedelta
+
     from openbb_collector_core import baostock_daily as daily
 
     day = shanghai_date()

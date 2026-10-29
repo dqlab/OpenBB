@@ -95,7 +95,14 @@ def launch(args):
                 if (audit["original_identity"] != original or audit["corrected_identity"] != identity
                         or audit["root"] != root_identity):
                     raise ValueError("daily_identity_conflict")
-                if campaign.load_json(correction / "calendar.json") != calendar:
+                old_calendar = directory / "calendar.json"
+                if (not old_calendar.is_file()
+                        or campaign.digest(campaign.load_json(old_calendar)) != original["calendar_sha256"]):
+                    raise ValueError("original_calendar_evidence_conflict")
+                if (campaign.digest(campaign.load_json(correction / "calendar.json"))
+                        != identity["calendar_sha256"]
+                        or campaign.digest(campaign.load_json(correction / "universe.json"))
+                        != identity["universe_sha256"]):
                     raise ValueError("daily_correction_evidence_conflict")
             elif original != identity:
                 if not args.correct_closed or not args.reason:
@@ -108,7 +115,7 @@ def launch(args):
                 if run_dir.exists() or (directory / "manifest").exists():
                     raise ValueError("daily_correction_existing_campaign")
                 old_calendar = directory / "calendar.json"
-                if old_calendar.exists() and campaign.digest(campaign.load_json(old_calendar)) != original["calendar_sha256"]:
+                if not old_calendar.is_file() or campaign.digest(campaign.load_json(old_calendar)) != original["calendar_sha256"]:
                     raise ValueError("original_calendar_evidence_conflict")
                 stage = Path(tempfile.mkdtemp(prefix=".correction-", dir=directory))
                 try:
