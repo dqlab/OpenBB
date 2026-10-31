@@ -24,3 +24,19 @@ The startup allowance is shared with acquisition and shutdown: delays consume
 the remaining total budget. A stop signal shortens the deadline to at most the
 shutdown timeout. Exceeding the budget kills the child and reports failure.
 Do not run a native connection without a separately authorized account and endpoint.
+
+## Validation record
+
+For commit `a361209f`, a Python 3.12 run of the CTP and Futu provider tests
+and live collector tests completed with 276 passed and zero failed in a
+loopback-only network namespace. A bounded follow-up ran the synthetic CTP
+replay 30 times with a 20-second limit per run (30 successful), and the Futu
+loopback reconnect, refresh and shutdown test 10 times (10 successful). These
+are bounded observations, not proof that timeouts cannot recur.
+
+An earlier offline test run made an external network connection. The available
+evidence does not establish the source of any credentials. Two timeouts were
+observed in earlier runs; they did not recur in the bounded follow-up, and their
+root cause remains unknown. The follow-up does not establish live market
+behavior or account permissions. At the time of this record, GitHub Actions CI
+had not run for the PR; local results are not CI results.
