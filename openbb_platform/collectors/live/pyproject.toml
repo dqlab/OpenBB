@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dq-live-market-data-collector"
-version = "0.1.7"
+version = "0.1.8"
 description = "Independent live market-data collection engine for OpenBB."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,12 +12,14 @@ dependencies = ["openbb-collector-core>=0.1.3,<0.2", "pydantic>=2.7,<3", "PyYAML
 
 [project.scripts]
 dq-live-market-data-collector = "dq_live_market_data_collector.cli:main"
+dq-ctp-tick = "dq_live_market_data_collector.tick_cli:main"
 
 [project.optional-dependencies]
 ssh = ["openbb-collector-core[ssh]>=0.1.1,<0.2"]
 parquet = ["pyarrow>=15"]
 duckdb = ["duckdb>=1"]
 openbb = ["openbb-core>=1.6.13,<2"]
+ctp = ["openbb-ctp[native]>=0.1.0,<0.2"]
 dev = ["pytest>=8", "ruff>=0.5", "build>=1"]
 
 [tool.setuptools.packages.find]
@@ -39,3 +41,6 @@ dq_live_market_data_collector = ["example.yaml"]
 
 [project.entry-points."openbb_collector_extension"]
 live = "dq_live_market_data_collector.extension:collector"
+
+[project.entry-points.openbb_tick_source]
+replay = "dq_live_market_data_collector.tick_source:ReplaySource"
