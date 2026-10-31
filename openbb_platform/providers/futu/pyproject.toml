@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openbb-futu"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+dependencies = ["openbb-core>=1.6.13,<2", "websockets>=13,<16"]
+
+[project.optional-dependencies]
+collector = ["dq-live-market-data-collector>=0.1.8,<0.2"]
+
+[project.scripts]
+openbb-futu-collector = "openbb_futu.collector:main"
+openbb-futu-sampled-snapshot = "openbb_futu.sampled_snapshot:main"
+openbb-futu-evidence = "openbb_futu.evidence_cli:main"
+
+[project.entry-points.openbb_provider_extension]
+futu = "openbb_futu:futu_provider"

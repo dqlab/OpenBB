@@ -1,0 +1,12 @@
+{
+  "symbols": [
+    {"asset": "equity", "symbol": "HK.00700"},
+    {"asset": "etf", "symbol": "HK.02800"},
+    {"asset": "option", "symbol": "US.REPLACE_OPTION"},
+    {"asset": "future", "symbol": "US.REPLACE_FUTURE"}
+  ],
+  "max_polls": 2,
+  "interval_seconds": 60,
+  "timeout_seconds": 10,
+  "queue_capacity": 1000
+}

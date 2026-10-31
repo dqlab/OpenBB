@@ -1,0 +1,14 @@
+{
+  "dimensions": [
+    {"asset": "equity", "symbol": "US.AAPL", "channel": "quote", "priority": 1},
+    {"asset": "equity", "symbol": "US.AAPL", "channel": "ticker", "priority": 2},
+    {"asset": "etf", "symbol": "US.SPY", "channel": "quote", "priority": 3},
+    {"asset": "option", "symbol": "US.EXAMPLE_OPTION", "channel": "ticker", "priority": 4},
+    {"asset": "future", "symbol": "US.EXAMPLE_FUTURE", "channel": "order_book", "priority": 5}
+  ],
+  "subscription_budget": 4,
+  "capacity": 1000,
+  "max_reconnects": 5,
+  "channel_refresh": 300,
+  "resubscribe_interval": 300
+}
