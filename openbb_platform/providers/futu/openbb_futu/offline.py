@@ -104,8 +104,36 @@ def _verification(status, records, errors):
     }
 
 
-def verify(manifest_path: Path, *, on_record=None, on_manifest=None) -> dict:  # noqa: PLR0912
+def _bounded_lines(stream, declared):
+    """Read at most declared bytes plus one probe, retaining at most one line."""
+    pending = bytearray()
+    total = 0
+    while True:
+        chunk = stream.read(min(65536, declared - total + 1))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > declared:
+            raise ValueError("segment exceeds declared size")
+        start = 0
+        while start < len(chunk):
+            end = chunk.find(b"\n", start)
+            stop = len(chunk) if end < 0 else end + 1
+            if len(pending) + stop - start > MAX_LINE_BYTES:
+                raise ValueError("line too large")
+            pending.extend(chunk[start:stop])
+            if end >= 0:
+                yield bytes(pending)
+                pending.clear()
+            start = stop
+    if pending:
+        raise ValueError("incomplete line")
+
+
+def verify(manifest_path: Path, *, on_record=None, on_manifest=None, max_segment_bytes=1024 * 1024 * 1024) -> dict:  # noqa: PLR0912
     """Verify all listed segments and their contiguous durable prefix, read only."""
+    if type(max_segment_bytes) is not int or max_segment_bytes < 0:
+        raise ValueError("invalid segment byte limit")
     manifest_path = Path(manifest_path).absolute()
     with manifest_path.open("rb") as stream:
         before_manifest = os.fstat(stream.fileno())
@@ -172,16 +200,14 @@ def verify(manifest_path: Path, *, on_record=None, on_manifest=None) -> dict:  #
         first = last = None
         records = size = 0
         try:
-            if type(entry.get("bytes")) is not int or not 0 <= entry["bytes"] <= 1024 * 1024 * 1024:
+            if type(entry.get("bytes")) is not int or not 0 <= entry["bytes"] <= max_segment_bytes:
                 raise ValueError("invalid segment size")
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(fd, "rb") as stream:
+            with os.fdopen(fd, "rb", buffering=0) as stream:
                 initial = os.fstat(stream.fileno())
                 if not stat.S_ISREG(initial.st_mode) or initial.st_size != entry["bytes"]:
                     raise ValueError("invalid segment size or type")
-                while line := stream.readline(MAX_LINE_BYTES + 1):
-                    if len(line) > MAX_LINE_BYTES:
-                        raise ValueError("line too large")
+                for line in _bounded_lines(stream, entry["bytes"]):
                     digest.update(line)
                     size += len(line)
                     if not line.endswith(b"\n"):

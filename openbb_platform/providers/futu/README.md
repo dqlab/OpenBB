@@ -161,7 +161,9 @@ Sampled coverage is reset to unknown and the sampler fails if final archive veri
 Coverage reconstruction hashes and parses each bounded archive line in the same
 read, and publishes observations only if the complete manifest and segment set
 validate. Manifest reads are capped at 8 MiB, segments at 1 GiB each, and lines
-at the archive writer's line limit. File identity and directory membership checks
+at the archive writer's line limit. `verify` also accepts a `max_segment_bytes`
+limit; each unbuffered chunk read is bounded by the remaining declared bytes plus
+one byte to detect growth, and line length is checked before parsing. File identity and directory membership checks
 reject detected concurrent changes, symlinks, missing files and read errors.
 These checks are not an authenticated filesystem snapshot: a writer with access
 to the archive can replace the manifest and data together or change files after

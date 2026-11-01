@@ -198,6 +198,7 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
     last_event = None
     failed_stop = False
     commit_failures = []
+    malformed_commit_failure = False
     event_log_status = "missing"
     event_count = 0
     gap_started = None
@@ -205,6 +206,7 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
         with events_path.open("rb") as stream:
             event_log_status = "complete"
             for line in stream:
+                event = None
                 try:
                     if not line.endswith(b"\n"):
                         raise ValueError("incomplete event")
@@ -223,12 +225,20 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
                     if event["event"] == "manifest_commit_failed" and (
                         not isinstance(event.get("run_id"), str)
                         or not isinstance(event.get("session_id"), str)
+                        or not re.fullmatch(r"[0-9a-f]{32}", event["run_id"])
+                        or not re.fullmatch(r"[0-9a-f]{32}", event["session_id"])
                         or type(event.get("publish_attempt")) is not int
                         or event["publish_attempt"] < 1
                         or type(event.get("original_commit_failure")) is not bool
-                        or not isinstance(event.get("stage"), str)
+                        or event.get("stage") not in (
+                            "manifest_write", "manifest_file_fsync", "manifest_publish",
+                            "manifest_directory_fsync", "manifest_parent_fsync", "manifest_temp_cleanup",
+                        )
+                        or (event.get("original_commit_failure") is True and (
+                            event.get("publish_attempt") != 1 or event.get("stage") == "manifest_temp_cleanup"
+                        ))
                     ):
-                        commit_failures.append(event)
+                        malformed_commit_failure = True
                         raise ValueError("invalid commit event")
                     if event["event"] == "event_log_corrupt_tail":
                         event_log_status = "corrupt"
@@ -257,6 +267,8 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
                         if len(events) < 1000:
                             events.append(event)
                 except (ValueError, UnicodeError):
+                    if isinstance(event, dict) and event.get("event") == "manifest_commit_failed":
+                        malformed_commit_failure = True
                     event_log_status = "corrupt"
     except FileNotFoundError:
         pass
@@ -345,7 +357,7 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
         ),
         None,
     )
-    unattributed_failure = any(
+    unattributed_failure = malformed_commit_failure or any(
         manifest is None
         or event.get("session_id") != manifest.get("session_id")
         or event.get("run_id") != run_id
