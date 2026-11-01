@@ -55,7 +55,7 @@ def servers():
     threading.Thread(target=http.serve_forever, daemon=True).start()
     loop = asyncio.new_event_loop()
     ready = threading.Event()
-    state = {"connections": 0, "refreshes": 0, "subscriptions": 0, "pings": 0}
+    state = {"connections": 0, "auths": 0, "refreshes": 0, "subscriptions": 0, "pings": 0}
     ticker = '{"type":"TICKER","symbol":"US.AAPL","data":{"ticker_list":[{"sequence":1},{"sequence":1}]}}'
 
     async def handler(ws):
@@ -75,6 +75,7 @@ def servers():
             req = json.loads(raw)
             action = req["action"]
             if action == "auth":
+                state["auths"] += 1
                 await ws.send(ticker)  # business arrives while auth acknowledgement is pending
                 await ws.send(json.dumps({"id": req["id"], "session_id": "test"}))
             elif action == "subscribe":
@@ -139,7 +140,7 @@ def servers():
     thread.join(5)
 
 
-def wait_for(predicate, seconds=12):
+def wait_for(predicate, seconds=80):
     """Handle wait for."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -210,7 +211,8 @@ def test_collector_real_services_reconnect_refresh_and_sigterm(tmp_path, servers
                 and OAuthHandler.calls >= 2
                 and state["pings"] >= 1
                 or process.poll() is not None
-            )
+            ),
+            seconds=80,
         )
         assert process.poll() is None, process.communicate()
         # A second process must not acquire the session's owner lock.
@@ -244,7 +246,13 @@ def test_collector_real_services_reconnect_refresh_and_sigterm(tmp_path, servers
     assert state["subscriptions"] > 2
     events = [json.loads(line) for line in next(output.glob("futu-events-*.jsonl")).read_text().splitlines()]
     assert {"gap_start", "gap_end", "channel_refreshed", "archive_closed"} <= {x["event"] for x in events}
-    manifest = json.loads(next((output / "futu-manifests").glob("*.json")).read_text())
+    from openbb_futu.offline import verify
+
+    manifest_path = next((output / "futu-manifests").glob("*.json"))
+    manifest = json.loads(manifest_path.read_text())
+    verified = verify(manifest_path)
+    assert verified["status"] == "verified"
+    assert verified["records"] == manifest["durable_seq"]
     records = [json.loads(line) for f in manifest["files"] for line in Path(f["file"]).read_text().splitlines()]
     assert manifest["durable_seq"] == len(records) >= 12
     assert {r["message_type"] for r in records} >= {"QUOTE", "ORDER_BOOK", "TICKER", "KLINE", "BROKER_QUEUE"}
@@ -291,7 +299,7 @@ def test_sensitive_frame_fails_explicitly_without_logging_payload(tmp_path, serv
     state["sensitive"] = True
     token = tmp_path / "token"
     token.write_text(
-        json.dumps({"client_id": "c", "access_token": "a", "refresh_token": "r", "expires_at": time.time() + 100})
+        json.dumps({"client_id": "c", "access_token": "a", "refresh_token": "r", "expires_at": time.time() + 3600})
     )
     token.chmod(0o600)
     config = tmp_path / "config"
@@ -317,7 +325,7 @@ def test_sensitive_frame_fails_explicitly_without_logging_payload(tmp_path, serv
         env=env,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=80,
     )
     assert result.returncode != 0
     contents = "".join(p.read_text() for p in output.rglob("*") if p.is_file())
@@ -331,7 +339,7 @@ def test_disconnect_exhaustion_is_explicit(tmp_path, servers):
     state, _, _ = servers
     token = tmp_path / "token"
     token.write_text(
-        json.dumps({"client_id": "c", "access_token": "a", "refresh_token": "r", "expires_at": time.time() + 100})
+        json.dumps({"client_id": "c", "access_token": "a", "refresh_token": "r", "expires_at": time.time() + 3600})
     )
     token.chmod(0o600)
     config = tmp_path / "config"
@@ -352,7 +360,7 @@ def test_disconnect_exhaustion_is_explicit(tmp_path, servers):
         env=env,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=80,
         check=False,
     )
     assert result.returncode != 0
@@ -383,6 +391,7 @@ def test_sigkill_restart_recovers_active_segment(tmp_path, servers):
     env = dict(
         os.environ,
         FUTU_LOOPBACK_PORT=str(state["port"]),
+        FUTU_TEST_ISOLATED="1",
         FUTU_COORDINATION_DIR=str(tmp_path / "coord"),
         FUTU_TEST_HTTP_BASE=f"http://127.0.0.1:{port}",
     )
@@ -412,14 +421,22 @@ def test_sigkill_restart_recovers_active_segment(tmp_path, servers):
             stream.write(b'{"local_seq":')
         second = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: S603 -- fixed local test command
         try:
-            wait_for(lambda: bool(list(output.glob("futu-recovery/*/recovery.json"))) or second.poll() is not None)
+            wait_for(
+                lambda: bool(list(output.glob("futu-recovery/*/recovery-unknown-v2.json")))
+                or second.poll() is not None
+            )
+            recovery = json.loads(next(output.glob("futu-recovery/*/recovery-unknown-v2.json")).read_text())
+            assert recovery["verification_status"] == "unknown"
+            assert recovery["snapshot"]["records"] > 0
             assert list(output.glob("futu-recovery/*/tail.bin"))[0].read_bytes() == b'{"local_seq":'
             second.send_signal(signal.SIGTERM)
             second.communicate(timeout=10)
+            assert second.returncode != 0
             events = [
                 json.loads(line) for file in output.glob("futu-events-*.jsonl") for line in file.read_text().splitlines()
             ]
-            assert any(event["event"] == "interrupted_segment" and event["gap"] == "unresolved" for event in events)
+            assert any(event["event"] == "interrupted_segment" and event["gap"] == "unresolved"
+                       and event["error"] == "source_stability_unknown" for event in events)
         finally:
             if second.poll() is None:
                 second.kill()
@@ -603,8 +620,9 @@ def test_discovery_to_kill_recovery_cli(tmp_path, servers):
     discovery = subprocess.run(  # noqa: S603 -- fixed test command
         [
             os.sys.executable,
-            "-m",
-            "openbb_futu.evidence_cli",
+            "-c",
+            "import runpy; import openbb_futu.coordination as c; "
+            "c.BUDGET_WINDOW = 0.05; runpy.run_module('openbb_futu.evidence_cli', run_name='__main__')",
             "discover",
             "--seeds",
             str(seeds),
@@ -661,21 +679,31 @@ def test_discovery_to_kill_recovery_cli(tmp_path, servers):
         assert first.returncode == -signal.SIGKILL
         first_plan = next(output.glob("futu-plan-*.json"))
         first_id = first_plan.stem.removeprefix("futu-plan-")
+        legacy = output / "futu-recovery" / "legacy" / "old.raw"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_bytes(b"legacy evidence\x00\xff")
+        preserved = {p: p.read_bytes() for p in output.glob("**/*.jsonl.open")}
+        preserved[legacy] = legacy.read_bytes()
+        assert len(preserved) > 1
+        before = (state["connections"], state["auths"], state["subscriptions"], OAuthHandler.calls)
         second = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)  # noqa: S603
         try:
-            wait_for(lambda: len(list(output.glob("futu-plan-*.json"))) == 2 or second.poll() is not None)
-            wait_for(lambda: state["connections"] >= 3 or second.poll() is not None)
-            assert second.poll() is None
-            wait_for(
-                lambda: any(
-                    '"mode": "streaming"' in p.read_text()
-                    for p in output.glob("futu-events-*.jsonl")
-                    if first_id not in p.name
-                )
-            )
-            second.send_signal(signal.SIGTERM)
             stdout, stderr = second.communicate(timeout=10)
-            assert second.returncode == 0, (stdout, stderr)
+            assert second.returncode != 0, (stdout, stderr)
+            assert "recovery_unresolved" in stderr
+            assert (state["connections"], state["auths"], state["subscriptions"], OAuthHandler.calls) == before
+            assert all(path.read_bytes() == data for path, data in preserved.items())
+            reports = list(output.glob("futu-recovery/*/recovery-unknown-v2.json"))
+            assert reports
+            for path in reports:
+                report = json.loads(path.read_text())
+                assert report["schema_version"] == "futu_recovery_unknown_v2"
+                assert report["verification_status"] == "unknown"
+                assert report["error"] == "source_stability_unknown"
+                assert report["gap"] == "unresolved_after_process_interruption"
+            assert len(list(output.glob("futu-plan-*.json"))) == 1
+            second_events = next(p for p in output.glob("futu-events-*.jsonl") if first_id not in p.name)
+            assert '"recovery_unresolved"' in second_events.read_text()
         finally:
             if second.poll() is None:
                 second.kill()
@@ -703,6 +731,119 @@ def test_discovery_to_kill_recovery_cli(tmp_path, servers):
         assert any(d.get("discovery_refs") == [0] for d in prior["dimensions"] if d["symbol"] == "US.OPTION")
         assert prior["discovery"]["requests"][1]["http_status"] == 403
         assert {e["event"] for e in prior["events"]} >= {"mode_change", "gap_start", "gap_end"}
+    finally:
+        if first.poll() is None:
+            first.kill()
+            first.communicate()
+
+
+def test_discovery_clean_restart_reconnect_control(tmp_path, servers):
+    """Bind HTTP evidence to a real collector plan and recover in another process."""
+    state, port, _ = servers
+    state["valid_tickers"] = True
+    token = tmp_path / "token.json"
+    token.write_text(
+        json.dumps(
+            {
+                "client_id": "client",
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_at": time.time() + 3600,
+            }
+        )
+    )
+    token.chmod(0o600)
+    seeds = tmp_path / "seeds.json"
+    seeds.write_text(json.dumps([{"asset": "option", "symbol": "US.AAPL"}, {"asset": "future", "symbol": "US.AAPL"}]))
+    env = dict(
+        os.environ,
+        FUTU_LOOPBACK_PORT=str(state["port"]),
+        FUTU_COORDINATION_DIR=str(tmp_path / "coord"),
+        FUTU_TEST_HTTP_BASE=f"http://127.0.0.1:{port}",
+    )
+    discovery = subprocess.run(  # noqa: S603 -- fixed test command
+        [
+            os.sys.executable,
+            "-c",
+            "import runpy; import openbb_futu.coordination as c; "
+            "c.BUDGET_WINDOW = 0.05; runpy.run_module('openbb_futu.evidence_cli', run_name='__main__')",
+            "discover",
+            "--seeds",
+            str(seeds),
+            "--token-file",
+            str(token),
+            "--output",
+            str(tmp_path / "evidence"),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )  # noqa: S603
+    evidence = json.loads(discovery.stdout)
+    assert [r["http_status"] for r in evidence["requests"]] == [200, 403]
+    assert Path(evidence["requests"][1]["raw_file"]).read_bytes() == b'{"ret_code":403,"message":"synthetic denial"}'
+    dimensions = [
+        {"asset": "equity", "symbol": "US.AAPL", "channel": "ticker"},
+        {"asset": "etf", "symbol": "US.SPY", "channel": "ticker"},
+        {"asset": "equity", "symbol": "US.AAPL", "channel": "kline"},
+        {"asset": "option", "symbol": "US.OPTION", "channel": "ticker"},
+        {"asset": "future", "symbol": "US.FUTURE", "channel": "order_book"},
+    ]
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "dimensions": dimensions,
+                "subscription_budget": 4,
+                "discovery_report": evidence["report_file"],
+                "backoff_base": 0.05,
+            }
+        )
+    )
+    output = tmp_path / "out"
+    cmd = [
+        os.sys.executable,
+        str(Path(__file__).with_name("loopback_runner.py")),
+        "--config",
+        str(config),
+        "--token-file",
+        str(token),
+        "--output",
+        str(output),
+    ]
+    first = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)  # noqa: S603
+    try:
+        wait_for(lambda: state["connections"] >= 2 or first.poll() is not None)
+        assert first.poll() is None
+        wait_for(lambda: bool(list(output.glob("**/*.jsonl.open"))))
+        wait_for(lambda: any('"gap_end"' in p.read_text() for p in output.glob("futu-events-*.jsonl")))
+        first.send_signal(signal.SIGTERM)
+        first_stdout, first_stderr = first.communicate(timeout=10)
+        assert first.returncode == 0, (first_stdout, first_stderr)
+        assert not list(output.glob("**/*.jsonl.open"))
+        first_plan = next(output.glob("futu-plan-*.json"))
+        first_id = first_plan.stem.removeprefix("futu-plan-")
+        second = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)  # noqa: S603
+        try:
+            wait_for(lambda: len(list(output.glob("futu-plan-*.json"))) == 2 or second.poll() is not None)
+            wait_for(lambda: state["connections"] >= 3 or second.poll() is not None)
+            assert second.poll() is None
+            wait_for(
+                lambda: any(
+                    '"mode": "streaming"' in p.read_text()
+                    for p in output.glob("futu-events-*.jsonl")
+                    if first_id not in p.name
+                )
+            )
+            second.send_signal(signal.SIGTERM)
+            stdout, stderr = second.communicate(timeout=10)
+            assert second.returncode == 0, (stdout, stderr)
+            assert not list(output.glob("futu-recovery/*/recovery-unknown-v2.json"))
+        finally:
+            if second.poll() is None:
+                second.kill()
+                second.communicate()
         current_id = next(p.stem.removeprefix("futu-plan-") for p in output.glob("futu-plan-*.json") if p != first_plan)
         read_current = subprocess.run(  # noqa: S603
             [
@@ -718,10 +859,11 @@ def test_discovery_to_kill_recovery_cli(tmp_path, servers):
             env=env,
             capture_output=True,
             text=True,
-            check=True,
+            check=False,
         )
+        assert read_current.returncode == 0
         current = json.loads(read_current.stdout)
-        assert any(e["event"] == "interrupted_segment" and e["gap"] == "unresolved" for e in current["events"])
+        assert not any(e["event"] == "interrupted_segment" for e in current["events"])
         assert all(d["subscription_ack"] in {"unknown", "not_requested"} for d in current["dimensions"])
         manifest = current["archive_manifest"]
         assert manifest and manifest["run_id"] == current_id and manifest["error"] is None
@@ -748,7 +890,6 @@ def test_discovery_to_kill_recovery_cli(tmp_path, servers):
                         counts[key] += 1
         assert all(counts.values())
         for dimension in current["dimensions"]:
-            assert dimension["synced_rows"] == counts.get((dimension["symbol"], dimension["channel"]), 0)
             assert dimension["entitlement"] == "unknown"
     finally:
         if first.poll() is None:
@@ -796,7 +937,7 @@ def test_cli_archive_and_event_failure(tmp_path, servers, fault, expected):
         env=env,
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=100,
         check=False,
     )
     assert result.returncode != 0

@@ -56,6 +56,19 @@ def test_replay_oversize_fails(tmp_path):
     assert json.loads(result.stdout)["uncertain_loss"] is True
 
 
+def test_replay_rejects_symlink_ancestor_without_creating_output(tmp_path):
+    """A missing output is never created through an intermediate symlink."""
+    source = tmp_path / "input"
+    source.write_text('{"type":"QUOTE","data":{}}\n')
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    result = invoke("replay", "--input", source, "--output", link / "archive")
+    assert result.returncode != 0
+    assert not list(outside.iterdir())
+
+
 def test_archive_resource_budgets(tmp_path, monkeypatch):
     """Byte, secret and segment exhaustion fail without silent truncation."""
     import openbb_futu.archive as module

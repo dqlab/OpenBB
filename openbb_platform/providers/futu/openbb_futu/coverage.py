@@ -3,20 +3,26 @@
 import hashlib
 import json
 import math
-import os
 import re
 from pathlib import Path
 
 from openbb_futu.contracts import plan
 from openbb_futu.discovery import SYMBOL
 from openbb_futu.offline import verify
+from openbb_futu.read_budget import Budget, BudgetExceeded, EvidenceChanged
+from openbb_futu.root_handle import PublicationDurabilityUnknown, RootHandle
 
 
-def prepare(config):
+def prepare(config, *, budget=None, root_handle=None):
     """Create deterministic bounded dimensions from explicitly supplied seeds."""
+    read_budget = budget if budget is not None else Budget()
+    if root_handle is not None:
+        root_handle.check()
     entries = config["dimensions"]
     if not isinstance(entries, list) or not entries:
         raise ValueError("dimensions must be a nonempty list")
+    if len(entries) > 10000:
+        raise ValueError("too many dimensions")
     for item in entries:
         if not isinstance(item, dict) or set(item) - {
             "asset",
@@ -41,11 +47,7 @@ def prepare(config):
     evidence = config.get("discovery_report")
     if evidence is not None:
         path = Path(evidence)
-        if path.stat().st_size > 8_388_608:
-            raise ValueError("discovery report too large")
-        raw = path.read_bytes()
-        if len(raw) > 8_388_608:
-            raise ValueError("discovery report too large")
+        raw = read_budget.read(path, max_bytes=8_388_608)
         source = json.loads(raw)
         requests = source["requests"]
         if not isinstance(requests, list) or len(requests) > 100:
@@ -70,9 +72,7 @@ def prepare(config):
                 response_path = Path(item["raw_file"])
                 if response_path.resolve().parent != path.resolve().parent:
                     raise ValueError("discovery response outside evidence directory")
-                if response_path.stat().st_size > 32 * 1024 * 1024:
-                    raise ValueError("discovery response too large")
-                response = response_path.read_bytes()
+                response = read_budget.read(response_path, max_bytes=32 * 1024 * 1024)
                 if (
                     len(response) > 32 * 1024 * 1024
                     or len(response) != item["bytes"]
@@ -119,25 +119,22 @@ def prepare(config):
         channels.setdefault(channel, []).append(
             {"symbol": symbol, "period": "1m", "adjust": "none"} if channel == "kline" else symbol
         )
+    if root_handle is not None:
+        root_handle.check()
     return result, channels
 
 
-def write_json(path, obj):
-    """Atomically publish and sync a report."""
-    path = Path(path)
-    temp = path.with_name(path.name + ".tmp")
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        json.dump(obj, stream, ensure_ascii=False, indent=2)
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temp, path)
-    fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+def write_json(path, obj, *, root_handle=None, replace=False):
+    """Publish JSON through a held root; replacement is for derived reports."""
+    path = Path(path).absolute()
+    content = (json.dumps(obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    if root_handle is None:
+        with RootHandle(path.parent) as handle:
+            handle.publish(path.name, content, replace=replace)
+    else:
+        if path.parent != root_handle.path:
+            raise ValueError("report outside held root")
+        root_handle.publish(path.name, content, replace=replace)
 
 
 def _strict_integer(value):
@@ -189,91 +186,107 @@ def _observe_record(record, dimension_keys, observations):
             refs.append({"local_seq": record["local_seq"]})
 
 
-def report(root, run_id, *, publish=True):  # noqa: PLR0912
+def _report(root, run_id, *, publish=True, budget, root_handle=None, plan_snapshot=None):  # noqa: PLR0912
     """Rebuild from sealed manifest only; interrupted or unverifiable data stays unknown."""
     root = Path(root)
-    result = json.loads((root / f"futu-plan-{run_id}.json").read_text())
+    plan_path = root / f"futu-plan-{run_id}.json"
+    if root_handle is None or root.absolute() != root_handle.path:
+        raise ValueError("plan root is not held")
+    if plan_snapshot is None:
+        raw_plan, plan_identity = budget.read_identity_at(root_handle, plan_path.name, max_bytes=8_388_608)
+    else:
+        raw_plan, plan_identity = plan_snapshot
+        budget.check_identity_at(root_handle, plan_path.name, plan_identity)
+    result = json.loads(raw_plan)
     events_path = root / f"futu-events-{run_id}.jsonl"
     events: list = []
     last_event = None
     failed_stop = False
-    commit_failures = []
+    commit_failures = {}
     malformed_commit_failure = False
     event_log_status = "missing"
     event_count = 0
     gap_started = None
     try:
-        with events_path.open("rb") as stream:
-            event_log_status = "complete"
-            for line in stream:
-                event = None
-                try:
-                    if not line.endswith(b"\n"):
-                        raise ValueError("incomplete event")
-                    event = json.loads(line)
-                    if not isinstance(event, dict) or not isinstance(event.get("event"), str):
-                        raise ValueError("invalid event")
-                    if "time" in event and (
-                        type(event["time"]) not in (int, float) or not math.isfinite(event["time"])
-                    ):
-                        raise ValueError("invalid event time")
-                    if event["event"] == "stopped" and (
-                        not isinstance(event.get("status"), str)
-                        or event["status"] not in {"failed", "stopped"}
-                    ):
-                        raise ValueError("invalid stopped event")
-                    if event["event"] == "manifest_commit_failed" and (
-                        not isinstance(event.get("run_id"), str)
-                        or not isinstance(event.get("session_id"), str)
-                        or not re.fullmatch(r"[0-9a-f]{32}", event["run_id"])
-                        or not re.fullmatch(r"[0-9a-f]{32}", event["session_id"])
-                        or type(event.get("publish_attempt")) is not int
-                        or event["publish_attempt"] < 1
-                        or type(event.get("original_commit_failure")) is not bool
-                        or event.get("stage") not in (
-                            "manifest_write", "manifest_file_fsync", "manifest_publish",
-                            "manifest_directory_fsync", "manifest_parent_fsync", "manifest_temp_cleanup",
-                        )
-                        or (event.get("original_commit_failure") is True and (
-                            event.get("publish_attempt") != 1 or event.get("stage") == "manifest_temp_cleanup"
-                        ))
-                    ):
-                        malformed_commit_failure = True
-                        raise ValueError("invalid commit event")
-                    if event["event"] == "event_log_corrupt_tail":
-                        event_log_status = "corrupt"
-                    last_event = event
-                    if event.get("event") == "stopped" and event.get("status") == "failed":
-                        failed_stop = True
-                    if event.get("event") == "manifest_commit_failed":
-                        commit_failures.append(event)
-                    if event.get("event") == "gap_start":
-                        gap_started = event.get("time")
-                    elif (
-                        event.get("event") == "gap_end"
-                        and isinstance(gap_started, (int, float))
-                        and isinstance(event.get("time"), (int, float))
-                    ):
-                        event["duration_seconds"] = max(0, event["time"] - gap_started)
-                        gap_started = None
-                    if event.get("event") in {
-                        "gap_start",
-                        "gap_end",
-                        "gap_unresolved",
-                        "interrupted_segment",
-                        "mode_change",
-                    }:
-                        event_count += 1
-                        if len(events) < 1000:
-                            events.append(event)
-                except (ValueError, UnicodeError):
-                    if isinstance(event, dict) and event.get("event") == "manifest_commit_failed":
-                        malformed_commit_failure = True
+        event_log_status = "complete"
+        for line in budget.lines(events_path):
+            event = None
+            try:
+                if not line.endswith(b"\n"):
+                    raise ValueError("incomplete event")
+                event = json.loads(line)
+                if not isinstance(event, dict) or not isinstance(event.get("event"), str):
+                    raise ValueError("invalid event")
+                if "time" in event and (
+                    type(event["time"]) not in (int, float) or not math.isfinite(event["time"])
+                ):
+                    raise ValueError("invalid event time")
+                if event["event"] == "stopped" and (
+                    not isinstance(event.get("status"), str)
+                    or event["status"] not in {"failed", "stopped"}
+                ):
+                    raise ValueError("invalid stopped event")
+                if event["event"] == "manifest_commit_failed" and (
+                    not isinstance(event.get("run_id"), str)
+                    or not isinstance(event.get("session_id"), str)
+                    or not re.fullmatch(r"[0-9a-f]{32}", event["run_id"])
+                    or not re.fullmatch(r"[0-9a-f]{32}", event["session_id"])
+                    or type(event.get("publish_attempt")) is not int
+                    or event["publish_attempt"] < 1
+                    or type(event.get("original_commit_failure")) is not bool
+                    or event.get("stage") not in (
+                        "manifest_write", "manifest_file_fsync", "manifest_publish",
+                        "manifest_directory_fsync", "manifest_parent_fsync", "manifest_temp_cleanup",
+                    )
+                    or (event.get("original_commit_failure") is True and (
+                        event.get("publish_attempt") != 1 or event.get("stage") == "manifest_temp_cleanup"
+                    ))
+                ):
+                    malformed_commit_failure = True
+                    raise ValueError("invalid commit event")
+                if event["event"] == "event_log_corrupt_tail":
                     event_log_status = "corrupt"
+                last_event = event
+                if event.get("event") == "stopped" and event.get("status") == "failed":
+                    failed_stop = True
+                if event.get("event") == "manifest_commit_failed":
+                    key = (event["run_id"], event["session_id"], event["original_commit_failure"])
+                    if key not in commit_failures and len(commit_failures) >= 1000:
+                        raise BudgetExceeded("commit failure summary limit exceeded")
+                    commit_failures.setdefault(key, event)
+                if event.get("event") == "gap_start":
+                    gap_started = event.get("time")
+                elif (
+                    event.get("event") == "gap_end"
+                    and isinstance(gap_started, (int, float))
+                    and isinstance(event.get("time"), (int, float))
+                ):
+                    event["duration_seconds"] = max(0, event["time"] - gap_started)
+                    gap_started = None
+                if event.get("event") in {
+                    "gap_start",
+                    "gap_end",
+                    "gap_unresolved",
+                    "interrupted_segment",
+                    "mode_change",
+                }:
+                    event_count += 1
+                    if len(events) < 1000:
+                        events.append(event)
+            except BudgetExceeded:
+                raise
+            except (ValueError, UnicodeError):
+                if isinstance(event, dict) and event.get("event") == "manifest_commit_failed":
+                    malformed_commit_failure = True
+                event_log_status = "corrupt"
     except FileNotFoundError:
-        pass
-    except OSError:
+        event_log_status = "missing"
+    except PermissionError:
+        if publish:
+            raise
         event_log_status = "unreadable"
+    except (OSError, ValueError):
+        raise
     result["event_log_status"] = event_log_status
     result["run_id"] = run_id
     result["events"] = [
@@ -296,31 +309,39 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
     result["dimensions"] = []
     manifest = None
     manifest_path = None
+    manifest_identity = None
     invalid_manifest = False
-    for path in (root / "futu-manifests").glob("*.json"):
+    manifest_dir = root / "futu-manifests"
+    for name in budget.entries(manifest_dir):
+        if not name.endswith(".json"):
+            continue
+        path = manifest_dir / name
         try:
-            with path.open("rb") as stream:
-                raw = stream.read(8 * 1024 * 1024 + 1)
-            if len(raw) > 8 * 1024 * 1024:
-                invalid_manifest = True
-                continue
+            raw, candidate_identity = budget.read_identity(path, max_bytes=8 * 1024 * 1024)
             candidate = json.loads(raw)
             if candidate["run_id"] == run_id:
                 if manifest is not None:
                     invalid_manifest = True
                 manifest = candidate
                 manifest_path = path
+                manifest_identity = candidate_identity
+        except BudgetExceeded:
+            raise
         except (OSError, ValueError, KeyError, TypeError):
-            continue
+            raise ValueError("invalid manifest input") from None
     observations: dict = {}
     dimension_keys = {(item["symbol"], item["channel"]) for item in result["selected"] + result["not_selected"]}
     if manifest:
         try:
             invalid_manifest = invalid_manifest or verify(
                 manifest_path,
+                budget=budget,
+                expected_manifest_identity=manifest_identity,
                 on_record=lambda record: _observe_record(record, dimension_keys, observations),
                 on_manifest=lambda checked: checked == manifest or (_ for _ in ()).throw(ValueError("manifest changed")),
             )["status"] != "verified"
+        except (BudgetExceeded, EvidenceChanged):
+            raise
         except (OSError, ValueError, KeyError, TypeError):
             invalid_manifest = True
     if invalid_manifest:
@@ -350,7 +371,7 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
     failure = next(
         (
             event
-            for event in commit_failures
+            for event in commit_failures.values()
             if event.get("run_id") == run_id
             and isinstance(event.get("session_id"), str)
             and re.fullmatch(r"[0-9a-f]{32}", event["session_id"])
@@ -363,7 +384,7 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
         or event.get("run_id") != run_id
         or not isinstance(event.get("session_id"), str)
         or not re.fullmatch(r"[0-9a-f]{32}", event["session_id"])
-        for event in commit_failures
+        for event in commit_failures.values()
     )
     uncertain_events = (
         event_log_status in {"corrupt", "unreadable"}
@@ -381,7 +402,7 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
         and event.get("publish_attempt") == 1
         and isinstance(event.get("session_id"), str)
         and re.fullmatch(r"[0-9a-f]{32}", event["session_id"])
-        for event in commit_failures
+        for event in commit_failures.values()
     )
     if failure and not confirmed_failure:
         uncertain_events = True
@@ -389,7 +410,7 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
     if invalid_manifest or (failed_stop and not uncertain_events) or (confirmed_failure and not uncertain_events):
         result["run_status"] = "failed"
     original_failure = next(
-        (event for event in commit_failures
+        (event for event in commit_failures.values()
          if manifest is not None
          and event.get("session_id") == manifest.get("session_id")
          and event.get("run_id") == run_id
@@ -426,6 +447,25 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
             summary["persistence_status"] = "observed" if summary["synced_rows"] else "not_observed"
             summary["entitlement"] = "unknown"
     result["archive_manifest"] = manifest
+    budget.check_identity_at(root_handle, plan_path.name, plan_identity)
     if publish:
-        write_json(root / f"futu-coverage-{run_id}.json", result)
+        write_json(root / f"futu-coverage-{run_id}.json", result, root_handle=root_handle, replace=True)
     return result
+
+
+def report(root, run_id, *, publish=True, budget=None, root_handle=None):
+    """Reconstruct coverage with a shared input budget."""
+    try:
+        if root_handle is not None:
+            return _report(root, run_id, publish=publish, budget=budget if budget is not None else Budget(),
+                           root_handle=root_handle)
+        with RootHandle(root) as handle:
+            return _report(root, run_id, publish=publish, budget=budget if budget is not None else Budget(),
+                           root_handle=handle)
+    except PublicationDurabilityUnknown:
+        return {"run_id": run_id, "run_status": "unknown", "evidence_status": "unknown",
+                "integrity_status": "unknown", "budget_or_input_error": True,
+                "publication_status": "visible_durability_unknown"}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"run_id": run_id, "run_status": "unknown", "evidence_status": "unknown",
+                "integrity_status": "unknown", "budget_or_input_error": True}

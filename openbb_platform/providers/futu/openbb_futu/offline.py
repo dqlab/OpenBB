@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 from openbb_futu.archive import MAX_FRAME_BYTES, MAX_LINE_BYTES, MAX_SEGMENTS, Archive
+from openbb_futu.read_budget import Budget, BudgetExceeded, EvidenceChanged
 
 
 def _identity(info):
@@ -67,9 +68,9 @@ def _manifest_matches(manifest, count):
     )
 
 
-def replay(source: Path, output: Path) -> dict:
+def replay(source: Path, output: Path, *, _archive_factory=Archive) -> dict:
     """Feed JSONL frames through the same ingress and writer as the collector."""
-    archive = Archive(output, run_id=uuid.uuid4().hex)
+    archive = _archive_factory(output, run_id=uuid.uuid4().hex)
     try:
         with source.open("rb") as stream:
             while True:
@@ -104,12 +105,13 @@ def _verification(status, records, errors):
     }
 
 
-def _bounded_lines(stream, declared):
+def _bounded_lines(stream, declared, budget):
     """Read at most declared bytes plus one probe, retaining at most one line."""
     pending = bytearray()
     total = 0
     while True:
-        chunk = stream.read(min(65536, declared - total + 1))
+        chunk = stream.read(min(65536, declared - total + 1, budget.bytes_left + 1))
+        budget.charge_read(len(chunk))
         if not chunk:
             break
         total += len(chunk)
@@ -123,6 +125,7 @@ def _bounded_lines(stream, declared):
                 raise ValueError("line too large")
             pending.extend(chunk[start:stop])
             if end >= 0:
+                budget.charge_line()
                 yield bytes(pending)
                 pending.clear()
             start = stop
@@ -130,14 +133,34 @@ def _bounded_lines(stream, declared):
         raise ValueError("incomplete line")
 
 
-def verify(manifest_path: Path, *, on_record=None, on_manifest=None, max_segment_bytes=1024 * 1024 * 1024) -> dict:  # noqa: PLR0912
+def verify(  # noqa: PLR0912
+    manifest_path: Path, *, on_record=None, on_manifest=None,
+    max_segment_bytes=1024 * 1024 * 1024, budget=None, expected_manifest_identity=None,
+) -> dict:
     """Verify all listed segments and their contiguous durable prefix, read only."""
     if type(max_segment_bytes) is not int or max_segment_bytes < 0:
         raise ValueError("invalid segment byte limit")
+    budget = budget if budget is not None else Budget()
     manifest_path = Path(manifest_path).absolute()
-    with manifest_path.open("rb") as stream:
+    manifest_fd = budget.open_regular(manifest_path)
+    with os.fdopen(manifest_fd, "rb", buffering=0) as stream:
         before_manifest = os.fstat(stream.fileno())
-        raw_manifest = stream.read(8 * 1024 * 1024 + 1)
+        if expected_manifest_identity is not None and _identity(before_manifest) != expected_manifest_identity:
+            raise EvidenceChanged("manifest replaced")
+        if not stat.S_ISREG(before_manifest.st_mode):
+            raise ValueError("manifest is not a regular file")
+        parts = []
+        total = 0
+        while True:
+            chunk = stream.read(min(65536, 8 * 1024 * 1024 - total + 1, budget.bytes_left + 1))
+            budget.charge_read(len(chunk))
+            if not chunk:
+                break
+            parts.append(chunk)
+            total += len(chunk)
+            if total > 8 * 1024 * 1024:
+                return _verification("failed", 0, ["manifest too large"])
+        raw_manifest = b"".join(parts)
         if len(raw_manifest) > 8 * 1024 * 1024:
             return _verification("failed", 0, ["manifest too large"])
         manifest = json.loads(raw_manifest)
@@ -177,7 +200,10 @@ def verify(manifest_path: Path, *, on_record=None, on_manifest=None, max_segment
         source = root / "source_id=futu"
         if source.is_symlink():
             raise ValueError("invalid source directory")
-        for index, date in enumerate(source.glob("recv_date=*")):
+        for index, name in enumerate(budget.entries(source)):
+            if not name.startswith("recv_date="):
+                continue
+            date = source / name
             if index >= MAX_SEGMENTS:
                 raise ValueError("date directory budget")
             if date.is_symlink():
@@ -185,12 +211,17 @@ def verify(manifest_path: Path, *, on_record=None, on_manifest=None, max_segment
             directory = date / f"session={session}"
             if directory.is_symlink():
                 raise ValueError("invalid session directory")
-            for path in directory.glob("*.jsonl"):
+            for segment_name in budget.entries(directory):
+                if not segment_name.endswith(".jsonl"):
+                    continue
+                path = directory / segment_name
                 if path.is_symlink() or len(discovered) >= MAX_SEGMENTS:
                     raise ValueError("invalid segment or segment budget")
                 discovered.add(path.absolute())
         if discovered != set(paths):
             raise ValueError("unlisted or missing sealed segment")
+    except BudgetExceeded:
+        raise
     except (OSError, ValueError, KeyError, TypeError):
         return _verification("failed", 0, ["invalid segment set or path"])
     identities = []
@@ -202,12 +233,12 @@ def verify(manifest_path: Path, *, on_record=None, on_manifest=None, max_segment
         try:
             if type(entry.get("bytes")) is not int or not 0 <= entry["bytes"] <= max_segment_bytes:
                 raise ValueError("invalid segment size")
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            fd = budget.open_regular(path)
             with os.fdopen(fd, "rb", buffering=0) as stream:
                 initial = os.fstat(stream.fileno())
                 if not stat.S_ISREG(initial.st_mode) or initial.st_size != entry["bytes"]:
                     raise ValueError("invalid segment size or type")
-                for line in _bounded_lines(stream, entry["bytes"]):
+                for line in _bounded_lines(stream, entry["bytes"], budget):
                     digest.update(line)
                     size += len(line)
                     if not line.endswith(b"\n"):
@@ -232,6 +263,8 @@ def verify(manifest_path: Path, *, on_record=None, on_manifest=None, max_segment
             if not _segment_matches(entry, digest.hexdigest(), size, records, first=first, last=last):
                 raise ValueError("segment metadata mismatch")
             count += records
+        except BudgetExceeded:
+            raise
         except (OSError, ValueError, KeyError, TypeError, UnicodeError):
             errors.append("invalid segment: " + str(path))
             break
@@ -244,18 +277,26 @@ def verify(manifest_path: Path, *, on_record=None, on_manifest=None, max_segment
         ):
             raise ValueError("segment changed")
         discovered_after = set()
-        for index, date in enumerate((root / "source_id=futu").glob("recv_date=*")):
+        for index, name in enumerate(budget.entries(root / "source_id=futu")):
+            if not name.startswith("recv_date="):
+                continue
+            date = root / "source_id=futu" / name
             if index >= MAX_SEGMENTS or date.is_symlink():
                 raise ValueError("invalid date directory")
             directory = date / f"session={session}"
             if directory.is_symlink():
                 raise ValueError("invalid session directory")
-            for path in directory.glob("*.jsonl"):
+            for segment_name in budget.entries(directory):
+                if not segment_name.endswith(".jsonl"):
+                    continue
+                path = directory / segment_name
                 if path.is_symlink() or len(discovered_after) >= MAX_SEGMENTS:
                     raise ValueError("invalid segment")
                 discovered_after.add(path.absolute())
         if discovered_after != set(paths):
             raise ValueError("segment set changed")
+    except BudgetExceeded:
+        raise
     except (OSError, ValueError):
         errors.append("archive changed during verification")
     if not _manifest_matches(manifest, count):

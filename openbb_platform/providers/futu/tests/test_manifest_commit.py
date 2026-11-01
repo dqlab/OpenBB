@@ -153,15 +153,15 @@ def test_unreadable_event_log_is_unknown(tmp_path, monkeypatch):
     run_id = "c" * 32
     make_plan(tmp_path, run_id)
     Archive(tmp_path, run_id=run_id).close()
-    event_path = tmp_path / f"futu-events-{run_id}.jsonl"
-    original = Path.open
+    event_name = f"futu-events-{run_id}.jsonl"
+    original = os.open
 
     def fail(path, *args, **kwargs):
-        if path == event_path:
+        if path == event_name:
             raise PermissionError(errno.EACCES, "synthetic")
         return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", fail)
+    monkeypatch.setattr(os, "open", fail)
     result = report(tmp_path, run_id, publish=False)
     assert result["event_log_status"] == "unreadable"
     assert result["evidence_status"] == "unknown"
@@ -176,21 +176,22 @@ def test_failure_event_write_denied_preserves_original_exception(tmp_path, monke
     archive = Archive(tmp_path, run_id=run_id)
     archive.stop.set()
     archive.thread.join()
-    original_open = Path.open
+    original_open = os.open
 
     def denied(path, *args, **kwargs):
-        if path.name.startswith("futu-events-") and args and args[0] == "a+b":
+        if str(path).startswith("futu-events-"):
             raise PermissionError(errno.EACCES, "event log denied")
         return original_open(path, *args, **kwargs)
 
     def fail(*args, **kwargs):
         raise OSError(errno.EIO, "manifest publish failed")
 
-    monkeypatch.setattr(Path, "open", denied)
+    monkeypatch.setattr(os, "open", denied)
     monkeypatch.setattr(os, "link", fail)
     with pytest.raises(OSError) as exc:
         archive.close()
     assert exc.value.errno == errno.EIO
+    monkeypatch.setattr(os, "open", original_open)
     result = report(tmp_path, run_id, publish=False)
     assert result["original_commit_status"] == "unknown"
     assert result["event_log_status"] == "missing"
@@ -268,14 +269,14 @@ def test_cleanup_failure_is_not_directory_fsync_failure(tmp_path, monkeypatch):
     run_id = "b" * 32
     make_plan(tmp_path, run_id)
     archive = Archive(tmp_path, run_id=run_id)
-    original = Path.unlink
+    original = os.unlink
 
     def fail(path, *args, **kwargs):
-        if path.suffix == ".tmp":
+        if str(path).endswith(".tmp"):
             raise OSError(errno.EIO, "cleanup")
         return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "unlink", fail)
+    monkeypatch.setattr(os, "unlink", fail)
     with pytest.raises(OSError):
         archive.close()
     event = json.loads((tmp_path / f"futu-events-{run_id}.jsonl").read_text())
@@ -309,9 +310,18 @@ def test_replaced_and_restored_during_verification_fails(tmp_path):
     manifest = archive.close()
     segment = Path(manifest["files"][0]["file"])
     original = segment.read_bytes()
+    original_stat = segment.stat()
+    records = []
 
-    def replace(_record):
+    def replace(record):
+        import os
+        records.append(record)
         segment.write_bytes(b"adversarial replacement\n")
         segment.write_bytes(original)
+        # tmpfs may assign both writes the same timestamp as the initial file.
+        # Make the metadata-change premise explicit and deterministic.
+        os.utime(segment, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 1_000_000_000))
 
     assert verify(Path(manifest["manifest"]), on_record=replace)["status"] == "failed"
+    assert records == [json.loads(original)]
+    assert segment.read_bytes() == original

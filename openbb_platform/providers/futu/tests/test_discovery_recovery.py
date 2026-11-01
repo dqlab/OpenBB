@@ -1,18 +1,37 @@
 """Offline evidence, bounded discovery and interrupted segment checks."""
 
+import io
 import json
+from functools import cached_property
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+from openbb_futu import coordination
 from openbb_futu.archive import recover_open_files
 from openbb_futu.contracts import plan
 from openbb_futu.discovery import discover
+
+
+@pytest.fixture(autouse=True)
+def short_test_window(monkeypatch):
+    """Keep synthetic discovery fast without changing the production window."""
+    monkeypatch.setattr(coordination, "BUDGET_WINDOW", 0.02)
 
 
 class Response:
     """Synthetic HTTP response with an exact error body."""
 
     status_code = 403
+    headers = {}
+
+    @cached_property
+    def raw(self):
+        """Expose an undecoded byte stream like requests.Response.raw."""
+        class Raw(io.BytesIO):
+            def read(self, size=-1, decode_content=False):
+                return super().read(size)
+        return Raw(b"".join(self.iter_content(65536)))
 
     def iter_content(self, _size):
         """Handle iter content."""
@@ -91,7 +110,7 @@ def test_disk_failure_and_queue_full_are_reported(tmp_path, monkeypatch):
 
 
 def test_sealed_segment_sigkill_before_manifest(tmp_path):
-    """Kill a child after the real rename and verify run-scoped orphan evidence."""
+    """Kill a child after the real unlink and verify run-scoped orphan evidence."""
     import signal
     import subprocess
     import sys
@@ -101,12 +120,13 @@ import os
 import sys
 from pathlib import Path
 from openbb_futu.archive import Archive
-real_rename = os.rename
-def handshake(source, target, *args, **kwargs):
-    real_rename(source, target, *args, **kwargs)
-    print("sealed", flush=True)
-    sys.stdin.readline()
-os.rename = handshake
+real_unlink = os.unlink
+def handshake(path, *args, **kwargs):
+    real_unlink(path, *args, **kwargs)
+    if str(path).endswith(".jsonl.open"):
+        print("sealed", flush=True)
+        sys.stdin.readline()
+os.unlink = handshake
 archive = Archive(Path(sys.argv[1]), run_id="killed-run")
 assert archive.accept('{"type":"QUOTE","symbol":"US.AAPL","data":{}}', "conn")
 archive.close()
@@ -134,7 +154,7 @@ archive.close()
         assert report["run_ids"] == ["killed-run"]
         assert report["gap"] == "unresolved_after_process_interruption"
         assert sealed[0].read_bytes() == before
-        assert Path(report["evidence_dir"], "recovery.json").exists()
+        assert Path(report["evidence_dir"], "recovery-unknown-v2.json").exists()
     finally:
         if child.poll() is None:
             child.kill()

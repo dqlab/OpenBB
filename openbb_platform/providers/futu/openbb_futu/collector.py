@@ -9,9 +9,11 @@ import json
 import logging
 import math
 import os
+import re
 import signal
 import stat
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -19,10 +21,13 @@ from pathlib import Path
 
 from websockets.asyncio import client as websocket_client
 
-from openbb_futu.archive import Archive, recover_open_files
+from openbb_futu.archive import Archive, SealedSegmentError, recover_open_files
 from openbb_futu.client import FutuError, refresh_tokens
 from openbb_futu.coordination import Owner, coordination_directory
-from openbb_futu.coverage import prepare, report, write_json
+from openbb_futu.coverage import _report, prepare, report, write_json
+from openbb_futu.directory_chain import DirectoryChain
+from openbb_futu.read_budget import Budget
+from openbb_futu.root_handle import PublicationDurabilityUnknown, RootHandle
 from openbb_futu.ws import URL
 
 
@@ -73,6 +78,10 @@ class TokenStore:
 
     def rotate(self, owner):
         """Handle rotate."""
+        with RootHandle(self.path.parent):
+            return self._rotate_private(owner)
+
+    def _rotate_private(self, owner):
         obj = self.read()
         fd = os.open(
             self.marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
@@ -119,6 +128,67 @@ class CollectorLifecycle:
     failure: str | None = None
 
 
+class _EventLog:
+    """Exclusive per-run event stream; a failed append permanently poisons it."""
+
+    def __init__(self, root, run_id):
+        self.chain = DirectoryChain(root, [])
+        self.name = f"futu-events-{run_id}.jsonl"
+        self.fd = None
+        self.failed = False
+        self.lock = threading.Lock()
+        try:
+            self.chain.check()
+            self.fd = os.open(self.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                              os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600,
+                              dir_fd=self.chain.fd)
+            info = os.fstat(self.fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("event log is not regular")
+            self.identity = (info.st_dev, info.st_ino)
+            self._check()
+            os.fsync(self.chain.fd)
+            self._check()
+        except BaseException:
+            self.close()
+            raise
+
+    def _check(self):
+        self.chain.check()
+        info = os.stat(self.name, dir_fd=self.chain.fd, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != self.identity:
+            raise OSError("event log replaced")
+
+    def append(self, record):
+        data = (json.dumps(record, allow_nan=False) + "\n").encode("utf-8")
+        with self.lock:
+            if self.failed or self.fd is None:
+                raise RuntimeError("event log unavailable")
+            try:
+                self._check()
+                view = memoryview(data)
+                while view:
+                    written = os.write(self.fd, view)
+                    if written <= 0:
+                        raise OSError("short event write")
+                    view = view[written:]
+                self._check()
+                os.fsync(self.fd)
+                self._check()
+            except BaseException:
+                self.failed = True
+                raise
+
+    def close(self):
+        with self.lock:
+            try:
+                if self.fd is not None:
+                    os.close(self.fd)
+                    self.fd = None
+            finally:
+                self.chain.close()
+
+
 class Collector:
     """Handle Collector."""
 
@@ -132,15 +202,34 @@ class Collector:
         self.gap = False
         self.logfile = None
         self.lifecycle = CollectorLifecycle()
+        self._test_isolated = False
+
+    @classmethod
+    def _isolated_for_test(cls, *args, **kwargs):
+        """Enable the unfinished storage lifecycle for isolated tests only."""
+        obj = cls(*args, **kwargs)
+        obj._test_isolated = True
+        return obj
 
     def event(self, kind, **fields):
         """Handle event."""
         record = {"time": time.time(), "event": kind, **fields}
         if self.logfile is None:
             raise RuntimeError("event log is not open")
-        self.logfile.write(json.dumps(record) + "\n")
-        self.logfile.flush()
-        os.fsync(self.logfile.fileno())
+        self.logfile.append(record)
+
+    def _event_path(self, path, directory, suffix):
+        """Return only a generated, root-relative evidence identifier."""
+        if path is None:
+            return None
+        try:
+            relative = Path(os.path.abspath(path)).relative_to(
+                Path(os.path.abspath(self.root))
+            ).as_posix()
+        except (ValueError, TypeError):
+            return None
+        pattern = rf"{directory}/[0-9a-f]{{32}}{suffix}"
+        return relative if re.fullmatch(pattern, relative) else None
 
     def set_mode(self, mode):
         """Persist lifecycle transitions without recording credentials."""
@@ -242,7 +331,7 @@ class Collector:
         if token["expires_at"] <= time.time() + margin:
             token = await asyncio.to_thread(self.store.rotate, owner)
         self.archive.add_secrets(
-            (token["access_token"], token["refresh_token"], token["client_id"])
+            (token["access_token"], token["refresh_token"], token.get("client_secret", ""))
         )
         quiet_logger = logging.Logger(
             "futu.websocket.suppressed", level=logging.CRITICAL + 1
@@ -334,7 +423,7 @@ class Collector:
                                 (
                                     token["access_token"],
                                     token["refresh_token"],
-                                    token["client_id"],
+                                    token.get("client_secret", ""),
                                 )
                             )
                         await self.command(
@@ -365,31 +454,73 @@ class Collector:
                     reader.cancel()
                 await asyncio.gather(reader, return_exceptions=True)
 
-    async def run(self):
+    async def run(self):  # noqa: PLR0912
         """Handle run."""
+        root_handle = None
         try:
-            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-            event_fd = os.open(
-                self.root / ("futu-events-" + self.run_id + ".jsonl"),
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND,
-                0o600,
-            )
-            self.logfile = os.fdopen(event_fd, "w", encoding="utf-8")
+            root_handle = RootHandle.create(self.root)
+            self.logfile = _EventLog(root_handle, self.run_id)
             with Owner(coordination_directory()) as owner:
-                if "dimensions" in self.config:
-                    planned, self.config["channels"] = prepare(self.config)
-                    write_json(self.root / f"futu-plan-{self.run_id}.json", planned)
-                    for previous in self.root.glob("futu-plan-*.json"):
-                        previous_id = previous.stem.removeprefix("futu-plan-")
-                        if previous_id != self.run_id:
-                            report(self.root, previous_id)
-                    self.event("plan_created", selected=len(planned["selected"]))
-                for recovery in recover_open_files(self.root):
+                delay = max(0.0, owner._acquired_at + owner.budget().window - time.monotonic())
+                if delay:
+                    try:
+                        await asyncio.wait_for(self.stop.wait(), timeout=delay)
+                    except asyncio.TimeoutError:
+                        pass
+                    else:
+                        raise FutuError("stopped_during_cooldown")
+                def recovery_unresolved():
+                    self.lifecycle.failure = "recovery_unresolved"
+                    self.event("recovery_unresolved", gap="unresolved")
+
+                for recovery in recover_open_files(
+                    self.root, root_handle=root_handle, on_unresolved=recovery_unresolved
+                ):
+                    self.lifecycle.failure = self.lifecycle.failure or "recovery_unresolved"
                     self.event(
                         "interrupted_segment",
-                        evidence_dir=recovery["evidence_dir"],
+                        evidence_dir=self._event_path(recovery["evidence_dir"], "futu-recovery", ""),
                         gap="unresolved",
+                        error=recovery["error"],
                     )
+                if self.lifecycle.failure == "recovery_unresolved":
+                    raise FutuError("recovery_unresolved")
+                if "dimensions" in self.config:
+                    report_root = root_handle
+                    report_budget = Budget()
+                    planned, self.config["channels"] = prepare(self.config, budget=report_budget, root_handle=report_root)
+                    snapshots = []
+                    for name in sorted(report_budget.entries_at(report_root)):
+                        if name.startswith("futu-plan-") and name.endswith(".json"):
+                            previous_id = name[len("futu-plan-"):-len(".json")]
+                            if previous_id != self.run_id:
+                                snapshots.append((previous_id, report_budget.read_identity_at(
+                                    report_root, name, max_bytes=8_388_608)))
+                    historical = []
+                    for previous_id, snapshot in snapshots:
+                        historical.append((previous_id, _report(
+                            self.root, previous_id, publish=False, budget=report_budget,
+                            root_handle=report_root, plan_snapshot=snapshot,
+                        )))
+                    for previous_id, snapshot in snapshots:
+                        report_budget.check_identity_at(
+                            report_root, f"futu-plan-{previous_id}.json", snapshot[1])
+                    self.event("historical_reports_publish_started", count=len(historical))
+                    for previous_id, reconstructed in historical:
+                        try:
+                            write_json(
+                                self.root / f"futu-coverage-{previous_id}.json",
+                                reconstructed, root_handle=report_root, replace=True,
+                            )
+                        except Exception as exc:
+                            self.event("historical_report_publish_failure", run_id=previous_id,
+                                       publication_status=("visible_durability_unknown" if isinstance(
+                                           exc, PublicationDurabilityUnknown) else "not_replaced"))
+                            raise
+                        self.event("historical_report_published", run_id=previous_id)
+                    self.event("historical_reports_publish_completed", count=len(historical))
+                    write_json(self.root / f"futu-plan-{self.run_id}.json", planned, root_handle=report_root)
+                    self.event("plan_created", selected=len(planned["selected"]))
                 self.archive = Archive(
                     self.root,
                     run_id=self.run_id,
@@ -432,7 +563,7 @@ class Collector:
                 result = await asyncio.to_thread(self.archive.close)
                 self.event(
                     "archive_closed",
-                    manifest=result.get("manifest"),
+                    manifest=self._event_path(result.get("manifest"), "futu-manifests", r"\.json"),
                     error=result["error"],
                     durable=result["durable_seq"],
                 )
@@ -443,28 +574,43 @@ class Collector:
                     "stopped", status="failed" if self.lifecycle.failure else "stopped"
                 )
                 if "dimensions" in self.config:
-                    report(self.root, self.run_id)
+                    outcome = report(self.root, self.run_id, budget=report_budget, root_handle=root_handle)
+                    if outcome.get("budget_or_input_error"):
+                        self.lifecycle.failure = self.lifecycle.failure or "coverage_report_failure"
+                        self.event("coverage_report_failure", publication_status=outcome.get(
+                            "publication_status", "not_replaced"))
+                        self.event("stopped", status="failed")
                 self.lifecycle.finalized = True
         except Exception as exc:
-            self.lifecycle.failure = (
-                exc.category if isinstance(exc, FutuError) else "collector_failure"
+            self.lifecycle.failure = self.lifecycle.failure or (
+                exc.category if isinstance(exc, (FutuError, SealedSegmentError)) else "collector_failure"
             )
             self.lifecycle.fatal_errno = exc.errno if isinstance(exc, OSError) else None
             with contextlib.suppress(Exception):
-                self.event("fatal", category=self.lifecycle.failure)
+                fields = {}
+                if isinstance(exc, SealedSegmentError):
+                    fields = {"relative_path": exc.relative_path, "reason": exc.reason}
+                self.event("fatal", category=self.lifecycle.failure, **fields)
         finally:
+            if self.archive is not None and not self.lifecycle.finalized:
+                self.archive.error = self.archive.error or "collector_failure"
+                try:
+                    await asyncio.to_thread(self.archive.close)
+                except Exception:
+                    self.lifecycle.failure = self.lifecycle.failure or "archive_failure"
             try:
-                if not self.lifecycle.finalized:
-                    self.event(
-                        "stopped",
-                        status="failed" if self.lifecycle.failure else "stopped",
-                    )
-                if self.logfile is not None:
-                    self.logfile.close()
+                if not self.lifecycle.finalized and self.logfile is not None:
+                    self.event("stopped", status="failed" if self.lifecycle.failure else "stopped")
             except Exception:
-                self.lifecycle.failure = (
-                    self.lifecycle.failure or "status_write_failure"
-                )
+                self.lifecycle.failure = self.lifecycle.failure or "status_write_failure"
+            finally:
+                if self.logfile is not None:
+                    try:
+                        self.logfile.close()
+                    except Exception:
+                        self.lifecycle.failure = self.lifecycle.failure or "status_write_failure"
+            if root_handle is not None:
+                root_handle.close()
             if self.lifecycle.failure:
                 detail = ""
                 if self.lifecycle.fatal_errno is not None:

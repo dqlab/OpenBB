@@ -4,6 +4,7 @@ import http.client
 import json
 import os
 import re
+import time
 import uuid
 import zlib
 from dataclasses import dataclass, field
@@ -15,7 +16,7 @@ from urllib.parse import urlparse
 import requests
 from openbb_core.provider.utils.helpers import make_request
 
-from openbb_futu.coordination import Owner, RequestBudget, coordination_directory
+from openbb_futu.coordination import Owner, coordination_directory
 
 BASE = "https://webapi.futunn.com"
 
@@ -70,24 +71,34 @@ class OAuthTokens:
         return "OAuthTokens(<redacted>)"
 
 
+def _reserve(owner, *, wait_for_cooldown=False):
+    """Wait only for a newly acquired owner; report exhausted shared budgets."""
+    if wait_for_cooldown:
+        delay = owner._acquired_at + owner.budget().window - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+    if owner.budget().acquire() > 0:
+        raise FutuError("local_budget_exhausted")
+
+
 def _post(path: str, *, owner: Owner | None = None, **kwargs: Any) -> dict:
     if http.client.HTTPConnection.debuglevel or http.client.HTTPSConnection.debuglevel:
         raise FutuError("unsafe_http_debug")
     directory = coordination_directory()
     try:
-        with owner.borrow(directory) if owner else Owner(directory):
-            if RequestBudget(directory).acquire() > 0:
-                raise FutuError("local_budget_exhausted")
+        with (owner.borrow(directory) if owner else Owner(directory)) as active_owner, active_owner.borrow(directory):
+            _reserve(active_owner, wait_for_cooldown=owner is None)
             try:
-                response = make_request(
-                    _base() + path,
-                    method="POST",
-                    timeout=10,
-                    allow_redirects=False,
-                    **kwargs,
-                )
+                with requests.Session() as session:
+                    session.trust_env = False
+                    response = make_request(_base() + path, method="POST", timeout=10,
+                                            allow_redirects=False, session=session, **kwargs)
             except Exception:
                 raise FutuError("transport") from None
+            finally:
+                # The reservation must cover a delayed dispatch and the entire
+                # request while the owner's reentrant operation lock is held.
+                active_owner._requests[-1] = time.monotonic()
     except FutuError:
         raise
     except Exception:
@@ -139,14 +150,15 @@ def refresh_tokens(
         raise FutuError("authentication") from None
 
 
-def snapshot(symbols: list[str], access_token: str) -> list[dict]:
-    """Handle snapshot."""
+def snapshot(symbols: list[str], access_token: str, *, owner: Owner | None = None) -> list[dict]:
+    """Fetch a snapshot using the shared owner budget."""
     if not access_token:
         raise FutuError("not_configured")
     if not symbols or len(symbols) > 400 or len(set(symbols)) != len(symbols):
         raise ValueError("supply 1 to 400 distinct symbols")
     result = _post(
         "/api/v1.0/quote/snapshot",
+        owner=owner,
         headers={"Authorization": "Bearer " + access_token},
         json={"code_list": symbols},
     )
@@ -332,10 +344,14 @@ def _raw_snapshot_reserved(
                 return any(sensitive(v) for v in value)
             return isinstance(value, str) and (
                 bool(re.search(r"(?i)\bbearer\s+\S+", value))
-                or any(s and s in value for s in (access_token, *secrets))
+                or any(s and (value == s or (len(s) >= 8 and s in value))
+                       for s in (access_token, *secrets))
             )
 
-        if sensitive(obj):
+        if sensitive(obj) or any(
+            len(secret) >= 8 and secret.encode() in body
+            for secret in (access_token, *secrets) if secret
+        ):
             raise FutuError(
                 "sensitive_response",
                 request_id=request_id,
@@ -384,17 +400,16 @@ def raw_snapshot(
         raise FutuError("unsafe_http_debug")
     directory = coordination_directory()
     try:
-        with owner.borrow(directory) if owner else Owner(directory):
-            if RequestBudget(directory).acquire() > 0:
-                raise FutuError("local_budget_exhausted")
-            return _raw_snapshot_reserved(
-                symbols,
-                access_token,
-                timeout=timeout,
-                max_bytes=max_bytes,
-                secrets=secrets,
-                request=(uuid.uuid4().hex, datetime.now(timezone.utc).isoformat()),
-            )
+        with (owner.borrow(directory) if owner else Owner(directory)) as active_owner, active_owner.borrow(directory):
+            _reserve(active_owner, wait_for_cooldown=owner is None)
+            try:
+                return _raw_snapshot_reserved(
+                    symbols, access_token, timeout=timeout, max_bytes=max_bytes,
+                    secrets=secrets,
+                    request=(uuid.uuid4().hex, datetime.now(timezone.utc).isoformat()),
+                )
+            finally:
+                active_owner._requests[-1] = time.monotonic()
     except FutuError:
         raise
     except Exception:

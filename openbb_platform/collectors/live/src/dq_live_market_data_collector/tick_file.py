@@ -11,6 +11,8 @@ import json
 import math
 import os
 import queue
+import re
+import stat
 import sys
 import threading
 import time
@@ -142,6 +144,9 @@ class TickWriter:
     """Single-owner exclusive append segments; callers serialize all access.
 
     Limit changes take effect at the next append, including for an open segment.
+    An optional directory_chain_factory(parts, create=True) supplies a held
+    chain with fd, check() and close(). Its root must outlive the writer.
+    Identity checks detect replacement but cannot make moves atomic with I/O.
     """
 
     def __init__(
@@ -150,6 +155,8 @@ class TickWriter:
         source_id: str,
         max_bytes: int = 256 * 1024 * 1024,
         max_seconds: float = 3600,
+        *,
+        directory_chain_factory=None,
     ):
         if not source_id or not all(
             c.isascii() and (c.isalnum() or c in "-_") for c in source_id
@@ -168,6 +175,9 @@ class TickWriter:
         self.date: str | None = None
         self.opened = 0.0
         self.written = self.durable = 0
+        self._chain_factory = directory_chain_factory
+        self._chain = None
+        self._identity = None
 
     @property
     def max_bytes(self) -> int:
@@ -192,6 +202,34 @@ class TickWriter:
         self.rotation = replace(self.rotation, max_seconds=value)
 
     def _open(self, date: str) -> None:
+        if self._chain_factory is not None:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+                raise ValueError("invalid received date")
+            parts = [f"source_id={self.source_id}", f"recv_date={date}",
+                     f"session={self.session_id}"]
+            chain = self._chain_factory(parts, create=True)
+            self._chain = chain
+            self.part += 1
+            self.path = self.root.joinpath(*parts, f"part-{self.part:06d}.jsonl.open")
+            try:
+                chain.check()
+                fd = os.open(self.path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=chain.fd)
+                self.stream = os.fdopen(fd, "wb", buffering=0)
+                info = os.fstat(self.stream.fileno())
+                self._identity = (info.st_dev, info.st_ino)
+                chain.check()
+                os.fsync(chain.fd)
+                chain.check()
+                self.date, self.opened = date, time.monotonic()
+            except BaseException:
+                if self.stream is not None:
+                    self.stream.close()
+                    self.stream = None
+                chain.close()
+                self._chain = None
+                raise
+            return
         directory = (
             self.root
             / f"source_id={self.source_id}"
@@ -220,18 +258,62 @@ class TickWriter:
         ):
             self.seal()
         if self.stream is None:
+            if self._chain is not None:
+                raise RuntimeError("segment sealing incomplete")
             self._open(date)
         assert self.stream is not None
-        self.stream.write(encoded)
+        if self._chain is not None:
+            remaining = memoryview(encoded)
+            while remaining:
+                self._check_anchored_file()
+                count = self.stream.write(remaining)
+                if not count:
+                    raise OSError("short segment write")
+                remaining = remaining[count:]
+            self._check_anchored_file()
+        else:
+            self.stream.write(encoded)
         self.written = record["local_seq"]
 
     def sync(self) -> None:
         if self.stream:
+            if self._chain is not None:
+                self._check_anchored_file()
             self.stream.flush()
             os.fsync(self.stream.fileno())
+            if self._chain is not None:
+                self._check_anchored_file()
             self.durable = self.written
 
+    def _check_anchored_file(self) -> None:
+        assert self._chain is not None and self.path is not None
+        self._chain.check()
+        info = os.stat(self.path.name, dir_fd=self._chain.fd, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != self._identity:
+            raise OSError("open segment replaced")
+
     def seal(self) -> None:
+        if self._chain is not None:
+            if self.stream:
+                self.sync()
+                self._check_anchored_file()
+                self.stream.close()
+                self.stream = None
+            self._check_anchored_file()
+            assert self.path is not None
+            target = self.path.with_suffix("")
+            os.link(self.path.name, target.name, src_dir_fd=self._chain.fd,
+                    dst_dir_fd=self._chain.fd, follow_symlinks=False)
+            self._chain.check()
+            os.fsync(self._chain.fd)
+            self._check_anchored_file()
+            os.unlink(self.path.name, dir_fd=self._chain.fd)
+            os.fsync(self._chain.fd)
+            self._chain.check()
+            self.path = target
+            self._chain.close()
+            self._chain = None
+            return
         if self.stream:
             self.sync()
             self.stream.close()
@@ -243,6 +325,20 @@ class TickWriter:
             self.path = target
 
     close = seal
+
+    def abort(self) -> None:
+        """Release held descriptors without sealing or removing evidence.
+
+        Use after a failed write or sync when retrying publication is unsafe.
+        """
+        try:
+            if self.stream is not None:
+                self.stream.close()
+        finally:
+            self.stream = None
+            if self._chain is not None:
+                self._chain.close()
+                self._chain = None
 
 
 class TickIngress:

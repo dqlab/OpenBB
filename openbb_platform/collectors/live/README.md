@@ -161,3 +161,13 @@ Positive limits are checked before the next append, including against an open
 segment; changing a limit does not immediately seal it. Callers must serialize
 all access to a writer, including limit changes, with appends and sealing.
 Nonpositive assignments raise `ValueError` and leave the previous limit intact.
+
+Callers may opt into descriptor-anchored segments with the keyword-only
+`directory_chain_factory`. It receives path components and `create=True` and
+returns a held chain exposing `fd`, `check()` and `close()`. The caller keeps
+the underlying root handle alive through sealing. Segment creation is exclusive;
+sealing publishes without overwriting an existing target. Errors can leave open
+or already-published evidence for inspection. Checks detect replaced directory
+bindings but cannot make a concurrent directory move atomic with file I/O, so
+this interface alone does not guarantee confinement against concurrent moves.
+The default writer behavior is unchanged.

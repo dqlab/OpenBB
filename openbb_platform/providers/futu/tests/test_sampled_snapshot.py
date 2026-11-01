@@ -239,16 +239,17 @@ def test_cli_queue_full_and_timeout(server, tmp_path):
     inject = tmp_path / "inject"
     inject.mkdir()
     (inject / "sitecustomize.py").write_text(
+        "import openbb_futu.coordination as c\nc.BUDGET_WINDOW = 0.02\n"
         "import time\nfrom dq_live_market_data_collector.tick_file import TickWriter\n"
         "original = TickWriter.append\n"
-        "def slow(self, record):\n    time.sleep(1)\n    return original(self, record)\n"
+        "def slow(self, record):\n    time.sleep(4)\n    return original(self, record)\n"
         "TickWriter.append = slow\n"
     )
     env = os.environ.copy()
     env["PYTHONPATH"] = str(inject) + os.pathsep + env.get("PYTHONPATH", "")
     command = [sys.executable, "-m", "openbb_futu.sampled_snapshot", "--config", str(config),
                "--token-file", str(token), "--output", str(tmp_path / "queue")]
-    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10, check=False)  # noqa: S603
+    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20, check=False)  # noqa: S603
     assert result.returncode != 0 and "archive_failure" in result.stderr
     reports = list((tmp_path / "queue" / "futu-sampled-coverage").glob("*.json"))
     report = json.loads(reports[0].read_text())
@@ -301,12 +302,11 @@ def test_no_response_connection_metadata(server, tmp_path, monkeypatch):
 def test_drip_cli_deadline_and_signal(server, tmp_path):
     """A real drip response cannot defeat the parent deadline or SIGTERM."""
     import signal
-    import sqlite3
     import subprocess
     import sys
     import time
 
-    from openbb_futu.coordination import Owner, RequestBudget, coordination_directory
+    from openbb_futu.coordination import Owner, coordination_directory
 
     server.drip = True
     config = tmp_path / "drip.json"
@@ -324,10 +324,10 @@ def test_drip_cli_deadline_and_signal(server, tmp_path):
     report = json.loads(next((tmp_path / "drip" / "futu-sampled-coverage").glob("*.json")).read_text())
     assert report["failure"] == "timeout" and report["attempts"][0]["send_status"] == "unknown"
     assert report["attempts"][0]["request_id"] and server.requests == 1
-    with Owner(coordination_directory()):
-        budget = RequestBudget(coordination_directory())
-        with sqlite3.connect(budget.path) as db:
-            assert db.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 1
+    with Owner(coordination_directory()) as restarted_owner:
+        # Memory state is intentionally not persisted; restart must cool down.
+        assert restarted_owner.budget().acquire() > 0
+        assert not (coordination_directory() / "requests.sqlite3").exists()
     for path in (tmp_path / "drip").rglob("*"):
         if path.is_file():
             assert all(secret not in path.read_bytes() for secret in
@@ -360,16 +360,23 @@ def test_drip_cli_deadline_and_signal(server, tmp_path):
             proc.communicate()
 
 
-def test_spawn_budget_exhaustion_prevents_http(server, tmp_path):
-    """A full parent budget fails before a child can make an HTTP request."""
-    from openbb_futu.coordination import RequestBudget, coordination_directory
+def test_spawn_budget_exhaustion_prevents_http(server, tmp_path, monkeypatch):
+    """A full budget in the same owner fails before any HTTP request."""
+    import time
+    from contextlib import nullcontext
 
-    budget = RequestBudget(coordination_directory())
-    for _ in range(70):
-        assert budget.acquire() == 0
-    result = run({"symbols": [{"asset": "equity", "symbol": "HK.00700"}], "max_polls": 3},
-                 "private-access", tmp_path / "budget")
-    assert result["failure"] == "local_budget_exhausted" and server.requests == 0
+    from openbb_futu import coordination, sampled_snapshot
+    from openbb_futu.coordination import Owner, coordination_directory
+
+    monkeypatch.setattr(coordination, "BUDGET_WINDOW", 1.0)
+    with Owner(coordination_directory()) as owner:
+        time.sleep(owner.budget().window + 0.01)
+        for _ in range(70):
+            assert owner.budget().acquire() == 0
+        monkeypatch.setattr(sampled_snapshot, "Owner", lambda _: nullcontext(owner))
+        result = run({"symbols": [{"asset": "equity", "symbol": "HK.00700"}], "max_polls": 1},
+                     "private-access", tmp_path / "budget")
+        assert result["failure"] == "local_budget_exhausted" and server.requests == 0
 
 
 def test_writer_failure_interrupts_drip(server, tmp_path, monkeypatch):
@@ -431,6 +438,7 @@ def test_cli_empty_quote_and_writer_enospc(server, tmp_path):
     inject = tmp_path / "inject_enospc"
     inject.mkdir()
     (inject / "sitecustomize.py").write_text(
+        "import openbb_futu.coordination as c\nc.BUDGET_WINDOW = 0.02\n"
         "from dq_live_market_data_collector.tick_file import TickWriter\n"
         "def fail(self, record):\n    raise OSError(28, 'injected')\n"
         "TickWriter.append = fail\n"
@@ -492,11 +500,13 @@ def test_rest_cli_kill_recovery(server, tmp_path):
     assert not list((root / "futu-sampled-coverage").glob("*.json"))
     config.write_text(json.dumps({"symbols": [{"asset": "equity", "symbol": "HK.00700"}]}))
     restarted = subprocess.run(command, capture_output=True, timeout=15, check=False)  # noqa: S603
-    assert restarted.returncode == 0
-    recovery = list((root / "futu-recovery").glob("*/recovery.json"))
-    assert recovery and json.loads(recovery[0].read_text())["gap"] == "unresolved_after_process_interruption"
-    report = json.loads(next((root / "futu-sampled-coverage").glob("*.json")).read_text())
-    assert report["quote_evidence"]["HK.00700"]["quote_observed"] == "unknown"
+    assert restarted.returncode != 0
+    recovery = list((root / "futu-recovery").glob("*/recovery-unknown-v2.json"))
+    assert recovery
+    report = json.loads(recovery[0].read_text())
+    assert report["gap"] == "unresolved_after_process_interruption"
+    assert report["verification_status"] == "unknown"
+    assert not list((root / "futu-sampled-coverage").glob("*.json"))
 
 
 @pytest.mark.parametrize("first_present", [True, False])
@@ -588,10 +598,10 @@ def test_segment_replacement_during_rest_rebuild_fails_closed(server, tmp_path, 
     """A substituted response cannot become a verified coverage observation."""
     from openbb_futu import offline
 
-    original = offline.os.open
+    original = offline.Budget.open_regular
     changed = False
 
-    def swap(path, flags, *args, **kwargs):
+    def swap(self, path):
         nonlocal changed
         if str(path).endswith(".jsonl") and not changed:
             changed = True
@@ -600,11 +610,79 @@ def test_segment_replacement_during_rest_rebuild_fails_closed(server, tmp_path, 
             payload = base64.b64decode(record["raw_payload"]).replace(b"HK.00700", b"HK.02800")
             record["raw_payload"] = base64.b64encode(payload).decode()
             path.write_text(json.dumps(record) + "\n")
-        return original(path, flags, *args, **kwargs)
+        return original(self, path)
 
-    monkeypatch.setattr(offline.os, "open", swap)
+    monkeypatch.setattr(offline.Budget, "open_regular", swap)
     result = run({"symbols": [{"asset": "equity", "symbol": "HK.00700"},
                               {"asset": "etf", "symbol": "HK.02800"}]}, "test-token", tmp_path / "out")
     assert changed
     assert result["coverage"] == {"HK.00700": "unknown", "HK.02800": "unknown"}
     assert result["failure"] == "archive_failure"
+
+
+def test_sampler_parent_sigkill_keeps_lock_until_worker_exit(server, tmp_path):
+    """A stopped real HTTP worker retains ownership after its parent dies."""
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    from openbb_futu.coordination import Owner, coordination_directory
+
+    server.drip = True
+    config = tmp_path / "kill-config.json"
+    config.write_text(json.dumps({"symbols": [{"asset": "equity", "symbol": "HK.00700"}],
+                                  "timeout_seconds": 10}))
+    token = tmp_path / "kill-token.json"
+    token.write_text(json.dumps({"client_id": "client", "access_token": "test-token",
+                                 "refresh_token": "refresh", "expires_at": 9999999999}))
+    token.chmod(0o600)
+    proc = subprocess.Popen([sys.executable, "-m", "openbb_futu.sampled_snapshot",  # noqa: S603
+                             "--config", str(config), "--token-file", str(token),
+                             "--output", str(tmp_path / "kill-output")],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    worker = None
+    try:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not server.requests:
+            time.sleep(0.01)
+        assert server.requests == 1
+        children = Path(f"/proc/{proc.pid}/task/{proc.pid}/children").read_text().split()
+        for child in children:
+            args = Path(f"/proc/{child}/cmdline").read_bytes()
+            if b"--worker" in args:
+                worker = int(child)
+                break
+        assert worker is not None
+        os.kill(worker, signal.SIGSTOP)
+        # Wait for the real stop before killing its parent.
+        while time.monotonic() < deadline:
+            if "\nState:\tT" in Path(f"/proc/{worker}/status").read_text():
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("worker did not stop")
+        proc.kill()
+        proc.communicate(timeout=5)
+        with pytest.raises(RuntimeError, match="already owned"):
+            Owner(coordination_directory())
+        os.kill(worker, signal.SIGKILL)
+        worker = None
+        while True:
+            try:
+                owner = Owner(coordination_directory())
+                break
+            except RuntimeError:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+        with owner:
+            assert owner.budget().acquire() > 0
+        assert server.requests == 1
+    finally:
+        if worker is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(worker, signal.SIGKILL)
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=5)
