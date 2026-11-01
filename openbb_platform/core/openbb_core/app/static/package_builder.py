@@ -1,6 +1,7 @@
 """Package Builder Class."""
 
 # pylint: disable=too-many-lines,too-many-locals,too-many-nested-blocks,too-many-statements,too-many-branches,too-many-positional-arguments,protected-access
+import ast
 import builtins
 import contextlib
 import inspect
@@ -9,11 +10,11 @@ import re
 import shutil
 import signal
 import sys
-import textwrap
 import traceback
 import typing as typing_module
 from collections import OrderedDict
 from collections.abc import Callable
+from copy import deepcopy
 from inspect import Parameter, _empty, isclass, signature
 from json import dumps, load
 from pathlib import Path
@@ -92,6 +93,106 @@ TAB = "    "
 def create_indent(n: int) -> str:
     """Create n indentation space."""
     return TAB * n
+
+
+def _normalize_annotation_types(source: str) -> str:
+    """Normalize qualified typing containers only within parsed annotations."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+    lines = source.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+
+    def position(line: int, byte_column: int) -> int:
+        prefix = lines[line - 1].encode("utf-8")[:byte_column].decode("utf-8")
+        return offsets[line - 1] + len(prefix)
+
+    # A local or module binding may make ``typing`` something else.
+    if any(
+        isinstance(node, ast.Name)
+        and node.id == "typing"
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+        or isinstance(node, ast.arg)
+        and node.arg == "typing"
+        for node in ast.walk(tree)
+    ):
+        return source
+
+    edits = []
+    annotations = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.arg, ast.AnnAssign)) and node.annotation:
+            annotations.append(node.annotation)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns:
+            annotations.append(node.returns)
+    for annotation in annotations:
+        nodes = [annotation]
+        while nodes:
+            node = nodes.pop()
+            if isinstance(node, ast.Call):
+                continue
+            if (
+                isinstance(node, ast.Subscript)
+                and (
+                    isinstance(node.value, ast.Name)
+                    and node.value.id == "Annotated"
+                    or isinstance(node.value, ast.Attribute)
+                    and node.value.attr == "Annotated"
+                )
+                and isinstance(node.slice, ast.Tuple)
+            ):
+                nodes.extend((node.value, node.slice.elts[0]))
+            else:
+                nodes.extend(ast.iter_child_nodes(node))
+            if isinstance(node, ast.Name) and node.id == "NoneType":
+                edits.append(
+                    (position(node.lineno, node.col_offset), position(node.end_lineno, node.end_col_offset), "None")
+                )
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "typing"
+                and node.attr in {"List", "Dict", "Any"}
+            ):
+                edits.append(
+                    (
+                        position(node.lineno, node.col_offset),
+                        position(node.end_lineno, node.end_col_offset),
+                        node.attr if node.attr == "Any" else node.attr.lower(),
+                    )
+                )
+    for start, end, replacement in sorted(set(edits), reverse=True):
+        source = source[:start] + replacement + source[end:]
+    return source
+
+
+def _format_annotation(annotation: Any) -> str:
+    """Render an annotation while changing only parsed type identifiers."""
+    if hasattr(annotation, "__forward_arg__"):
+        return annotation.__forward_arg__
+    if annotation is Parameter.empty:
+        return "Any"
+    if isinstance(annotation, type):
+        return "None" if annotation is type(None) else annotation.__name__
+    source = str(annotation)
+    try:
+        tree = ast.parse(source, mode="eval")
+    except SyntaxError:
+        return source
+    edits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "typing":
+            edits.append((node.col_offset, node.end_col_offset, node.attr))
+        elif isinstance(node, ast.Name) and node.id == "NoneType":
+            edits.append((node.col_offset, node.end_col_offset, "None"))
+    # AST offsets are UTF-8 bytes, including when literal values contain Unicode.
+    encoded = source.encode("utf-8")
+    for start, end, replacement in sorted(edits, reverse=True):
+        encoded = encoded[:start] + replacement.encode() + encoded[end:]
+    return encoded.decode("utf-8")
 
 
 class FileLock:
@@ -326,7 +427,9 @@ class PackageBuilder:
         self.console.log(str(package_path))
 
         with package_path.open("w", encoding="utf-8", newline="\n") as file:
-            file.write(code.replace("typing.", "").replace("List", "list"))
+            file.write(
+                code if extension == "json" else _normalize_annotation_types(code)
+            )
 
     @staticmethod
     def _read(path: Path) -> dict:
@@ -594,7 +697,7 @@ class ImportDefinition:
         code += "\nfrom pydantic import BaseModel"
         code += "\nfrom inspect import Parameter"
         code += "\nimport typing"
-        code += "\nfrom typing import TYPE_CHECKING, Annotated, ForwardRef, Union, Optional, Literal, Any"
+        code += "\nfrom typing import TYPE_CHECKING, Annotated, ForwardRef, Union, Optional, Literal, Any, List, Dict"
         code += "\nfrom annotated_types import Ge, Le, Gt, Lt"
         code += "\nfrom warnings import warn, simplefilter"
         code += "\nfrom openbb_core.app.static.utils.decorators import exception_handler, validate\n"
@@ -633,11 +736,7 @@ class ImportDefinition:
                         "__name__",
                         str(hint_type).rsplit(".", maxsplit=1)[-1],
                     )
-                    type_name = (
-                        raw_type_name.split("[")[0]
-                        if "[" in raw_type_name
-                        else raw_type_name
-                    )
+                    type_name = raw_type_name.split("[")[0] if "[" in raw_type_name else raw_type_name
 
                 type_name_str = str(type_name)
                 if type_name_str.startswith("typing.Optional"):
@@ -1608,18 +1707,19 @@ class MethodDefinition:
             desc_repr = repr(desc)
 
             if desc is None:
-                desc = ""
-            # For function signatures, use shorter max width to prevent line overflow
-            max_width = 50
-
-            if len(desc) <= max_width:
-                desc_repr = repr(desc)
-            else:
-                parts = textwrap.wrap(desc, width=max_width)
-                # For function signature context, don't add extra indentation
-                # The parameter will be properly indented by the calling context
-                joined = "\n                    ".join(f"{repr(p)}" for p in parts)
-                desc_repr = f"(\n                    {joined}" + "\n                )"
+                desc_repr = repr("")
+            elif isinstance(desc, str) and len(desc_repr) > 80:
+                # Adjacent literals preserve every character, including whitespace.
+                parts = []
+                chunk = ""
+                for char in desc:
+                    if chunk and len(repr(chunk + char)) > 80:
+                        parts.append(repr(chunk))
+                        chunk = ""
+                    chunk += char
+                if chunk:
+                    parts.append(repr(chunk))
+                desc_repr = "(\n                    " + "\n                    ".join(parts) + "\n                )"
 
             default_part = ""
 
@@ -1628,11 +1728,7 @@ class MethodDefinition:
                 if default_repr == "Ellipsis":
                     default_repr = "None"
                 default_part = f" = {default_repr}"
-            if (
-                "None" in default_part
-                and "| None" not in type_repr
-                and "Optional" not in type_repr
-            ):
+            if param.default is None and "| None" not in type_repr and "Optional" not in type_repr:
                 type_repr += " | None"
             final_param = f"""{param.name.strip()}: Annotated[
             {type_repr},
@@ -1646,19 +1742,9 @@ class MethodDefinition:
         params_list = [stringify_param(p) for p in formatted_params.values()]
         func_params = ",\n        ".join(params_list)
 
-        func_params = func_params.replace("NoneType", "None")
-        func_params = func_params.replace(
-            "pandas.core.frame.DataFrame", "pandas.DataFrame"
-        )
-        func_params = func_params.replace(
-            "openbb_core.provider.abstract.data.Data", "Data"
-        )
-        func_params = func_params.replace("ForwardRef('Data')", "Data")
-        func_params = func_params.replace("ForwardRef('DataFrame')", "DataFrame")
-        func_params = func_params.replace("ForwardRef('Series')", "Series")
-        func_params = func_params.replace("ForwardRef('ndarray')", "ndarray")
-        func_params = func_params.replace("Dict", "dict").replace("List", "list")
-        func_params = func_params.replace("typing.", "")
+        wrapped = f"def _generated({func_params}):\n    pass\n"
+        normalized = _normalize_annotation_types(wrapped)
+        func_params = normalized[len("def _generated(") : -len("):\n    pass\n")]
 
         return func_params
 
@@ -1985,27 +2071,22 @@ class MethodDefinition:
                             # Use type from param_dict if available, otherwise Any
                             if param_value in param_dict:
                                 param_type = param_dict[param_value][0]
-                                try:
-                                    # Try to evaluate the type
-                                    annotation = (
-                                        eval(  # noqa: S307  # pylint: disable=eval-used
-                                            param_type
-                                        )
-                                    )
-                                except (NameError, SyntaxError):
-                                    annotation = Any
+                                # Names are resolved from a fixed set, never executed.
+                                annotation = {
+                                    "str": str,
+                                    "int": int,
+                                    "float": float,
+                                    "bool": bool,
+                                    "list": list,
+                                    "dict": dict,
+                                    "tuple": tuple,
+                                    "set": set,
+                                }.get(param_type, Any)
 
-                                # Get default if available
                                 default_str = param_dict[param_value][1]
                                 try:
-                                    default = (
-                                        eval(  # noqa: S307  # pylint: disable=eval-used
-                                            default_str
-                                        )
-                                        if default_str
-                                        else None
-                                    )
-                                except (NameError, SyntaxError):
+                                    default = ast.literal_eval(default_str) if default_str else None
+                                except (ValueError, SyntaxError):
                                     default = None
                             else:
                                 annotation = Any
@@ -2090,81 +2171,10 @@ class DocstringGenerator:
         str
             String representation of the field type.
         """
-        is_optional = not is_required
-
-        try:
-            _type = field_type
-
-            # Unwrap ForwardRef to its inner string
-            if hasattr(_type, "__forward_arg__"):
-                _type = _type.__forward_arg__
-
-            if "BeforeValidator" in str(_type):
-                _type = "Optional[int]" if is_optional else "int"  # type: ignore
-
-            origin = get_origin(_type)
-            if origin is Union:
-                args = get_args(_type)
-                type_names = []
-                has_none = False
-                for arg in args:
-                    if arg is type(None):
-                        has_none = True
-                        continue
-                    if get_origin(arg) is Literal:
-                        continue
-                    type_name = str(arg)
-                    if hasattr(arg, "__name__"):
-                        type_name = arg.__name__
-                    type_name = (
-                        type_name.replace("typing.", "")
-                        .replace("pydantic.types.", "")
-                        .replace("datetime.datetime", "datetime")
-                        .replace("datetime.date", "date")
-                    )
-                    if "openbb_" in type_name:
-                        type_name = type_name.rsplit(".", 1)[-1]
-                    if type_name != "NoneType":
-                        type_names.append(type_name)
-
-                unique_types = sorted(list(set(type_names)))
-                if has_none:
-                    unique_types.append("None")
-                _type = " | ".join(unique_types)
-            else:
-                _type = (
-                    str(_type)
-                    .replace("<class '", "")
-                    .replace("'>", "")
-                    .replace("typing.", "")
-                    .replace("pydantic.types.", "")
-                    .replace("datetime.datetime", "datetime")
-                    .replace("datetime.date", "date")
-                    .replace("NoneType", "None")
-                    .replace(", None", "")
-                )
-
-            if "openbb_" in str(_type):
-                _type = (
-                    str(_type).split(".", maxsplit=1)[0].split("openbb_")[0]
-                    + str(_type).rsplit(".", maxsplit=1)[-1]
-                )
-
-            _type = (
-                f"Optional[{_type}]"
-                if is_optional
-                and "Optional" not in str(_type)
-                and " | " not in str(_type)
-                else _type
-            )
-
-            if target == "website":
-                _type = re.sub(r"Optional\[(.*)\]", r"\1", _type)
-
-            return _type
-
-        except TypeError:
-            return str(field_type)
+        rendered = _format_annotation(field_type)
+        if not is_required and target == "docstring" and type(None) not in get_args(field_type):
+            rendered = f"Optional[{rendered}]"
+        return rendered
 
     @staticmethod
     def get_OBBject_description(
@@ -3421,11 +3431,11 @@ class ReferenceGenerator:
             extra = {}
             choices = None
             if field in class_schema_extra:
-                extra = class_schema_extra[field].copy()
+                extra = deepcopy(class_schema_extra[field])
                 choices = extra.get("choices")
 
             # Then apply field-level schema extra (which takes precedence)
-            field_extra = field_info.json_schema_extra or {}
+            field_extra = deepcopy(field_info.json_schema_extra or {})
             extra.update(field_extra)
             if "choices" in field_extra:
                 choices = field_extra.pop("choices", [])
@@ -3436,15 +3446,6 @@ class ReferenceGenerator:
             # Determine the field type, expanding it if necessary
             field_type = field_info.annotation
             is_required = field_info.is_required()
-
-            origin = get_origin(field_type)
-            if origin is Union:
-                args = get_args(field_type)
-                non_none_types = [arg for arg in args if arg is not type(None)]
-                if non_none_types:
-                    field_type = non_none_types[0]
-                if type(None) in args:
-                    is_required = False
 
             # Then unwrap Annotated
             while get_origin(field_type) is Annotated:
@@ -3475,9 +3476,6 @@ class ReferenceGenerator:
                     else:
                         field_type_str = type_repr
 
-            if is_required is False and "| None" not in field_type_str:
-                field_type_str = f"{field_type_str} | None"
-
             # Handle case where field_type_str contains ", optional" suffix
             if ", optional" in field_type_str:
                 field_type_str = field_type_str.replace(", optional", "")
@@ -3504,16 +3502,13 @@ class ReferenceGenerator:
                         multiple_items = ", ".join(providers)
                         cleaned_description += f" for provider(s): {multiple_items}"
                     cleaned_description += "."
-                    field_type_str = f"{field_type_str} | list[{field_type_str}]"
             elif field in expanded_types:
                 expanded_type = DocstringGenerator.get_field_type(
                     expanded_types[field], is_required, "website"
                 )
                 field_type_str = f"{field_type_str} | {expanded_type}"
 
-            default_value = (
-                None if field_info.default is PydanticUndefined else field_info.default
-            )
+            default_value = None if field_info.default is PydanticUndefined else field_info.default
             if default_value == "":
                 default_value = None
 
@@ -3763,9 +3758,7 @@ class ReferenceGenerator:
                     continue
 
             param_type = param.annotation
-            is_optional = (
-                param.default is not Parameter.empty
-            )  # Parameter is optional if it has a default value
+            is_optional = param.default is not Parameter.empty  # Parameter is optional if it has a default value
             description = ""
             choices = None
             default = param.default if param.default is not Parameter.empty else None
@@ -3795,10 +3788,12 @@ class ReferenceGenerator:
                         description = meta.description
                     if hasattr(meta, "choices"):
                         choices = meta.choices
-                    if hasattr(meta, "default"):
+                    if hasattr(meta, "default") and all(
+                        meta.default is not sentinel for sentinel in (PydanticUndefined, Parameter.empty, Ellipsis)
+                    ):
                         default = meta.default
                     if hasattr(meta, "json_schema_extra"):
-                        json_extra = meta.json_schema_extra
+                        json_extra = deepcopy(meta.json_schema_extra or {})
 
                 # Set the actual type to the base type
                 param_type = base_type
@@ -3807,13 +3802,9 @@ class ReferenceGenerator:
             if str(default.__class__).endswith("Query'>") or "Query" in str(
                 default.__class__
             ):
-                param_type = (
-                    param_type.annotation
-                    if hasattr(param_type, "annotation")
-                    else str(param_type)
-                )
+                param_type = param_type.annotation if hasattr(param_type, "annotation") else str(param_type)
                 description = default.description  # type: ignore
-                json_extra = default.json_schema_extra  # type: ignore
+                json_extra = deepcopy(default.json_schema_extra or {})  # type: ignore
                 has_default = hasattr(default, "default") and default.default not in [  # type: ignore
                     Parameter.empty,
                     PydanticUndefined,
@@ -3828,26 +3819,16 @@ class ReferenceGenerator:
                     else None
                 )
 
-            # Convert type to string representation
-            type_str = str(param_type)
-            # Clean up type string
-            type_str = (
-                type_str.replace("<class '", "")
-                .replace("'>", "")
-                .replace("typing.", "")
-                .replace("NoneType", "None")
-                .replace("inspect._empty", "Any")
-            )
+            type_str = _format_annotation(param_type)
             params_info.append(
                 {
                     "name": name,
                     "type": type_str,
-                    "description": ReferenceGenerator._clean_string_values(description),
+                    "description": description,
                     "default": (
                         None
                         if default in (PydanticUndefined, Parameter.empty, Ellipsis)
-                        else ReferenceGenerator._clean_string_values(default)
-                    ),
+                        else default),
                     "optional": is_optional,
                     "choices": choices or json_extra.pop("choices", []),
                     "multiple_items_allowed": json_extra.pop(
