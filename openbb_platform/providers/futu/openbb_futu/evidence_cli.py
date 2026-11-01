@@ -53,7 +53,7 @@ def main():
             )
             raise SystemExit(1) from None
         print(json.dumps(result, ensure_ascii=False))  # noqa: T201
-        raise SystemExit(1 if result["evidence_status"] == "failed" else 0)
+        raise SystemExit(1 if result["evidence_status"] in {"failed", "unknown"} else 0)
     token = TokenStore(args.token_file).read()
     seeds = json.loads(args.seeds.read_text(encoding="utf-8"))
     result = discover(

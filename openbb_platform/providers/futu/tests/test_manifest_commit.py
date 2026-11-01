@@ -3,6 +3,8 @@
 import errno
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -82,3 +84,150 @@ def test_legacy_manifest_and_failed_run(tmp_path):
     assert result["run_status"] == "failed"
     assert result["original_commit_status"] == "unknown"
     assert result["dimensions"][0]["synced_rows"] == 1
+
+
+@pytest.mark.parametrize("failure_first", [True, False])
+def test_other_session_failure_same_run(tmp_path, failure_first):
+    """A run failure is not scoped to whichever manifest happens to exist."""
+    run_id = "c" * 32
+    make_plan(tmp_path, run_id)
+    event = {"event": "manifest_commit_failed", "run_id": run_id, "session_id": "d" * 32}
+    event_path = tmp_path / f"futu-events-{run_id}.jsonl"
+    if failure_first:
+        event_path.write_text(json.dumps(event) + "\n")
+    Archive(tmp_path, run_id=run_id).close()
+    if not failure_first:
+        event_path.write_text(json.dumps(event) + "\n")
+    result = report(tmp_path, run_id, publish=False)
+    assert result["original_commit_status"] == "failed"
+    assert result["run_status"] == "failed"
+
+
+@pytest.mark.parametrize("event_run,session", [("e" * 32, "d" * 32), ("c" * 32, None)])
+def test_unattributed_failure_is_unknown(tmp_path, event_run, session):
+    """Unattributed failures cannot establish a run failure."""
+    run_id = "c" * 32
+    make_plan(tmp_path, run_id)
+    Archive(tmp_path, run_id=run_id).close()
+    event = {"event": "manifest_commit_failed", "run_id": event_run, "session_id": session}
+    (tmp_path / f"futu-events-{run_id}.jsonl").write_text(json.dumps(event) + "\n")
+    result = report(tmp_path, run_id, publish=False)
+    assert result["unattributed_commit_failure"]
+    assert result["evidence_status"] == "unknown"
+    assert result["original_commit_status"] == "unknown"
+    assert result["run_status"] == "unknown"
+
+
+@pytest.mark.parametrize("tail", [b'{"partial":\xff', b'{"event":"stopped"}'])
+def test_corrupt_tail_then_real_failure(tmp_path, monkeypatch, tail):
+    """A corrupt tail does not hide a later publish failure."""
+    run_id = "c" * 32
+    make_plan(tmp_path, run_id)
+    Archive(tmp_path, run_id=run_id).close()
+    event_path = tmp_path / f"futu-events-{run_id}.jsonl"
+    event_path.write_bytes(tail)
+    archive = Archive(tmp_path, run_id=run_id)
+    archive.stop.set()
+    archive.thread.join()
+    original = os.link
+
+    def fail(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "synthetic")
+
+    monkeypatch.setattr(os, "link", fail)
+    with pytest.raises(PermissionError):
+        archive.close()
+    monkeypatch.setattr(os, "link", original)
+    assert json.loads(event_path.read_bytes().splitlines()[-1])["event"] == "manifest_commit_failed"
+    result = report(tmp_path, run_id, publish=False)
+    assert result["event_log_status"] == "corrupt"
+    assert result["original_commit_status"] == "failed"
+    assert result["evidence_status"] == "unknown"
+    assert result["run_status"] == "failed"
+
+
+def test_unreadable_event_log_is_unknown(tmp_path, monkeypatch):
+    """Unreadable evidence remains unknown."""
+    run_id = "c" * 32
+    make_plan(tmp_path, run_id)
+    Archive(tmp_path, run_id=run_id).close()
+    event_path = tmp_path / f"futu-events-{run_id}.jsonl"
+    original = Path.open
+
+    def fail(path, *args, **kwargs):
+        if path == event_path:
+            raise PermissionError(errno.EACCES, "synthetic")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail)
+    result = report(tmp_path, run_id, publish=False)
+    assert result["event_log_status"] == "unreadable"
+    assert result["evidence_status"] == "unknown"
+    assert result["run_status"] == "unknown"
+
+
+def test_failure_event_write_denied_preserves_original_exception(tmp_path, monkeypatch):
+    """Preserve the original error when recording is denied."""
+    run_id = "c" * 32
+    make_plan(tmp_path, run_id)
+    Archive(tmp_path, run_id=run_id).close()
+    archive = Archive(tmp_path, run_id=run_id)
+    archive.stop.set()
+    archive.thread.join()
+    original_open = Path.open
+
+    def denied(path, *args, **kwargs):
+        if path.name.startswith("futu-events-") and args and args[0] == "a+b":
+            raise PermissionError(errno.EACCES, "event log denied")
+        return original_open(path, *args, **kwargs)
+
+    def fail(*args, **kwargs):
+        raise OSError(errno.EIO, "manifest publish failed")
+
+    monkeypatch.setattr(Path, "open", denied)
+    monkeypatch.setattr(os, "link", fail)
+    with pytest.raises(OSError) as exc:
+        archive.close()
+    assert exc.value.errno == errno.EIO
+    result = report(tmp_path, run_id, publish=False)
+    assert result["original_commit_status"] == "unknown"
+    assert result["event_log_status"] == "missing"
+    assert result["evidence_status"] == "unknown"
+
+
+def test_real_manifest_directory_permission_failure(tmp_path):
+    """An actual filesystem permission failure is recorded and propagated."""
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses directory permissions")
+    run_id = "f" * 32
+    make_plan(tmp_path, run_id)
+    directory = tmp_path / "futu-manifests"
+    directory.mkdir()
+    archive = Archive(tmp_path, run_id=run_id)
+    archive.stop.set()
+    archive.thread.join()
+    directory.chmod(0o500)
+    try:
+        with pytest.raises(PermissionError):
+            archive.close()
+    finally:
+        directory.chmod(0o700)
+    result = report(tmp_path, run_id, publish=False)
+    assert result["original_commit_status"] == "failed"
+    assert result["run_status"] == "failed"
+
+
+def test_cli_fails_for_corrupt_event_log(tmp_path):
+    """The CLI cannot report success for uncertain event evidence."""
+    run_id = "f" * 32
+    make_plan(tmp_path, run_id)
+    Archive(tmp_path, run_id=run_id).close()
+    (tmp_path / f"futu-events-{run_id}.jsonl").write_text("{broken")
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-m", "openbb_futu.evidence_cli", "coverage", "--output", str(tmp_path), "--run-id", run_id],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["evidence_status"] == "unknown"

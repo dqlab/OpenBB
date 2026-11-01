@@ -210,13 +210,21 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
     last_event = None
     failed_stop = False
     commit_failures = []
+    event_log_status = "missing"
     event_count = 0
     gap_started = None
-    if events_path.exists():
-        with events_path.open(encoding="utf-8") as stream:
+    try:
+        with events_path.open("rb") as stream:
+            event_log_status = "complete"
             for line in stream:
                 try:
+                    if not line.endswith(b"\n"):
+                        raise ValueError("incomplete event")
                     event = json.loads(line)
+                    if not isinstance(event, dict) or not isinstance(event.get("event"), str):
+                        raise ValueError("invalid event")
+                    if event["event"] == "event_log_corrupt_tail":
+                        event_log_status = "corrupt"
                     last_event = event
                     if event.get("event") == "stopped" and event.get("status") == "failed":
                         failed_stop = True
@@ -241,8 +249,13 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
                         event_count += 1
                         if len(events) < 1000:
                             events.append(event)
-                except ValueError:
-                    break
+                except (ValueError, UnicodeError):
+                    event_log_status = "corrupt"
+    except FileNotFoundError:
+        pass
+    except OSError:
+        event_log_status = "unreadable"
+    result["event_log_status"] = event_log_status
     result["run_id"] = run_id
     result["events"] = [
         e
@@ -313,10 +326,22 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
             if event.get("run_id") == run_id
             and isinstance(event.get("session_id"), str)
             and re.fullmatch(r"[0-9a-f]{32}", event["session_id"])
-            and (manifest is None or event["session_id"] == manifest.get("session_id"))
         ),
         None,
     )
+    unattributed_failure = any(
+        event.get("run_id") != run_id
+        or not isinstance(event.get("session_id"), str)
+        or not re.fullmatch(r"[0-9a-f]{32}", event["session_id"])
+        for event in commit_failures
+    )
+    uncertain_events = (
+        event_log_status in {"corrupt", "unreadable"}
+        or (event_log_status == "missing" and manifest is not None)
+        or unattributed_failure
+    )
+    if uncertain_events:
+        result["run_status"] = "unknown"
     if invalid_manifest or failed_stop or failure:
         result["run_status"] = "failed"
     result["original_commit_status"] = "failed" if failure else "unknown"
@@ -332,8 +357,9 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
             "manifest_parent_fsync",
         }
         result["original_commit_failure_stage"] = failure.get("stage") if failure.get("stage") in stages else "unknown"
-    result["evidence_status"] = "failed" if invalid_manifest else ("verified" if manifest else "missing")
-    result["integrity_status"] = result["evidence_status"]
+    result["integrity_status"] = "failed" if invalid_manifest else ("verified" if manifest else "missing")
+    result["evidence_status"] = "unknown" if uncertain_events and not invalid_manifest else result["integrity_status"]
+    result["unattributed_commit_failure"] = unattributed_failure
     for asset, channels in result["by_asset_channel"].items():
         for channel, summary in channels.items():
             dims = [d for d in result["dimensions"] if d["asset"] == asset and d["channel"] == channel]

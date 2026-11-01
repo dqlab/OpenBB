@@ -382,8 +382,13 @@ class Archive:
                         "errno": exc.errno if isinstance(exc, OSError) else None,
                     }
                     event_path = Path(self.writer.root) / f"futu-events-{self.identity.run_id}.jsonl"
-                    with event_path.open("a", encoding="utf-8") as log:
-                        log.write(json.dumps(event) + "\n")
+                    with event_path.open("a+b") as log:
+                        log.seek(0, os.SEEK_END)
+                        if log.tell():
+                            log.seek(log.tell() - 1)
+                            if log.read(1) != b"\n":
+                                log.write(b'\n{"event":"event_log_corrupt_tail"}\n')
+                        log.write((json.dumps(event) + "\n").encode("utf-8"))
                         log.flush()
                         os.fsync(log.fileno())
                 except Exception:  # noqa: S110

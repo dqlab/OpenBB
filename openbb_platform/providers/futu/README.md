@@ -141,8 +141,16 @@ reconstructed from the manifest's declared synced segment prefix, not proof
 of the original manifest commit or complete market coverage. REST coverage
 likewise describes readable responses; an unknown response stays unknown.
 
+Coverage reports `event_log_status` as complete, missing, corrupt, or unreadable.
+A missing log alongside a manifest, malformed or incomplete event line,
+unreadable log, or commit failure that
+cannot be attributed to this run and a valid session makes `evidence_status`
+unknown; `unattributed_commit_failure` identifies the latter case. Valid
+commit failures from any session of the run mark the run failed. File
+`integrity_status` remains separate. Event records are not authenticated, and
+failure recording is best effort: absence of a failure never proves a commit.
 The verify CLI still exits 0 for consistent readable evidence; coverage exits 1
-only for failed evidence (missing remains 0). A failed run or unknown/failed
+for failed or unknown evidence (missing evidence remains 0). A failed run or unknown/failed
 original commit does not change those offline exit codes. Live write and fsync
 failures remain errors. These JSON outputs add fields; strict schema consumers
 must allow the new keys. Filesystem, mount and hardware behavior determines the
