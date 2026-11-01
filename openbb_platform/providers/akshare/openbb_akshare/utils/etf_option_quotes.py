@@ -15,7 +15,7 @@ from io import StringIO
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from openbb_core.provider.utils.helpers import make_request
+from openbb_core.provider.utils.helpers import get_requests_session, make_request
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SYMBOL = re.compile(r"[0-9]{8}")
@@ -196,17 +196,50 @@ def parse_batch(text: str, symbols: list[str], captured_at: str) -> list[dict[st
     return rows
 
 
+def _reject_unsafe_response(response: Any, **_kwargs: Any) -> Any:
+    """Run before Requests resolves redirects or consumes response content."""
+    if 300 <= response.status_code < 400:
+        response.close()
+        raise ValueError("quote_redirect_unsupported")
+    encoding = response.headers.get("Content-Encoding", "").strip().lower()
+    if encoding not in {"", "identity"}:
+        response.close()
+        raise ValueError("quote_content_encoding_unsupported")
+    return response
+
+
+def _read_quote_body(url: str) -> bytes:
+    """Read identity-encoded bytes with a bounded encoded and decoded size."""
+    limit = 1_000_000
+    with get_requests_session() as session:
+        session.hooks["response"].append(_reject_unsafe_response)
+        with make_request(
+            url,
+            session=session,
+            headers={
+                "Referer": "https://stock.finance.sina.com.cn/",
+                "User-Agent": "Mozilla/5.0",
+                "Accept-Encoding": "identity",
+            },
+            timeout=25,
+            stream=True,
+            allow_redirects=False,
+        ) as response:
+            response.raise_for_status()
+            # No content decoder is enabled: identity bytes are both encoded and
+            # decoded bytes. Read at most one byte beyond the limit.
+            body = response.raw.read(limit + 1, decode_content=False)
+            if len(body) > limit:
+                raise ValueError("quote_response_byte_limit")
+            return body
+
+
 def fetch_quotes(symbols: str) -> list[dict[str, Any]]:
     """Batch the identical source behind AKShare's option_sse_spot_price_sina."""
     tokens = validate_symbols(symbols)
-    response = make_request(
-        "https://hq.sinajs.cn/list=" + ",".join("CON_OP_" + s for s in tokens),
-        headers={"Referer": "https://stock.finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"},
-        timeout=25,
+    body = _read_quote_body(
+        "https://hq.sinajs.cn/list=" + ",".join("CON_OP_" + s for s in tokens)
     )
-    response.raise_for_status()
-    if len(response.content) > 1_000_000:
-        raise ValueError("quote_response_byte_limit")
-    text = response.content.decode("gb18030", errors="strict")
+    text = body.decode("gb18030", errors="strict")
     stamp = datetime.now(timezone.utc).isoformat()
     return parse_batch(text, tokens, stamp)

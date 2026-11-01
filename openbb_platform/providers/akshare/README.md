@@ -41,6 +41,19 @@ are retained without interpretation; no contract universe, multiplier, historica
 reconstruction, or official completeness is asserted. Missing and malformed rows
 remain explicit diagnostics, and source time is distinct from fetch time.
 
+The source is a direct Sina batch HTTP request, based on the source used by
+AKShare's single-symbol function; its batch protocol is not independently
+verified. `raw_payload` is the GB18030-decoded assignment value, not the HTTP
+wire bytes. The transport requests identity encoding and rejects all redirects
+and any other content encoding, including gzip. Both encoded and decoded body
+sizes are limited to 1,000,000 bytes (they are identical for identity encoding).
+OpenBB Requests settings govern TLS, proxy, headers, credentials and timeout;
+the configured HTTP timeout overrides the 25-second default. The timeout is a
+socket inactivity timeout, not a hard total deadline: a slow trickle can take
+longer, and DNS and other platform behavior can also exceed it. No hard wall-clock
+deadline is promised. Synthetic loopback tests do not establish upstream
+compatibility; live status remains `live_not_tested`.
+
 ## Conventions
 
 - Dates are entered as `YYYY-MM-DD` and converted to the `YYYYMMDD` form the

@@ -106,22 +106,87 @@ def test_absent_and_zero_not_synthetic_prices():
     assert row["quote_error"] is None  # collector owns pricing-eligibility classification
 
 
-def test_transport_uses_shared_helper_and_checks_bounds(monkeypatch):
-    """Mock transport verifies source, status, encoding and response size."""
-    from unittest.mock import Mock
+def test_fetch_uses_bounded_transport(monkeypatch):
+    """The public operation retains its source URL and decoding semantics."""
+    from openbb_akshare.utils import etf_option_quotes as quotes
+
+    urls = []
+    def read(url):
+        urls.append(url)
+        return assignment(payload()).encode("gb18030")
+
+    monkeypatch.setattr(quotes, "_read_quote_body", read)
+    assert quotes.fetch_quotes("90007393")[0]["symbol"] == "90007393"
+    assert urls == ["https://hq.sinajs.cn/list=CON_OP_90007393"]
+
+
+@pytest.mark.parametrize("case", ["ok", "large", "redirect", "gzip", "slow"])
+def test_loopback_transport(case, monkeypatch):
+    """Exercise real Requests streaming without contacting an external service."""
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     from openbb_akshare.utils import etf_option_quotes as quotes
 
-    response = Mock(content=assignment(payload()).encode("gb18030"))
-    request = Mock(return_value=response)
-    monkeypatch.setattr(quotes, "make_request", request)
-    assert quotes.fetch_quotes("90007393")[0]["symbol"] == "90007393"
-    assert request.call_args.args[0] == "https://hq.sinajs.cn/list=CON_OP_90007393"
-    assert request.call_args.kwargs["timeout"] == 25
-    response.raise_for_status.assert_called_once()
-    response.content = b"x" * 1_000_001
-    with pytest.raises(ValueError, match="quote_response_byte_limit"):
-        quotes.fetch_quotes("90007393")
+    release = threading.Event()
+    body_started = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            self.send_response(302 if case == "redirect" else 200)
+            if case == "redirect":
+                self.send_header("Location", "/other")
+            if case == "gzip":
+                self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(1_000_001 if case in {"large", "redirect"} else 3))
+            self.end_headers()
+            if case == "redirect":
+                release.wait(2)
+                body_started.set()
+                return
+            try:
+                if case == "slow":
+                    for byte in b"abc":
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(0.08)
+                else:
+                    self.wfile.write(b"x" * 1_000_001 if case == "large" else b"abc")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    # Exercise the shared helper with deterministic settings and no proxy.
+    from openbb_core.provider.utils import helpers
+    monkeypatch.setattr(helpers, "get_python_request_settings", lambda: {})
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "REQUESTS_CA_BUNDLE"):
+        monkeypatch.delenv(name, raising=False)
+    url = f"http://127.0.0.1:{server.server_port}/"
+    try:
+        if case in {"ok", "slow"}:
+            started = time.monotonic()
+            assert quotes._read_quote_body(url) == b"abc"
+            if case == "slow":
+                # Successful trickle illustrates that read timeout is not a deadline.
+                assert time.monotonic() - started >= 0.12
+        else:
+            error = {"large": "byte_limit", "redirect": "redirect_unsupported", "gzip": "encoding_unsupported"}[case]
+            with pytest.raises(ValueError, match=error):
+                quotes._read_quote_body(url)
+            if case == "redirect":
+                assert not body_started.is_set()
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_fetcher_round_trip_and_registration(monkeypatch):
