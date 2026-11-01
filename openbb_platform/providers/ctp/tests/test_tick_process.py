@@ -254,7 +254,7 @@ def test_output_paths_enospc_reports_failure_and_evidence(tmp_path):
 def test_final_status_enospc_cannot_return_success(tmp_path):
     instruments = tmp_path / "instruments.json"
     instruments.write_text('["test"]')
-    env = dict(os.environ, CTP_USER="synthetic", CTP_PASSWORD="synthetic",
+    env = dict(os.environ, CTP_USER="synthetic", CTP_PASSWORD="synthetic",  # pragma: allowlist secret
                FAKE_ENOSPC="status", FAKE_STATUS_FINAL="1")
     env["PYTHONPATH"] = str(Path(__file__).parent) + os.pathsep + env.get("PYTHONPATH", "")
     result = subprocess.run([

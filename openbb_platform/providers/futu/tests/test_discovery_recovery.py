@@ -158,7 +158,12 @@ def test_manifest_for_different_run_does_not_hide_orphan(tmp_path):
 def test_discovery_rejects_sensitive_and_uninspectable_bodies(tmp_path, monkeypatch):
     """Never persist sensitive or malformed REST bodies, including failure bodies."""
     monkeypatch.setenv("FUTU_COORDINATION_DIR", str(tmp_path / "coord"))
-    for body in (b'{"password":"hidden"}', b'{"detail":"Bearer abc"}', b'{"detail":"refresh-value"}', b"not json"):
+    for body in (
+        b'{"password":"hidden"}',  # pragma: allowlist secret
+        b'{"detail":"Bearer abc"}',
+        b'{"detail":"refresh-value"}',
+        b"not json",
+    ):
 
         class SensitiveResponse(Response):
             def iter_content(self, _size):

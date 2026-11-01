@@ -13,7 +13,7 @@ from websockets.asyncio.server import serve
 def test_debug_logging_and_buffered_shutdown(tmp_path, monkeypatch, caplog):
     """Exercise the reader, close handshake and all propagating DEBUG loggers."""
     monkeypatch.setenv("FUTU_COORDINATION_DIR", str(tmp_path / "coord"))
-    secret = "synthetic-token-never-log-8765"  # noqa: S105 -- synthetic credential
+    secret = "synthetic-token-never-log-8765"  # pragma: allowlist secret  # noqa: S105
     caplog.set_level(logging.DEBUG)
 
     class Store:
