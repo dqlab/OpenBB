@@ -8,6 +8,59 @@ import pytest
 from dq_live_market_data_collector.tick_file import TickWriter, encode_value, inspect_file
 
 
+@pytest.mark.parametrize("limit", ["max_bytes", "max_seconds"])
+def test_changed_rotation_limit_applies_to_open_segment(tmp_path, monkeypatch, limit):
+    from dq_live_market_data_collector import tick_file
+
+    now = [100.0]
+    monkeypatch.setattr(tick_file.time, "monotonic", lambda: now[0])
+    writer = TickWriter(tmp_path, "test", max_bytes=10000, max_seconds=10000)
+    record = {"local_seq": 1, "received_at_utc": "2026-10-30T00:00:00Z"}
+    writer.append(record)
+    setattr(writer, limit, 1)
+    assert getattr(writer, limit) == 1
+    now[0] += 2
+    writer.append({**record, "local_seq": 2})
+    writer.close()
+    paths = sorted(tmp_path.rglob("*.jsonl"))
+    assert [inspect_file(path)["records"] for path in paths] == [1, 1]
+
+
+@pytest.mark.parametrize("limit", ["max_bytes", "max_seconds"])
+@pytest.mark.parametrize("value", [0, -1])
+def test_invalid_rotation_assignment_preserves_previous_limit(tmp_path, limit, value):
+    writer = TickWriter(tmp_path, "test")
+    previous = getattr(writer, limit)
+    with pytest.raises(ValueError, match="positive"):
+        setattr(writer, limit, value)
+    assert getattr(writer, limit) == previous
+
+
+def test_serialized_cross_thread_limit_change(tmp_path):
+    import threading
+
+    writer = TickWriter(tmp_path, "test", max_bytes=10000)
+    lock = threading.Lock()
+    changed = threading.Event()
+    record = {"local_seq": 1, "received_at_utc": "2026-10-30T00:00:00Z"}
+    with lock:
+        writer.append(record)
+
+    def change():
+        with lock:
+            writer.max_bytes = 1
+        changed.set()
+
+    thread = threading.Thread(target=change)
+    thread.start()
+    assert changed.wait(5)
+    with lock:
+        writer.append({**record, "local_seq": 2})
+        writer.close()
+    thread.join()
+    assert len(list(tmp_path.rglob("*.jsonl"))) == 2
+
+
 def test_values_and_duplicate_callbacks(tmp_path):
     payload = {
         "LastPrice": sys.float_info.max,

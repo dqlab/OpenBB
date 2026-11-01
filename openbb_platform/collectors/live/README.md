@@ -153,3 +153,11 @@ The existing `live_v1` observation and delivery schemas are unchanged, and
 `available_at` remains the collector's conservative response receipt time.
 Requesting delayed data does not imply actual delayed delivery: the gateway's
 `marketDataType` callback determines the stored feed type.
+
+## Tick segment rotation
+
+`TickWriter.max_bytes` and `max_seconds` can be changed after construction.
+Positive limits are checked before the next append, including against an open
+segment; changing a limit does not immediately seal it. Callers must serialize
+all access to a writer, including limit changes, with appends and sealing.
+Nonpositive assignments raise `ValueError` and leave the previous limit intact.

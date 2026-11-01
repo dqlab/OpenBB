@@ -14,7 +14,7 @@ import queue
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from datetime import timezone as tz
 from pathlib import Path
@@ -139,7 +139,10 @@ class IngressCounts:
 
 
 class TickWriter:
-    """Single-owner exclusive append segments; callers serialize access."""
+    """Single-owner exclusive append segments; callers serialize all access.
+
+    Limit changes take effect at the next append, including for an open segment.
+    """
 
     def __init__(
         self,
@@ -165,6 +168,28 @@ class TickWriter:
         self.date: str | None = None
         self.opened = 0.0
         self.written = self.durable = 0
+
+    @property
+    def max_bytes(self) -> int:
+        """Maximum segment size checked before each append."""
+        return self.rotation.max_bytes
+
+    @max_bytes.setter
+    def max_bytes(self, value: int) -> None:
+        if value <= 0:
+            raise ValueError("rotation limits must be positive")
+        self.rotation = replace(self.rotation, max_bytes=value)
+
+    @property
+    def max_seconds(self) -> float:
+        """Maximum segment age checked before each append."""
+        return self.rotation.max_seconds
+
+    @max_seconds.setter
+    def max_seconds(self, value: float) -> None:
+        if value <= 0:
+            raise ValueError("rotation limits must be positive")
+        self.rotation = replace(self.rotation, max_seconds=value)
 
     def _open(self, date: str) -> None:
         directory = (
