@@ -14,6 +14,7 @@ import traceback
 import typing as typing_module
 from collections import OrderedDict
 from collections.abc import Callable
+from copy import deepcopy
 from inspect import Parameter, _empty, isclass, signature
 from json import dumps, load
 from pathlib import Path
@@ -326,7 +327,9 @@ class PackageBuilder:
         self.console.log(str(package_path))
 
         with package_path.open("w", encoding="utf-8", newline="\n") as file:
-            file.write(code.replace("typing.", "").replace("List", "list"))
+            file.write(
+                code if extension == "json" else code.replace("typing.", "").replace("List", "list")
+            )
 
     @staticmethod
     def _read(path: Path) -> dict:
@@ -3421,11 +3424,11 @@ class ReferenceGenerator:
             extra = {}
             choices = None
             if field in class_schema_extra:
-                extra = class_schema_extra[field].copy()
+                extra = deepcopy(class_schema_extra[field])
                 choices = extra.get("choices")
 
             # Then apply field-level schema extra (which takes precedence)
-            field_extra = field_info.json_schema_extra or {}
+            field_extra = deepcopy(field_info.json_schema_extra or {})
             extra.update(field_extra)
             if "choices" in field_extra:
                 choices = field_extra.pop("choices", [])
@@ -3798,7 +3801,7 @@ class ReferenceGenerator:
                     if hasattr(meta, "default"):
                         default = meta.default
                     if hasattr(meta, "json_schema_extra"):
-                        json_extra = meta.json_schema_extra
+                        json_extra = deepcopy(meta.json_schema_extra or {})
 
                 # Set the actual type to the base type
                 param_type = base_type
@@ -3813,7 +3816,7 @@ class ReferenceGenerator:
                     else str(param_type)
                 )
                 description = default.description  # type: ignore
-                json_extra = default.json_schema_extra  # type: ignore
+                json_extra = deepcopy(default.json_schema_extra or {})  # type: ignore
                 has_default = hasattr(default, "default") and default.default not in [  # type: ignore
                     Parameter.empty,
                     PydanticUndefined,
