@@ -16,6 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from openbb_core.provider.utils.helpers import get_requests_session, make_request
+from requests.auth import HTTPBasicAuth
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SYMBOL = re.compile(r"[0-9]{8}")
@@ -212,6 +213,16 @@ def _read_quote_body(url: str) -> bytes:
     """Read identity-encoded bytes with a bounded encoded and decoded size."""
     limit = 1_000_000
     with get_requests_session() as session:
+        auth = session.auth
+        basic_tuple = (
+            type(auth) is tuple
+            and len(auth) == 2
+            and all(type(value) in (str, bytes) for value in auth)
+        )
+        if auth is not None and type(auth) is not HTTPBasicAuth and not basic_tuple:
+            raise ValueError("quote_auth_unsupported")
+        if session.hooks.get("response"):
+            raise ValueError("quote_response_hooks_unsupported")
         session.hooks["response"].append(_reject_unsafe_response)
         with make_request(
             url,

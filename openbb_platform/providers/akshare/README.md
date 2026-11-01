@@ -47,7 +47,11 @@ verified. `raw_payload` is the GB18030-decoded assignment value, not the HTTP
 wire bytes. The transport requests identity encoding and rejects all redirects
 and any other content encoding, including gzip. Both encoded and decoded body
 sizes are limited to 1,000,000 bytes (they are identical for identity encoding).
-OpenBB Requests settings govern TLS, proxy, headers, credentials and timeout;
+OpenBB Requests settings govern TLS, proxy, headers and timeout. Global auth is
+accepted only when absent, a two-element string/bytes tuple, or an exact Requests
+HTTPBasicAuth instance; Digest and custom auth (including Basic subclasses) fail
+closed before sending. Existing response hooks are also rejected. Other OpenBB
+commands retain their usual global authentication behavior;
 the configured HTTP timeout overrides the 25-second default. The timeout is a
 socket inactivity timeout, not a hard total deadline: a slow trickle can take
 longer, and DNS and other platform behavior can also exceed it. No hard wall-clock
