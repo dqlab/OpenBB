@@ -32,6 +32,15 @@ Native commands (source-shaped rows, one command per AKShare interface):
 - `obb.akshare.bond_zh_us_rate(start_date="2026-01-01")` — China and US government
   bond yields by tenor plus GDP growth (source columns are Chinese).
 
+## Bounded option quotes
+
+`obb.akshare.etf_option_quotes(symbols="10012535,10012536")` requests up to
+50 exact eight-digit Sina option identifiers. The source-reported underlying code
+does not independently establish exchange or security identity. Appended fields
+are retained without interpretation; no contract universe, multiplier, historical
+reconstruction, or official completeness is asserted. Missing and malformed rows
+remain explicit diagnostics, and source time is distinct from fetch time.
+
 ## Conventions
 
 - Dates are entered as `YYYY-MM-DD` and converted to the `YYYYMMDD` form the

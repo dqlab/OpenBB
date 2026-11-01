@@ -36,3 +36,14 @@ def register_command(dataset: Dataset) -> None:
 
 for _dataset in DATASETS:
     register_command(_dataset)
+
+
+@router.command(model="AkshareEtfOptionQuotes")
+async def etf_option_quotes(
+    cc: CommandContext,
+    provider_choices: ProviderChoices,
+    standard_params: StandardParams,
+    extra_params: ExtraParams,
+) -> OBBject[BaseModel]:
+    """Get bounded Sina option quotes by exact source identifiers."""
+    return await OBBject.from_query(Query(**locals()))
