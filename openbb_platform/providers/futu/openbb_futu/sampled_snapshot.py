@@ -142,45 +142,44 @@ def _controlled_snapshot(symbols, token, timeout, secrets, *, stop, archive):
 def rebuild_rest_coverage(manifest_path, symbols):
     """Recompute REST coverage from verified sealed records and decoded payloads."""
     path = Path(manifest_path)
-    if verify(path)["status"] != "verified":
-        raise ValueError("invalid manifest")
-    manifest = json.loads(path.read_text(encoding="utf-8"))
-    if manifest.get("transport") != "rest":
-        raise ValueError("not a REST manifest")
     coverage = dict.fromkeys(symbols, "unknown")
-    for entry in manifest["files"]:
-        with Path(entry["file"]).open(encoding="utf-8") as stream:
-            for line in stream:
-                record = json.loads(line)
-                if (
-                    record.get("transport") != "rest"
-                    or record.get("data_kind") != "sampled_snapshot"
-                    or record.get("payload_encoding") != "base64"
-                    or record.get("payload_representation") != "http_content_decoded"
-                    or record.get("requested_symbols") != symbols
-                ):
-                    raise ValueError("invalid REST record")
-                payload = json.loads(base64.b64decode(record["raw_payload"], validate=True))
-                if (
-                    not 200 <= record["http_status"] < 300
-                    or not isinstance(payload, dict)
-                    or payload.get("ret_code") != 0
-                ):
-                    continue
-                data = payload.get("data")
-                rows = data.get("snapshot_list") if isinstance(data, dict) else None
-                if not isinstance(rows, list) or any(
-                    not isinstance(row, dict) or not isinstance(row.get("code"), str) for row in rows
-                ):
-                    continue
-                codes = [row["code"] for row in rows]
-                if not set(codes) <= set(symbols):
-                    continue
-                for symbol in symbols:
-                    if symbol in codes:
-                        coverage[symbol] = "returned_code"
-                    elif coverage[symbol] != "returned_code":
-                        coverage[symbol] = "missing"
+
+    def check_manifest(manifest):
+        if manifest.get("transport") != "rest":
+            raise ValueError("not a REST manifest")
+
+    def consume(record):
+        if (
+            record.get("transport") != "rest"
+            or record.get("data_kind") != "sampled_snapshot"
+            or record.get("payload_encoding") != "base64"
+            or record.get("payload_representation") != "http_content_decoded"
+            or record.get("requested_symbols") != symbols
+        ):
+            raise ValueError("invalid REST record")
+        payload = json.loads(base64.b64decode(record["raw_payload"], validate=True))
+        if (
+            not 200 <= record["http_status"] < 300
+            or not isinstance(payload, dict)
+            or payload.get("ret_code") != 0
+        ):
+            return
+        data = payload.get("data")
+        rows = data.get("snapshot_list") if isinstance(data, dict) else None
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get("code"), str) for row in rows
+        ):
+            return
+        codes = [row["code"] for row in rows]
+        if not set(codes) <= set(symbols):
+            return
+        for symbol in symbols:
+            if symbol in codes:
+                coverage[symbol] = "returned_code"
+            elif coverage[symbol] != "returned_code":
+                coverage[symbol] = "missing"
+    if verify(path, on_record=consume, on_manifest=check_manifest)["status"] != "verified":
+        raise ValueError("invalid manifest")
     return coverage
 
 

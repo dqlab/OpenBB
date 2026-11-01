@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -143,62 +144,49 @@ def _strict_integer(value):
     return isinstance(value, int) and value.__class__ is int
 
 
-def _observations_from_manifest(manifest, dimension_keys, observations):
-    """Collect bounded locators only from checksum-matched durable records."""
-    for file in manifest["files"]:
-        path = Path(file["file"])
-        digest = hashlib.sha256()
-        with path.open("rb") as source:
-            while chunk := source.read(1024 * 1024):
-                digest.update(chunk)
-        if digest.hexdigest() != file["sha256"]:
-            raise ValueError("archive checksum mismatch")
-        with path.open("rb") as source:
-            for line in source:
-                record = json.loads(line)
-                if record["local_seq"] > manifest["durable_seq"]:
-                    continue
-                obj = json.loads(record["raw_payload"])
-                channel = {
-                    "QUOTE": "quote",
-                    "ORDER_BOOK": "order_book",
-                    "TICKER": "ticker",
-                    "KLINE": "kline",
-                }.get(obj["type"])
-                symbol = obj.get("symbol")
-                if not channel or not isinstance(symbol, str) or (symbol, channel) not in dimension_keys:
-                    continue
-                if channel == "kline" and (
-                    obj["data"].get("period"),
-                    obj["data"].get("adjust"),
-                ) != ("1m", "none"):
-                    continue
-                observation = observations.setdefault((symbol, channel), {"refs": [], "count": 0})
-                refs = observation["refs"]
-                if channel == "ticker":
-                    rows = obj["data"].get("ticker_list")
-                    if not isinstance(rows, list):
-                        continue
-                    for index, row in enumerate(rows):
-                        if (
-                            isinstance(row, dict)
-                            and _strict_integer(row.get("time_ms"))
-                            and _strict_integer(row.get("sequence"))
-                        ):
-                            observation["count"] += 1
-                            if len(refs) < 100:
-                                refs.append(
-                                    {
-                                        "local_seq": record["local_seq"],
-                                        "ticker_index": index,
-                                        "time_ms": row["time_ms"],
-                                        "sequence": row["sequence"],
-                                    }
-                                )
-                else:
-                    observation["count"] += 1
-                    if len(refs) < 100:
-                        refs.append({"local_seq": record["local_seq"]})
+def _observe_record(record, dimension_keys, observations):
+    """Collect locators from the exact records being verified."""
+    obj = json.loads(record["raw_payload"])
+    channel = {
+        "QUOTE": "quote",
+        "ORDER_BOOK": "order_book",
+        "TICKER": "ticker",
+        "KLINE": "kline",
+    }.get(obj["type"])
+    symbol = obj.get("symbol")
+    if not channel or not isinstance(symbol, str) or (symbol, channel) not in dimension_keys:
+        return
+    if channel == "kline" and (
+        obj["data"].get("period"),
+        obj["data"].get("adjust"),
+    ) != ("1m", "none"):
+        return
+    observation = observations.setdefault((symbol, channel), {"refs": [], "count": 0})
+    refs = observation["refs"]
+    if channel == "ticker":
+        rows = obj["data"].get("ticker_list")
+        if not isinstance(rows, list):
+            return
+        for index, row in enumerate(rows):
+            if (
+                isinstance(row, dict)
+                and _strict_integer(row.get("time_ms"))
+                and _strict_integer(row.get("sequence"))
+            ):
+                observation["count"] += 1
+                if len(refs) < 100:
+                    refs.append(
+                        {
+                            "local_seq": record["local_seq"],
+                            "ticker_index": index,
+                            "time_ms": row["time_ms"],
+                            "sequence": row["sequence"],
+                        }
+                    )
+    else:
+        observation["count"] += 1
+        if len(refs) < 100:
+            refs.append({"local_seq": record["local_seq"]})
 
 
 def report(root, run_id, *, publish=True):  # noqa: PLR0912
@@ -223,6 +211,25 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
                     event = json.loads(line)
                     if not isinstance(event, dict) or not isinstance(event.get("event"), str):
                         raise ValueError("invalid event")
+                    if "time" in event and (
+                        type(event["time"]) not in (int, float) or not math.isfinite(event["time"])
+                    ):
+                        raise ValueError("invalid event time")
+                    if event["event"] == "stopped" and (
+                        not isinstance(event.get("status"), str)
+                        or event["status"] not in {"failed", "stopped"}
+                    ):
+                        raise ValueError("invalid stopped event")
+                    if event["event"] == "manifest_commit_failed" and (
+                        not isinstance(event.get("run_id"), str)
+                        or not isinstance(event.get("session_id"), str)
+                        or type(event.get("publish_attempt")) is not int
+                        or event["publish_attempt"] < 1
+                        or type(event.get("original_commit_failure")) is not bool
+                        or not isinstance(event.get("stage"), str)
+                    ):
+                        commit_failures.append(event)
+                        raise ValueError("invalid commit event")
                     if event["event"] == "event_log_corrupt_tail":
                         event_log_status = "corrupt"
                     last_event = event
@@ -280,23 +287,32 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
     invalid_manifest = False
     for path in (root / "futu-manifests").glob("*.json"):
         try:
-            candidate = json.loads(path.read_text())
+            with path.open("rb") as stream:
+                raw = stream.read(8 * 1024 * 1024 + 1)
+            if len(raw) > 8 * 1024 * 1024:
+                invalid_manifest = True
+                continue
+            candidate = json.loads(raw)
             if candidate["run_id"] == run_id:
                 if manifest is not None:
                     invalid_manifest = True
                 manifest = candidate
                 manifest_path = path
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError):
             continue
     observations: dict = {}
     dimension_keys = {(item["symbol"], item["channel"]) for item in result["selected"] + result["not_selected"]}
     if manifest:
         try:
-            invalid_manifest = invalid_manifest or verify(manifest_path)["status"] != "verified"
+            invalid_manifest = invalid_manifest or verify(
+                manifest_path,
+                on_record=lambda record: _observe_record(record, dimension_keys, observations),
+                on_manifest=lambda checked: checked == manifest or (_ for _ in ()).throw(ValueError("manifest changed")),
+            )["status"] != "verified"
         except (OSError, ValueError, KeyError, TypeError):
             invalid_manifest = True
-    if manifest and not invalid_manifest:
-        _observations_from_manifest(manifest, dimension_keys, observations)
+    if invalid_manifest:
+        observations.clear()
     for item in result["selected"] + result["not_selected"]:
         selected = item in result["selected"]
         observation = observations.get((item["symbol"], item["channel"]), {"refs": [], "count": 0})
@@ -330,7 +346,9 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
         None,
     )
     unattributed_failure = any(
-        event.get("run_id") != run_id
+        manifest is None
+        or event.get("session_id") != manifest.get("session_id")
+        or event.get("run_id") != run_id
         or not isinstance(event.get("session_id"), str)
         or not re.fullmatch(r"[0-9a-f]{32}", event["session_id"])
         for event in commit_failures
@@ -343,7 +361,10 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
     if uncertain_events:
         result["run_status"] = "unknown"
     confirmed_failure = any(
-        event.get("run_id") == run_id
+        manifest is not None
+        and event.get("session_id") == manifest.get("session_id")
+        and event.get("run_id") == run_id
+        and type(event.get("publish_attempt")) is int
         and event.get("original_commit_failure") is True
         and event.get("publish_attempt") == 1
         and isinstance(event.get("session_id"), str)
@@ -353,11 +374,14 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
     if failure and not confirmed_failure:
         uncertain_events = True
         result["run_status"] = "unknown"
-    if invalid_manifest or failed_stop or confirmed_failure:
+    if invalid_manifest or (failed_stop and not uncertain_events) or (confirmed_failure and not uncertain_events):
         result["run_status"] = "failed"
     original_failure = next(
         (event for event in commit_failures
-         if event.get("run_id") == run_id
+         if manifest is not None
+         and event.get("session_id") == manifest.get("session_id")
+         and event.get("run_id") == run_id
+         and type(event.get("publish_attempt")) is int
          and event.get("original_commit_failure") is True
          and event.get("publish_attempt") == 1
          and isinstance(event.get("session_id"), str)

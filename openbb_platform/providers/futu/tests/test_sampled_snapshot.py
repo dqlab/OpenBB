@@ -582,3 +582,29 @@ def test_final_verification_failure_resets_coverage_and_cli(server, tmp_path, mo
     assert set(result["coverage"].values()) == {"unknown"}
     assert all(item["response_item_present"] is None for item in result["quote_evidence"].values())
     assert result["attempts"][0]["returned_codes"] == ["HK.00700"]
+
+
+def test_segment_replacement_during_rest_rebuild_fails_closed(server, tmp_path, monkeypatch):
+    """A substituted response cannot become a verified coverage observation."""
+    from openbb_futu import offline
+
+    original = offline.os.open
+    changed = False
+
+    def swap(path, flags, *args, **kwargs):
+        nonlocal changed
+        if str(path).endswith(".jsonl") and not changed:
+            changed = True
+            path = Path(path)
+            record = json.loads(path.read_bytes())
+            payload = base64.b64decode(record["raw_payload"]).replace(b"HK.00700", b"HK.02800")
+            record["raw_payload"] = base64.b64encode(payload).decode()
+            path.write_text(json.dumps(record) + "\n")
+        return original(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(offline.os, "open", swap)
+    result = run({"symbols": [{"asset": "equity", "symbol": "HK.00700"},
+                              {"asset": "etf", "symbol": "HK.02800"}]}, "test-token", tmp_path / "out")
+    assert changed
+    assert result["coverage"] == {"HK.00700": "unknown", "HK.02800": "unknown"}
+    assert result["failure"] == "archive_failure"

@@ -2,11 +2,17 @@
 
 import hashlib
 import json
+import os
 import re
+import stat
 import uuid
 from pathlib import Path
 
-from openbb_futu.archive import MAX_FRAME_BYTES, MAX_SEGMENTS, Archive
+from openbb_futu.archive import MAX_FRAME_BYTES, MAX_LINE_BYTES, MAX_SEGMENTS, Archive
+
+
+def _identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _strict_int(value):
@@ -38,7 +44,8 @@ def _segment_matches(entry, digest, size, records, *, first, last):
         "unread_bytes": 0,
         "error": None,
     }
-    return all(entry[key] == value for key, value in expected.items())
+    return all(entry[key] == value and (type(entry[key]) is int if type(value) is int else True)
+               for key, value in expected.items())
 
 
 def _manifest_matches(manifest, count):
@@ -53,7 +60,8 @@ def _manifest_matches(manifest, count):
         "durable_seq": count,
     }
     return (
-        all(manifest.get(key) == value for key, value in expected.items())
+        all(manifest.get(key) == value and (type(manifest.get(key)) is int if type(value) is int else True)
+            for key, value in expected.items())
         and not manifest.get("error")
         and not manifest.get("uncertain_loss", False)
     )
@@ -96,10 +104,23 @@ def _verification(status, records, errors):
     }
 
 
-def verify(manifest_path: Path) -> dict:
+def verify(manifest_path: Path, *, on_record=None, on_manifest=None) -> dict:  # noqa: PLR0912
     """Verify all listed segments and their contiguous durable prefix, read only."""
-    with manifest_path.open(encoding="utf-8") as stream:
-        manifest = json.load(stream)
+    manifest_path = Path(manifest_path).absolute()
+    with manifest_path.open("rb") as stream:
+        before_manifest = os.fstat(stream.fileno())
+        raw_manifest = stream.read(8 * 1024 * 1024 + 1)
+        if len(raw_manifest) > 8 * 1024 * 1024:
+            return _verification("failed", 0, ["manifest too large"])
+        manifest = json.loads(raw_manifest)
+        if _identity(os.fstat(stream.fileno())) != _identity(before_manifest):
+            return _verification("failed", 0, ["manifest changed"])
+    if manifest_path.resolve() != manifest_path or _identity(manifest_path.stat()) != _identity(before_manifest):
+        return _verification("failed", 0, ["manifest changed"])
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), list):
+        return _verification("failed", 0, ["invalid manifest"])
+    if on_manifest is not None:
+        on_manifest(manifest)
     errors = []
     expected = 1
     count = 0
@@ -144,14 +165,23 @@ def verify(manifest_path: Path) -> dict:
             raise ValueError("unlisted or missing sealed segment")
     except (OSError, ValueError, KeyError, TypeError):
         return _verification("failed", 0, ["invalid segment set or path"])
+    identities = []
     for entry in files:
         path = Path(entry["file"])
         digest = hashlib.sha256()
         first = last = None
         records = size = 0
         try:
-            with path.open("rb") as stream:
-                for line in stream:
+            if type(entry.get("bytes")) is not int or not 0 <= entry["bytes"] <= 1024 * 1024 * 1024:
+                raise ValueError("invalid segment size")
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                initial = os.fstat(stream.fileno())
+                if not stat.S_ISREG(initial.st_mode) or initial.st_size != entry["bytes"]:
+                    raise ValueError("invalid segment size or type")
+                while line := stream.readline(MAX_LINE_BYTES + 1):
+                    if len(line) > MAX_LINE_BYTES:
+                        raise ValueError("line too large")
                     digest.update(line)
                     size += len(line)
                     if not line.endswith(b"\n"):
@@ -164,12 +194,44 @@ def verify(manifest_path: Path) -> dict:
                     records += 1
                     first = seq if first is None else first
                     last = seq
+                    if on_record is not None:
+                        on_record(record)
+                if (
+                    _identity(os.fstat(stream.fileno())) != _identity(initial)
+                    or path.is_symlink()
+                    or _identity(path.stat()) != _identity(initial)
+                ):
+                    raise ValueError("segment changed")
+                identities.append((path, initial))
             if not _segment_matches(entry, digest.hexdigest(), size, records, first=first, last=last):
                 raise ValueError("segment metadata mismatch")
             count += records
         except (OSError, ValueError, KeyError, TypeError, UnicodeError):
             errors.append("invalid segment: " + str(path))
             break
+    try:
+        if manifest_path.resolve() != manifest_path or _identity(manifest_path.stat()) != _identity(before_manifest):
+            raise ValueError("manifest changed")
+        if any(
+            path.is_symlink() or path.resolve() != path or _identity(path.stat()) != _identity(info)
+            for path, info in identities
+        ):
+            raise ValueError("segment changed")
+        discovered_after = set()
+        for index, date in enumerate((root / "source_id=futu").glob("recv_date=*")):
+            if index >= MAX_SEGMENTS or date.is_symlink():
+                raise ValueError("invalid date directory")
+            directory = date / f"session={session}"
+            if directory.is_symlink():
+                raise ValueError("invalid session directory")
+            for path in directory.glob("*.jsonl"):
+                if path.is_symlink() or len(discovered_after) >= MAX_SEGMENTS:
+                    raise ValueError("invalid segment")
+                discovered_after.add(path.absolute())
+        if discovered_after != set(paths):
+            raise ValueError("segment set changed")
+    except (OSError, ValueError):
+        errors.append("archive changed during verification")
     if not _manifest_matches(manifest, count):
         errors.append("manifest status or durable prefix mismatch")
     return _verification("verified" if not errors else "failed", count, errors)

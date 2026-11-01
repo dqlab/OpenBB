@@ -157,3 +157,16 @@ must allow the new keys. Filesystem, mount and hardware behavior determines the
 actual crash guarantees; a later fsync cannot prove an earlier commit.
 
 Sampled coverage is reset to unknown and the sampler fails if final archive verification fails. Manifest failure events record the publish attempt and distinguish temporary-file cleanup; a repeated attempt, pre-existing manifest, or unscoped legacy event does not establish that the original commit failed. A failure belonging to another session can fail the run without establishing the selected manifest's original commit status.
+
+Coverage reconstruction hashes and parses each bounded archive line in the same
+read, and publishes observations only if the complete manifest and segment set
+validate. Manifest reads are capped at 8 MiB, segments at 1 GiB each, and lines
+at the archive writer's line limit. File identity and directory membership checks
+reject detected concurrent changes, symlinks, missing files and read errors.
+These checks are not an authenticated filesystem snapshot: a writer with access
+to the archive can replace the manifest and data together or change files after
+verification. Protect the archive directory from untrusted writers and retain the
+original evidence; verified means consistency with the observed manifest, not
+proof of origin or durable publication. Missing or malformed event evidence does
+not establish an attributed commit failure. Live provider access remains
+`live_not_tested` for these offline checks.

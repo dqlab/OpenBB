@@ -52,8 +52,10 @@ def test_fsync_failure_is_preserved(tmp_path, monkeypatch, stage):
     assert list((tmp_path / "futu-manifests").glob("*.tmp"))
     manifests = list((tmp_path / "futu-manifests").glob("*.json"))
     result = report(tmp_path, run_id, publish=False)
-    assert result["original_commit_status"] == "failed"
-    assert result["run_status"] == "failed"
+    assert result["original_commit_status"] == ("failed" if manifests else "unknown")
+    assert result["run_status"] == ("failed" if manifests else "unknown")
+    if not manifests:
+        assert result["unattributed_commit_failure"]
     if manifests:
         assert verify(manifests[0])["status"] == "verified"
         result = report(tmp_path, run_id, publish=False)
@@ -143,7 +145,7 @@ def test_corrupt_tail_then_real_failure(tmp_path, monkeypatch, tail):
     assert result["event_log_status"] == "corrupt"
     assert result["original_commit_status"] == "unknown"
     assert result["evidence_status"] == "unknown"
-    assert result["run_status"] == "failed"
+    assert result["run_status"] == "unknown"
 
 
 def test_unreadable_event_log_is_unknown(tmp_path, monkeypatch):
@@ -213,8 +215,9 @@ def test_real_manifest_directory_permission_failure(tmp_path):
     finally:
         directory.chmod(0o700)
     result = report(tmp_path, run_id, publish=False)
-    assert result["original_commit_status"] == "failed"
-    assert result["run_status"] == "failed"
+    assert result["original_commit_status"] == "unknown"
+    assert result["run_status"] == "unknown"
+    assert result["unattributed_commit_failure"]
 
 
 def test_cli_fails_for_corrupt_event_log(tmp_path):
@@ -281,3 +284,34 @@ def test_cleanup_failure_is_not_directory_fsync_failure(tmp_path, monkeypatch):
     result = report(tmp_path, run_id, publish=False)
     assert result["integrity_status"] == "verified"
     assert result["original_commit_status"] == "unknown"
+
+
+@pytest.mark.parametrize("event", [
+    {"event": "stopped"},
+    {"event": "manifest_commit_failed", "run_id": "a" * 32, "session_id": "b" * 32,
+     "publish_attempt": True, "original_commit_failure": True},
+])
+def test_malformed_events_are_unknown(tmp_path, event):
+    """Malformed event data cannot prove a failure or crash reconstruction."""
+    run_id = "a" * 32
+    make_plan(tmp_path, run_id)
+    (tmp_path / f"futu-events-{run_id}.jsonl").write_text(json.dumps(event) + "\n")
+    result = report(tmp_path, run_id, publish=False)
+    assert result["event_log_status"] == "corrupt"
+    assert result["run_status"] == "unknown"
+    assert result["original_commit_status"] == "unknown"
+
+
+def test_replaced_and_restored_during_verification_fails(tmp_path):
+    """An ABA write during parsing is detected even when original bytes return."""
+    archive = Archive(tmp_path, run_id="a" * 32)
+    assert archive.accept('{"type":"QUOTE","symbol":"US.A","data":{}}', "c")
+    manifest = archive.close()
+    segment = Path(manifest["files"][0]["file"])
+    original = segment.read_bytes()
+
+    def replace(_record):
+        segment.write_bytes(b"adversarial replacement\n")
+        segment.write_bytes(original)
+
+    assert verify(Path(manifest["manifest"]), on_record=replace)["status"] == "failed"
