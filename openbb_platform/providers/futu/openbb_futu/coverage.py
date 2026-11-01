@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 from openbb_futu.contracts import plan
@@ -23,22 +24,12 @@ def prepare(config):
             "priority",
         }:
             raise ValueError("invalid dimension")
-        if (
-            not isinstance(item.get("symbol"), str)
-            or not SYMBOL.fullmatch(item["symbol"])
-            or len(item["symbol"]) > 32
-        ):
+        if not isinstance(item.get("symbol"), str) or not SYMBOL.fullmatch(item["symbol"]) or len(item["symbol"]) > 32:
             raise ValueError("invalid symbol")
-        if not isinstance(item.get("priority", 100), int) or isinstance(
-            item.get("priority", 100), bool
-        ):
+        if not isinstance(item.get("priority", 100), int) or isinstance(item.get("priority", 100), bool):
             raise ValueError("invalid priority")
     budget = config.get("subscription_budget")
-    if (
-        not isinstance(budget, int)
-        or isinstance(budget, bool)
-        or not 1 <= budget <= 10000
-    ):
+    if not isinstance(budget, int) or isinstance(budget, bool) or not 1 <= budget <= 10000:
         raise ValueError("subscription_budget must be a positive bounded integer")
     result = plan([dict(item) for item in entries], budget=budget)
     result["discovery"] = {
@@ -88,9 +79,7 @@ def prepare(config):
                 ):
                     raise ValueError("discovery response checksum mismatch")
                 obj = json.loads(response)
-                field = {"option": "option_chain", "future": "reference_list"}.get(
-                    item["asset"]
-                )
+                field = {"option": "option_chain", "future": "reference_list"}.get(item["asset"])
                 if item.get("status") == "seed_scope_observed":
                     rows = obj.get("data", {}).get(field)
                     if (
@@ -101,13 +90,9 @@ def prepare(config):
                     ):
                         raise ValueError("invalid discovery status")
                     ref["symbols"] = [
-                        row["code"]
-                        for row in rows
-                        if isinstance(row, dict) and isinstance(row.get("code"), str)
+                        row["code"] for row in rows if isinstance(row, dict) and isinstance(row.get("code"), str)
                     ]
-                    if len(ref["symbols"]) != len(rows) or ref["symbols"] != item.get(
-                        "symbols"
-                    ):
+                    if len(ref["symbols"]) != len(rows) or ref["symbols"] != item.get("symbols"):
                         raise ValueError("discovery symbols mismatch")
                 ref["raw_file"] = str(response_path.resolve())
             elif item.get("status") == "seed_scope_observed":
@@ -125,16 +110,13 @@ def prepare(config):
             entry["discovery_refs"] = [
                 i
                 for i, ref in enumerate(verified)
-                if ref.get("asset") == entry["asset"]
-                and entry["symbol"] in ref["symbols"]
+                if ref.get("asset") == entry["asset"] and entry["symbol"] in ref["symbols"]
             ]
     channels: dict = {}
     for item in result["selected"]:
         channel, symbol = item["channel"], item["symbol"]
         channels.setdefault(channel, []).append(
-            {"symbol": symbol, "period": "1m", "adjust": "none"}
-            if channel == "kline"
-            else symbol
+            {"symbol": symbol, "period": "1m", "adjust": "none"} if channel == "kline" else symbol
         )
     return result, channels
 
@@ -184,20 +166,14 @@ def _observations_from_manifest(manifest, dimension_keys, observations):
                     "KLINE": "kline",
                 }.get(obj["type"])
                 symbol = obj.get("symbol")
-                if (
-                    not channel
-                    or not isinstance(symbol, str)
-                    or (symbol, channel) not in dimension_keys
-                ):
+                if not channel or not isinstance(symbol, str) or (symbol, channel) not in dimension_keys:
                     continue
                 if channel == "kline" and (
                     obj["data"].get("period"),
                     obj["data"].get("adjust"),
                 ) != ("1m", "none"):
                     continue
-                observation = observations.setdefault(
-                    (symbol, channel), {"refs": [], "count": 0}
-                )
+                observation = observations.setdefault((symbol, channel), {"refs": [], "count": 0})
                 refs = observation["refs"]
                 if channel == "ticker":
                     rows = obj["data"].get("ticker_list")
@@ -232,6 +208,8 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
     events_path = root / f"futu-events-{run_id}.jsonl"
     events: list = []
     last_event = None
+    failed_stop = False
+    commit_failures = []
     event_count = 0
     gap_started = None
     if events_path.exists():
@@ -240,6 +218,10 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
                 try:
                     event = json.loads(line)
                     last_event = event
+                    if event.get("event") == "stopped" and event.get("status") == "failed":
+                        failed_stop = True
+                    if event.get("event") == "manifest_commit_failed":
+                        commit_failures.append(event)
                     if event.get("event") == "gap_start":
                         gap_started = event.get("time")
                     elif (
@@ -294,24 +276,17 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
         except (OSError, ValueError, KeyError):
             continue
     observations: dict = {}
-    dimension_keys = {
-        (item["symbol"], item["channel"])
-        for item in result["selected"] + result["not_selected"]
-    }
+    dimension_keys = {(item["symbol"], item["channel"]) for item in result["selected"] + result["not_selected"]}
     if manifest:
         try:
-            invalid_manifest = (
-                invalid_manifest or verify(manifest_path)["status"] != "verified"
-            )
+            invalid_manifest = invalid_manifest or verify(manifest_path)["status"] != "verified"
         except (OSError, ValueError, KeyError, TypeError):
             invalid_manifest = True
     if manifest and not invalid_manifest:
         _observations_from_manifest(manifest, dimension_keys, observations)
     for item in result["selected"] + result["not_selected"]:
         selected = item in result["selected"]
-        observation = observations.get(
-            (item["symbol"], item["channel"]), {"refs": [], "count": 0}
-        )
+        observation = observations.get((item["symbol"], item["channel"]), {"refs": [], "count": 0})
         refs = observation["refs"]
         result["dimensions"].append(
             {
@@ -329,29 +304,42 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
         )
     if last_event and last_event["event"] == "stopped":
         status = last_event["status"]
-        if status == "failed" or (
-            status == "stopped" and manifest and not manifest.get("error")
-        ):
+        if status == "failed" or (status == "stopped" and manifest and not manifest.get("error")):
             result["run_status"] = status
-    if invalid_manifest:
-        result["run_status"] = "failed"
-    result["evidence_status"] = (
-        "failed" if invalid_manifest else ("verified" if manifest else "missing")
+    failure = next(
+        (
+            event
+            for event in commit_failures
+            if event.get("run_id") == run_id
+            and isinstance(event.get("session_id"), str)
+            and re.fullmatch(r"[0-9a-f]{32}", event["session_id"])
+            and (manifest is None or event["session_id"] == manifest.get("session_id"))
+        ),
+        None,
     )
+    if invalid_manifest or failed_stop or failure:
+        result["run_status"] = "failed"
+    result["original_commit_status"] = "failed" if failure else "unknown"
+    result["original_commit_status_basis"] = (
+        "recorded_commit_failure" if failure else "no_trustworthy_commit_confirmation"
+    )
+    if failure:
+        stages = {
+            "manifest_write",
+            "manifest_file_fsync",
+            "manifest_publish",
+            "manifest_directory_fsync",
+            "manifest_parent_fsync",
+        }
+        result["original_commit_failure_stage"] = failure.get("stage") if failure.get("stage") in stages else "unknown"
+    result["evidence_status"] = "failed" if invalid_manifest else ("verified" if manifest else "missing")
+    result["integrity_status"] = result["evidence_status"]
     for asset, channels in result["by_asset_channel"].items():
         for channel, summary in channels.items():
-            dims = [
-                d
-                for d in result["dimensions"]
-                if d["asset"] == asset and d["channel"] == channel
-            ]
-            summary["discovery_refs"] = sorted(
-                {ref for d in dims for ref in d.get("discovery_refs", [])}
-            )
+            dims = [d for d in result["dimensions"] if d["asset"] == asset and d["channel"] == channel]
+            summary["discovery_refs"] = sorted({ref for d in dims for ref in d.get("discovery_refs", [])})
             summary["synced_rows"] = sum(d["synced_rows"] for d in dims)
-            summary["persistence_status"] = (
-                "observed" if summary["synced_rows"] else "not_observed"
-            )
+            summary["persistence_status"] = "observed" if summary["synced_rows"] else "not_observed"
             summary["entitlement"] = "unknown"
     result["archive_manifest"] = manifest
     if publish:

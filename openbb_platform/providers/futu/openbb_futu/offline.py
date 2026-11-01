@@ -85,6 +85,17 @@ def replay(source: Path, output: Path) -> dict:
     return archive.close()
 
 
+def _verification(status, records, errors):
+    return {
+        "status": status,
+        "records": records,
+        "errors": errors,
+        "integrity_status": status,
+        "original_commit_status": "unknown",
+        "original_commit_status_basis": "no_trustworthy_commit_confirmation",
+    }
+
+
 def verify(manifest_path: Path) -> dict:
     """Verify all listed segments and their contiguous durable prefix, read only."""
     with manifest_path.open(encoding="utf-8") as stream:
@@ -94,16 +105,8 @@ def verify(manifest_path: Path) -> dict:
     count = 0
     files = manifest["files"]
     session = manifest.get("session_id")
-    if (
-        not _valid_manifest_identity(manifest_path, session)
-        or not isinstance(files, list)
-        or len(files) > MAX_SEGMENTS
-    ):
-        return {
-            "status": "failed",
-            "records": 0,
-            "errors": ["invalid manifest identity or files"],
-        }
+    if not _valid_manifest_identity(manifest_path, session) or not isinstance(files, list) or len(files) > MAX_SEGMENTS:
+        return _verification("failed", 0, ["invalid manifest identity or files"])
     root = manifest_path.parent.parent.resolve()
     paths = []
     try:
@@ -140,11 +143,7 @@ def verify(manifest_path: Path) -> dict:
         if discovered != set(paths):
             raise ValueError("unlisted or missing sealed segment")
     except (OSError, ValueError, KeyError, TypeError):
-        return {
-            "status": "failed",
-            "records": 0,
-            "errors": ["invalid segment set or path"],
-        }
+        return _verification("failed", 0, ["invalid segment set or path"])
     for entry in files:
         path = Path(entry["file"])
         digest = hashlib.sha256()
@@ -159,19 +158,13 @@ def verify(manifest_path: Path) -> dict:
                         raise ValueError("incomplete line")
                     record = json.loads(line)
                     seq = record["local_seq"]
-                    if (
-                        not _strict_int(seq)
-                        or seq != expected
-                        or record["collector_run_id"] != manifest["run_id"]
-                    ):
+                    if not _strict_int(seq) or seq != expected or record["collector_run_id"] != manifest["run_id"]:
                         raise ValueError("sequence or run mismatch")
                     expected += 1
                     records += 1
                     first = seq if first is None else first
                     last = seq
-            if not _segment_matches(
-                entry, digest.hexdigest(), size, records, first=first, last=last
-            ):
+            if not _segment_matches(entry, digest.hexdigest(), size, records, first=first, last=last):
                 raise ValueError("segment metadata mismatch")
             count += records
         except (OSError, ValueError, KeyError, TypeError, UnicodeError):
@@ -179,8 +172,4 @@ def verify(manifest_path: Path) -> dict:
             break
     if not _manifest_matches(manifest, count):
         errors.append("manifest status or durable prefix mismatch")
-    return {
-        "status": "verified" if not errors else "failed",
-        "records": count,
-        "errors": errors,
-    }
+    return _verification("verified" if not errors else "failed", count, errors)

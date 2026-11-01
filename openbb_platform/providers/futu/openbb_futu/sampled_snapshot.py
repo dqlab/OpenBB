@@ -34,9 +34,7 @@ def _snapshot_child(connection, symbols, token, timeout, secrets, *, request):
     try:
         endpoint = _base()
         parsed = urlparse(endpoint)
-        if endpoint != BASE and (
-            parsed.path not in {"", "/"} or parsed.query or parsed.fragment
-        ):
+        if endpoint != BASE and (parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
             raise FutuError("invalid_endpoint")
         result = _raw_snapshot_reserved(
             symbols,
@@ -92,31 +90,21 @@ def _controlled_snapshot(symbols, token, timeout, secrets, *, stop, archive):
         try:
             process.start()
         except Exception:
-            raise FutuError(
-                "transport", request_id=request_id, started_at_utc=started
-            ) from None
+            raise FutuError("transport", request_id=request_id, started_at_utc=started) from None
         sender.close()
         reader = threading.Thread(target=read_result, daemon=True)
         reader.start()
         while reader.is_alive():
             if archive.stop.is_set() or archive.error or not archive.thread.is_alive():
-                raise FutuError(
-                    "archive_failure", request_id=request_id, started_at_utc=started
-                )
+                raise FutuError("archive_failure", request_id=request_id, started_at_utc=started)
             if stop.is_set():
-                raise FutuError(
-                    "stopped", request_id=request_id, started_at_utc=started
-                )
+                raise FutuError("stopped", request_id=request_id, started_at_utc=started)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise FutuError(
-                    "timeout", request_id=request_id, started_at_utc=started
-                )
+                raise FutuError("timeout", request_id=request_id, started_at_utc=started)
             reader.join(min(0.05, remaining))
         if archive.stop.is_set() or archive.error or not archive.thread.is_alive():
-            raise FutuError(
-                "archive_failure", request_id=request_id, started_at_utc=started
-            )
+            raise FutuError("archive_failure", request_id=request_id, started_at_utc=started)
         if stop.is_set():
             raise FutuError("stopped", request_id=request_id, started_at_utc=started)
         if time.monotonic() >= deadline:
@@ -172,9 +160,7 @@ def rebuild_rest_coverage(manifest_path, symbols):
                     or record.get("requested_symbols") != symbols
                 ):
                     raise ValueError("invalid REST record")
-                payload = json.loads(
-                    base64.b64decode(record["raw_payload"], validate=True)
-                )
+                payload = json.loads(base64.b64decode(record["raw_payload"], validate=True))
                 if (
                     not 200 <= record["http_status"] < 300
                     or not isinstance(payload, dict)
@@ -184,8 +170,7 @@ def rebuild_rest_coverage(manifest_path, symbols):
                 data = payload.get("data")
                 rows = data.get("snapshot_list") if isinstance(data, dict) else None
                 if not isinstance(rows, list) or any(
-                    not isinstance(row, dict) or not isinstance(row.get("code"), str)
-                    for row in rows
+                    not isinstance(row, dict) or not isinstance(row.get("code"), str) for row in rows
                 ):
                     continue
                 codes = [row["code"] for row in rows]
@@ -206,11 +191,7 @@ def _valid_polling_bounds(polls, interval, timeout):
     def bounded_number(value, low, high, *, inclusive_low):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return False
-        return (
-            math.isfinite(value)
-            and (low <= value if inclusive_low else low < value)
-            and value <= high
-        )
+        return math.isfinite(value) and (low <= value if inclusive_low else low < value) and value <= high
 
     return bounded_number(interval, 0.1, 86400, inclusive_low=True) and bounded_number(
         timeout, 0, 60, inclusive_low=False
@@ -258,17 +239,11 @@ def run(config, token, output, *, stop=None, secrets=()):
             for index in range(polls):
                 if stop.is_set():
                     break
-                if (
-                    archive.stop.is_set()
-                    or archive.error
-                    or not archive.thread.is_alive()
-                ):
+                if archive.stop.is_set() or archive.error or not archive.thread.is_alive():
                     failure = "archive_failure"
                     break
                 try:
-                    response = _controlled_snapshot(
-                        symbols, token, timeout, secrets, stop=stop, archive=archive
-                    )
+                    response = _controlled_snapshot(symbols, token, timeout, secrets, stop=stop, archive=archive)
                 except FutuError as exc:
                     failure = exc.category
                     if exc.request_id:
@@ -330,8 +305,7 @@ def run(config, token, output, *, stop=None, secrets=()):
                 ):
                     rows = obj["data"].get("snapshot_list")
                     if isinstance(rows, list) and all(
-                        isinstance(row, dict) and isinstance(row.get("code"), str)
-                        for row in rows
+                        isinstance(row, dict) and isinstance(row.get("code"), str) for row in rows
                     ):
                         codes = [row["code"] for row in rows]
                         if set(codes) <= set(symbols):
@@ -353,11 +327,7 @@ def run(config, token, output, *, stop=None, secrets=()):
                     while time.monotonic() < deadline:
                         if stop.wait(min(0.1, max(0, deadline - time.monotonic()))):
                             break
-                        if (
-                            archive.stop.is_set()
-                            or archive.error
-                            or not archive.thread.is_alive()
-                        ):
+                        if archive.stop.is_set() or archive.error or not archive.thread.is_alive():
                             failure = "archive_failure"
                             break
                     if stop.is_set() or failure:
@@ -369,9 +339,7 @@ def run(config, token, output, *, stop=None, secrets=()):
     coverage = dict.fromkeys(symbols, "unknown")
     if not manifest["error"] and manifest["durable_seq"] == manifest["received_frames"]:
         try:
-            coverage = rebuild_rest_coverage(
-                root / "futu-manifests" / (manifest["session_id"] + ".json"), symbols
-            )
+            coverage = rebuild_rest_coverage(root / "futu-manifests" / (manifest["session_id"] + ".json"), symbols)
         except (OSError, ValueError, KeyError, TypeError):
             failure = "archive_failure"
     result = {
@@ -380,13 +348,12 @@ def run(config, token, output, *, stop=None, secrets=()):
         "data_kind": "sampled_snapshot",
         "requested": entries,
         "coverage": coverage,
+        "integrity_status": verify(Path(manifest["manifest"]))["status"] if manifest.get("manifest") else "missing",
+        "original_commit_status": "unknown",
+        "original_commit_status_basis": "no_trustworthy_commit_confirmation",
         "quote_evidence": {
             symbol: {
-                "response_item_present": (
-                    True
-                    if status == "returned_code"
-                    else False if status == "missing" else None
-                ),
+                "response_item_present": (True if status == "returned_code" else False if status == "missing" else None),
                 "quote_fields_present": "unknown",
                 "quote_fields_valid": "unknown",
                 "quote_observed": "unknown",
@@ -423,18 +390,13 @@ def main():
             stop=stop,
             secrets=(credentials["refresh_token"], credentials["client_id"]),
         )
-        sys.stdout.write(
-            json.dumps({"run_id": result["run_id"], "failure": result["failure"]})
-            + "\n"
-        )
+        sys.stdout.write(json.dumps({"run_id": result["run_id"], "failure": result["failure"]}) + "\n")
         if result["failure"]:
             sys.stderr.write("sampled snapshot failed: " + result["failure"] + "\n")
         return 1 if result["failure"] else 0
     except Exception as exc:
         sys.stderr.write(
-            "sampled snapshot failed: "
-            + (exc.category if isinstance(exc, FutuError) else type(exc).__name__)
-            + "\n"
+            "sampled snapshot failed: " + (exc.category if isinstance(exc, FutuError) else type(exc).__name__) + "\n"
         )
         return 1
 

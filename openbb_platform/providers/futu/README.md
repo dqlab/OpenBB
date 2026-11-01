@@ -126,3 +126,24 @@ The shared archive writes `transport=rest`, `data_kind=sampled_snapshot`, reques
 For a request that fails without a complete HTTP response, the coverage report records the same request ID and UTC start, a sanitized `timeout` or `transport` category, null status and body, and `durability=unknown`. This attempt is not a durable response and cannot establish observed or missing symbols. Connection and DNS errors share `transport`; an interrupted response body may also be classified this way. A failed run exits nonzero and reports its category on stderr without exception text. `missing` means a successfully parsed, synced REST response omitted that requested symbol; it does not describe a WebSocket disconnection or streaming gap. Across polls, a prior durable returned code remains `returned_code` even if a later response omits it. This is code evidence only: `quote_evidence` separately reports response item presence, while quote field presence, validity, actual quote availability, and permission remain unknown. Old reports using `observed` must not be interpreted as quote evidence; rebuild from their verified REST manifest using the current rules. No business fields are removed or fabricated. Coverage report persistence itself does not assert hardware-level durability.
 
 Local validation observation (2026-10-31): the full FUTU pytest run passed 83 tests in 65.79 s wall time, with 28.74 s user CPU, 6.67 s system CPU, and 83,976 KiB maximum RSS reported by `/usr/bin/time -v`. This is a test-suite measurement including spawned processes, not a per-request benchmark or a limit on aggregate concurrent memory. The additional oversized-redirect case passed in the targeted suite. No live FUTUNN service or account was used.
+
+### Offline evidence and original commit status
+
+`verified` and `integrity_status` describe consistency of the files currently
+readable by the verifier. They cannot establish that the original manifest
+commit survived a crash. `original_commit_status` is `unknown` unless a
+run/session-bound failure event is readable, in which case coverage reports
+`failed` and its sanitized stage. A missing failure event is not confirmation
+of success. `run_status` is independent, so a failed run can have verified
+readable evidence. Legacy `durable_observations`, `synced_rows`, and
+`persistence_status` retain their existing meanings and counts: they are
+reconstructed from the manifest's declared synced segment prefix, not proof
+of the original manifest commit or complete market coverage. REST coverage
+likewise describes readable responses; an unknown response stays unknown.
+
+The verify CLI still exits 0 for consistent readable evidence; coverage exits 1
+only for failed evidence (missing remains 0). A failed run or unknown/failed
+original commit does not change those offline exit codes. Live write and fsync
+failures remain errors. These JSON outputs add fields; strict schema consumers
+must allow the new keys. Filesystem, mount and hardware behavior determines the
+actual crash guarantees; a later fsync cannot prove an earlier commit.

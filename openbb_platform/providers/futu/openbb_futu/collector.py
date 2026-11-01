@@ -371,7 +371,7 @@ class Collector:
             self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
             event_fd = os.open(
                 self.root / ("futu-events-" + self.run_id + ".jsonl"),
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND,
                 0o600,
             )
             self.logfile = os.fdopen(event_fd, "w", encoding="utf-8")

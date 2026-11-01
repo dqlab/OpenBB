@@ -3,6 +3,7 @@
 import argparse
 import json
 import re
+import sys
 import uuid
 from pathlib import Path
 
@@ -16,37 +17,27 @@ def main():
     """Run the evidence commands."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    discovery = commands.add_parser(
-        "discover", help="query explicit option/future seeds"
-    )
+    discovery = commands.add_parser("discover", help="query explicit option/future seeds")
     discovery.add_argument("--seeds", required=True, type=Path)
     discovery.add_argument("--token-file", required=True, type=Path)
     discovery.add_argument("--output", required=True, type=Path)
-    coverage = commands.add_parser(
-        "coverage", help="reconstruct coverage without writing"
-    )
+    coverage = commands.add_parser("coverage", help="reconstruct coverage without writing")
     coverage.add_argument("--output", required=True, type=Path)
     coverage.add_argument("--run-id", required=True)
     replay_cmd = commands.add_parser("replay", help="archive offline JSONL frames")
     replay_cmd.add_argument("--input", required=True, type=Path)
     replay_cmd.add_argument("--output", required=True, type=Path)
-    verify_cmd = commands.add_parser(
-        "verify", help="verify a sealed manifest without writing"
-    )
+    verify_cmd = commands.add_parser("verify", help="verify a sealed manifest without writing")
     verify_cmd.add_argument("--manifest", required=True, type=Path)
     args = parser.parse_args()
     if args.command in {"replay", "verify"}:
         try:
-            result = (
-                replay(args.input, args.output)
-                if args.command == "replay"
-                else verify(args.manifest)
-            )
+            result = replay(args.input, args.output) if args.command == "replay" else verify(args.manifest)
             print(json.dumps(result, ensure_ascii=False))  # noqa: T201
-            raise SystemExit(
-                1 if result.get("error") or result.get("status") == "failed" else 0
-            )
-        except (OSError, ValueError, KeyError, TypeError):
+            raise SystemExit(1 if result.get("error") or result.get("status") == "failed" else 0)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            detail = f" errno={exc.errno}" if isinstance(exc, OSError) and exc.errno is not None else ""
+            print("evidence operation failed: " + type(exc).__name__ + detail, file=sys.stderr)  # noqa: T201
             print(  # noqa: T201
                 json.dumps({"status": "failed", "error": "invalid input or evidence"})
             )
@@ -75,9 +66,7 @@ def main():
     # Empty seed lists have no response directory and are not meaningful.
     if not result["requests"]:
         parser.error("at least one seed is required")
-    result_path = Path(result["evidence_dir"]) / (
-        "discovery-" + uuid.uuid4().hex + ".json"
-    )
+    result_path = Path(result["evidence_dir"]) / ("discovery-" + uuid.uuid4().hex + ".json")
     write_json(result_path, result)
     result["report_file"] = str(result_path)
     print(json.dumps(result, ensure_ascii=False))  # noqa: T201

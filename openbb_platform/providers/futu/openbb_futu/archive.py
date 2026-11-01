@@ -74,11 +74,7 @@ def recover_open_files(root: Path) -> list[dict]:
             with manifest.open(encoding="utf-8") as source:
                 recorded = json.load(source)
             listed = {entry["file"] for entry in recorded["files"]}
-            if (
-                run_ids == {recorded["run_id"]}
-                and recorded["session_id"] == session
-                and str(path) in listed
-            ):
+            if run_ids == {recorded["run_id"]} and recorded["session_id"] == session and str(path) in listed:
                 continue
         except (OSError, ValueError, KeyError, TypeError):
             pass
@@ -186,9 +182,7 @@ class Archive:
         """Retain known secrets until shutdown or fail closed at the budget."""
         with self.lock:
             combined = self.accounting.active_secrets.union(values)
-            if len(combined) > MAX_SECRETS or any(
-                len(s.encode("utf-8")) > 8192 for s in combined
-            ):
+            if len(combined) > MAX_SECRETS or any(len(s.encode("utf-8")) > 8192 for s in combined):
                 self.error = "secret budget exhausted"
                 self.stop.set()
                 raise ValueError("secret budget exhausted")
@@ -202,10 +196,7 @@ class Archive:
                 self.accounting.rejected += 1
                 return False
             try:
-                if (
-                    not isinstance(raw, str)
-                    or len(raw.encode("utf-8")) > MAX_FRAME_BYTES
-                ):
+                if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_FRAME_BYTES:
                     raise ValueError("frame budget exhausted")
                 record = business_frame(
                     raw,
@@ -225,10 +216,7 @@ class Archive:
                         + "\n"
                     ).encode("utf-8")
                 )
-                if (
-                    size > MAX_LINE_BYTES
-                    or self.accounting.queued_bytes + size > MAX_QUEUE_BYTES
-                ):
+                if size > MAX_LINE_BYTES or self.accounting.queued_bytes + size > MAX_QUEUE_BYTES:
                     raise ValueError("archive byte budget exhausted")
                 self.queue.put_nowait((record, size))
                 self.accounting.queued_bytes += size
@@ -265,10 +253,7 @@ class Archive:
                         + "\n"
                     ).encode()
                 )
-                if (
-                    size > MAX_LINE_BYTES
-                    or self.accounting.queued_bytes + size > MAX_QUEUE_BYTES
-                ):
+                if size > MAX_LINE_BYTES or self.accounting.queued_bytes + size > MAX_QUEUE_BYTES:
                     raise ValueError("archive byte budget exhausted")
                 self.queue.put_nowait((record, size))
                 self.accounting.queued_bytes += size
@@ -336,20 +321,13 @@ class Archive:
         if not self.thread.is_alive():
             session = self.writer.session_id
             previous_seq = None
-            for path in sorted(
-                Path(self.writer.root).glob(
-                    f"source_id=futu/recv_date=*/session={session}/*.jsonl"
-                )
-            ):
+            for path in sorted(Path(self.writer.root).glob(f"source_id=futu/recv_date=*/session={session}/*.jsonl")):
                 digest = hashlib.sha256()
                 with path.open("rb") as source:
                     while chunk := source.read(1024 * 1024):
                         digest.update(chunk)
                 inspection = inspect_file(path)
-                if inspection["error"] or (
-                    previous_seq is not None
-                    and inspection["first_seq"] != previous_seq + 1
-                ):
+                if inspection["error"] or (previous_seq is not None and inspection["first_seq"] != previous_seq + 1):
                     self.error = result["error"] = "sealed segment validation failed"
                 previous_seq = inspection["last_seq"]
                 result["files"].append(
@@ -359,19 +337,57 @@ class Archive:
                         "sha256": digest.hexdigest(),
                     }
                 )
-            # Exclusive creation ensures a prior run's evidence cannot be overwritten.
             directory = Path(self.writer.root) / "futu-manifests"
-            directory.mkdir(parents=True, exist_ok=True)
             manifest = directory / f"{session}.json"
-            with manifest.open("x", encoding="utf-8") as stream:
-                json.dump(result, stream, ensure_ascii=False, indent=2)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            fd = os.open(directory, os.O_RDONLY)
+            temp = directory / f".{session}.{uuid.uuid4().hex}.tmp"
+            stage = "manifest_write"
             try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+                missing = []
+                ancestor = directory
+                while not ancestor.exists():
+                    missing.append(ancestor)
+                    ancestor = ancestor.parent
+                directory.mkdir(parents=True, exist_ok=True)
+                stage = "manifest_parent_fsync"
+                for child in reversed(missing):
+                    fd = os.open(child.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                stage = "manifest_write"
+                with temp.open("x", encoding="utf-8") as stream:
+                    json.dump(result, stream, ensure_ascii=False, indent=2)
+                    stream.write("\n")
+                    stream.flush()
+                    stage = "manifest_file_fsync"
+                    os.fsync(stream.fileno())
+                stage = "manifest_publish"
+                os.link(temp, manifest)
+                stage = "manifest_directory_fsync"
+                fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                temp.unlink()
+            except Exception as exc:
+                # Failure evidence is best effort; never obscure the original exception.
+                try:
+                    event = {
+                        "event": "manifest_commit_failed",
+                        "run_id": self.identity.run_id,
+                        "session_id": session,
+                        "stage": stage,
+                        "errno": exc.errno if isinstance(exc, OSError) else None,
+                    }
+                    event_path = Path(self.writer.root) / f"futu-events-{self.identity.run_id}.jsonl"
+                    with event_path.open("a", encoding="utf-8") as log:
+                        log.write(json.dumps(event) + "\n")
+                        log.flush()
+                        os.fsync(log.fileno())
+                except Exception:  # noqa: S110
+                    pass  # Preserve the original failure.
+                raise
             result["manifest"] = str(manifest)
         return result
