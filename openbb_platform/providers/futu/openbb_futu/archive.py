@@ -159,6 +159,7 @@ class Archive:
         self.lock = threading.Lock()
         self.stop = threading.Event()
         self.accounting = ArchiveAccounting()
+        self.publish_attempts = 0
         self.error: str | None = None
         self.error_errno: int | None = None
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -340,6 +341,8 @@ class Archive:
             directory = Path(self.writer.root) / "futu-manifests"
             manifest = directory / f"{session}.json"
             temp = directory / f".{session}.{uuid.uuid4().hex}.tmp"
+            self.publish_attempts += 1
+            attempt = self.publish_attempts
             stage = "manifest_write"
             try:
                 missing = []
@@ -370,6 +373,7 @@ class Archive:
                     os.fsync(fd)
                 finally:
                     os.close(fd)
+                stage = "manifest_temp_cleanup"
                 temp.unlink()
             except Exception as exc:
                 # Failure evidence is best effort; never obscure the original exception.
@@ -379,6 +383,13 @@ class Archive:
                         "run_id": self.identity.run_id,
                         "session_id": session,
                         "stage": stage,
+                        "publish_attempt": attempt,
+                        "original_commit_failure": (
+                            attempt == 1
+                            and stage != "manifest_temp_cleanup"
+                            and (stage == "manifest_directory_fsync" or not manifest.exists())
+                            and not (stage == "manifest_publish" and isinstance(exc, FileExistsError))
+                        ),
                         "errno": exc.errno if isinstance(exc, OSError) else None,
                     }
                     event_path = Path(self.writer.root) / f"futu-events-{self.identity.run_id}.jsonl"

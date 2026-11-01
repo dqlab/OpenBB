@@ -542,3 +542,43 @@ def test_polling_bounds_reject_invalid_values_before_creating_output(tmp_path, k
     with pytest.raises(ValueError, match="invalid polling bounds"):
         run(config, "unused", output)
     assert not output.exists()
+
+
+@pytest.mark.parametrize("damage", ["segment", "manifest"])
+def test_final_verification_failure_resets_coverage_and_cli(server, tmp_path, monkeypatch, damage):
+    """Damage real evidence after reconstruction and exercise the CLI exit path."""
+    import sys
+
+    import openbb_futu.sampled_snapshot as sampler
+
+    original = sampler.rebuild_rest_coverage
+
+    def damage_after_read(path, symbols):
+        coverage = original(path, symbols)
+        assert coverage == {"HK.00700": "returned_code", "HK.02800": "missing"}
+        if damage == "segment":
+            manifest = json.loads(Path(path).read_text())
+            with Path(manifest["files"][0]["file"]).open("ab") as stream:
+                stream.write(b"corrupt\n")
+        else:
+            Path(path).unlink()
+        return coverage
+
+    monkeypatch.setattr(sampler, "rebuild_rest_coverage", damage_after_read)
+    monkeypatch.setattr(sampler.TokenStore, "read", lambda self: {
+        "access_token": "test-token", "refresh_token": "refresh", "client_id": "client"
+    })
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"symbols": [
+        {"asset": "equity", "symbol": "HK.00700"}, {"asset": "etf", "symbol": "HK.02800"}
+    ]}))
+    output = tmp_path / "out"
+    monkeypatch.setattr(sys, "argv", ["sampler", "--config", str(config), "--token-file", str(tmp_path / "token"),
+                                      "--output", str(output)])
+    assert sampler.main() == 1
+    result = json.loads(next((output / "futu-sampled-coverage").glob("*.json")).read_text())
+    assert result["failure"] == "archive_failure"
+    assert result["integrity_status"] == "failed"
+    assert set(result["coverage"].values()) == {"unknown"}
+    assert all(item["response_item_present"] is None for item in result["quote_evidence"].values())
+    assert result["attempts"][0]["returned_codes"] == ["HK.00700"]

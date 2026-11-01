@@ -155,3 +155,5 @@ original commit does not change those offline exit codes. Live write and fsync
 failures remain errors. These JSON outputs add fields; strict schema consumers
 must allow the new keys. Filesystem, mount and hardware behavior determines the
 actual crash guarantees; a later fsync cannot prove an earlier commit.
+
+Sampled coverage is reset to unknown and the sampler fails if final archive verification fails. Manifest failure events record the publish attempt and distinguish temporary-file cleanup; a repeated attempt, pre-existing manifest, or unscoped legacy event does not establish that the original commit failed. A failure belonging to another session can fail the run without establishing the selected manifest's original commit status.

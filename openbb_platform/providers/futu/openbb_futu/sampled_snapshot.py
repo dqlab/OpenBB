@@ -342,13 +342,20 @@ def run(config, token, output, *, stop=None, secrets=()):
             coverage = rebuild_rest_coverage(root / "futu-manifests" / (manifest["session_id"] + ".json"), symbols)
         except (OSError, ValueError, KeyError, TypeError):
             failure = "archive_failure"
+    try:
+        integrity_status = verify(Path(manifest["manifest"]))["status"] if manifest.get("manifest") else "missing"
+    except (OSError, ValueError, KeyError, TypeError):
+        integrity_status = "failed"
+    if integrity_status != "verified":
+        failure = "archive_failure"
+        coverage = dict.fromkeys(symbols, "unknown")
     result = {
         "run_id": run_id,
         "transport": "rest",
         "data_kind": "sampled_snapshot",
         "requested": entries,
         "coverage": coverage,
-        "integrity_status": verify(Path(manifest["manifest"]))["status"] if manifest.get("manifest") else "missing",
+        "integrity_status": integrity_status,
         "original_commit_status": "unknown",
         "original_commit_status_basis": "no_trustworthy_commit_confirmation",
         "quote_evidence": {

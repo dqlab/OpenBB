@@ -342,13 +342,34 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
     )
     if uncertain_events:
         result["run_status"] = "unknown"
-    if invalid_manifest or failed_stop or failure:
-        result["run_status"] = "failed"
-    result["original_commit_status"] = "failed" if failure else "unknown"
-    result["original_commit_status_basis"] = (
-        "recorded_commit_failure" if failure else "no_trustworthy_commit_confirmation"
+    confirmed_failure = any(
+        event.get("run_id") == run_id
+        and event.get("original_commit_failure") is True
+        and event.get("publish_attempt") == 1
+        and isinstance(event.get("session_id"), str)
+        and re.fullmatch(r"[0-9a-f]{32}", event["session_id"])
+        for event in commit_failures
     )
-    if failure:
+    if failure and not confirmed_failure:
+        uncertain_events = True
+        result["run_status"] = "unknown"
+    if invalid_manifest or failed_stop or confirmed_failure:
+        result["run_status"] = "failed"
+    original_failure = next(
+        (event for event in commit_failures
+         if event.get("run_id") == run_id
+         and event.get("original_commit_failure") is True
+         and event.get("publish_attempt") == 1
+         and isinstance(event.get("session_id"), str)
+         and re.fullmatch(r"[0-9a-f]{32}", event["session_id"])
+         and (manifest is None or event["session_id"] == manifest.get("session_id"))),
+        None,
+    )
+    result["original_commit_status"] = "failed" if original_failure else "unknown"
+    result["original_commit_status_basis"] = (
+        "recorded_commit_failure" if original_failure else "no_trustworthy_commit_confirmation"
+    )
+    if original_failure:
         stages = {
             "manifest_write",
             "manifest_file_fsync",
@@ -356,7 +377,8 @@ def report(root, run_id, *, publish=True):  # noqa: PLR0912
             "manifest_directory_fsync",
             "manifest_parent_fsync",
         }
-        result["original_commit_failure_stage"] = failure.get("stage") if failure.get("stage") in stages else "unknown"
+        stage = original_failure.get("stage")
+        result["original_commit_failure_stage"] = stage if stage in stages else "unknown"
     result["integrity_status"] = "failed" if invalid_manifest else ("verified" if manifest else "missing")
     result["evidence_status"] = "unknown" if uncertain_events and not invalid_manifest else result["integrity_status"]
     result["unattributed_commit_failure"] = unattributed_failure

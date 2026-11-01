@@ -99,8 +99,8 @@ def test_other_session_failure_same_run(tmp_path, failure_first):
     if not failure_first:
         event_path.write_text(json.dumps(event) + "\n")
     result = report(tmp_path, run_id, publish=False)
-    assert result["original_commit_status"] == "failed"
-    assert result["run_status"] == "failed"
+    assert result["original_commit_status"] == "unknown"
+    assert result["run_status"] == "unknown"
 
 
 @pytest.mark.parametrize("event_run,session", [("e" * 32, "d" * 32), ("c" * 32, None)])
@@ -141,7 +141,7 @@ def test_corrupt_tail_then_real_failure(tmp_path, monkeypatch, tail):
     assert json.loads(event_path.read_bytes().splitlines()[-1])["event"] == "manifest_commit_failed"
     result = report(tmp_path, run_id, publish=False)
     assert result["event_log_status"] == "corrupt"
-    assert result["original_commit_status"] == "failed"
+    assert result["original_commit_status"] == "unknown"
     assert result["evidence_status"] == "unknown"
     assert result["run_status"] == "failed"
 
@@ -231,3 +231,53 @@ def test_cli_fails_for_corrupt_event_log(tmp_path):
     )
     assert result.returncode != 0
     assert json.loads(result.stdout)["evidence_status"] == "unknown"
+
+
+def test_repeat_close_and_preexisting_manifest_are_not_original_failure(tmp_path):
+    """An existing manifest survives repeated and distinct publication attempts."""
+    run_id = "a" * 32
+    make_plan(tmp_path, run_id)
+    archive = Archive(tmp_path, run_id=run_id)
+    manifest = Path(archive.close()["manifest"])
+    before = manifest.read_bytes()
+    with pytest.raises(FileExistsError):
+        archive.close()
+    event = json.loads((tmp_path / f"futu-events-{run_id}.jsonl").read_text())
+    assert event["publish_attempt"] == 2
+    assert event["original_commit_failure"] is False
+    assert manifest.read_bytes() == before
+    assert report(tmp_path, run_id, publish=False)["original_commit_status"] == "unknown"
+    other = Archive(tmp_path, run_id=run_id)
+    other.stop.set()
+    other.thread.join()
+    other.writer.session_id = archive.writer.session_id
+    with pytest.raises(FileExistsError):
+        other.close()
+    event = json.loads((tmp_path / f"futu-events-{run_id}.jsonl").read_text().splitlines()[-1])
+    assert event["publish_attempt"] == 1 and event["original_commit_failure"] is False
+    assert manifest.read_bytes() == before
+    result = report(tmp_path, run_id, publish=False)
+    assert result["original_commit_status"] == result["evidence_status"] == "unknown"
+
+
+def test_cleanup_failure_is_not_directory_fsync_failure(tmp_path, monkeypatch):
+    """Failure after a successful sync is attributed to cleanup."""
+    run_id = "b" * 32
+    make_plan(tmp_path, run_id)
+    archive = Archive(tmp_path, run_id=run_id)
+    original = Path.unlink
+
+    def fail(path, *args, **kwargs):
+        if path.suffix == ".tmp":
+            raise OSError(errno.EIO, "cleanup")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail)
+    with pytest.raises(OSError):
+        archive.close()
+    event = json.loads((tmp_path / f"futu-events-{run_id}.jsonl").read_text())
+    assert event["stage"] == "manifest_temp_cleanup"
+    assert event["original_commit_failure"] is False
+    result = report(tmp_path, run_id, publish=False)
+    assert result["integrity_status"] == "verified"
+    assert result["original_commit_status"] == "unknown"
