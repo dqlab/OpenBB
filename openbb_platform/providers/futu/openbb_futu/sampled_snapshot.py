@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -35,14 +36,16 @@ _EVENT_PREFIX = "futu-sampled-event-"
 def _event(handle, kind, request_id, data):
     """Publish an immutable, synced event directly under the held output root."""
     payload = {"version": 1, "event": kind, "request_id": request_id, **data}
-    handle.publish(_EVENT_PREFIX + request_id + "-" + kind + ".json",
-                   json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode())
+    handle.publish(
+        _EVENT_PREFIX + request_id + "-" + kind + ".json",
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode(),
+    )
 
 
 def _unresolved(handle):
     """Bound all directory enumeration and event reads; fail closed on malformed evidence."""
     budget = Budget(bytes_limit=64 * 1024 * 1024, entries_limit=100_000)
-    events = {}
+    events: dict[str, set[str]] = {}
     for name in budget.entries_at(handle):
         if not name.startswith(_EVENT_PREFIX):
             continue
@@ -50,16 +53,20 @@ def _unresolved(handle):
         obj = json.loads(raw)
         request_id = obj.get("request_id")
         kind = obj.get("event")
-        if (not isinstance(request_id, str) or len(request_id) != 32
-                or any(c not in "0123456789abcdef" for c in request_id)
-                or kind not in {"attempt", "result"} or obj.get("version") != 1
-                or name != _EVENT_PREFIX + request_id + "-" + kind + ".json"):
+        if (
+            not isinstance(request_id, str)
+            or len(request_id) != 32
+            or any(c not in "0123456789abcdef" for c in request_id)
+            or kind not in {"attempt", "result"}
+            or obj.get("version") != 1
+        ):
             raise ValueError("invalid sampled event")
+        if name != _EVENT_PREFIX + request_id + "-" + kind + ".json":
+            raise ValueError("invalid sampled event name")
         events.setdefault(request_id, set()).add(kind)
     unresolved = sum(kinds != {"attempt", "result"} for kinds in events.values())
     if unresolved:
         raise RuntimeError(f"sampled_unresolved:{unresolved}")
-
 
 
 def _finish_failure(handle, exc, run_id):
@@ -69,11 +76,15 @@ def _finish_failure(handle, exc, run_id):
         Budget().read_identity_at(handle, name, max_bytes=65536)
     except FileNotFoundError:
         return
-    _event(handle, "result", exc.request_id, {"session_id": run_id,
-           "status": "failure", "error": exc.category})
+    _event(
+        handle,
+        "result",
+        exc.request_id,
+        {"session_id": run_id, "status": "failure", "error": exc.category},
+    )
 
 
-def _snapshot_child(connection, lock_fd, symbols, token, timeout, secrets, *, request):
+def _snapshot_child(connection, lock_fd, symbols, token, *, timeout, secrets, request):
     """Perform one reserved request; only sanitized results cross the pipe."""
     # The inherited descriptor keeps the flock until process exit.
     if lock_fd < 0:
@@ -83,7 +94,9 @@ def _snapshot_child(connection, lock_fd, symbols, token, timeout, secrets, *, re
     try:
         endpoint = _base()
         parsed = urlparse(endpoint)
-        if endpoint != BASE and (parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
+        if endpoint != BASE and (
+            parsed.path not in {"", "/"} or parsed.query or parsed.fragment
+        ):
             raise FutuError("invalid_endpoint")
         result = _raw_snapshot_reserved(
             symbols,
@@ -113,43 +126,81 @@ def _snapshot_child(connection, lock_fd, symbols, token, timeout, secrets, *, re
         # The kernel closes lock_fd only when this process exits.
 
 
-def _controlled_snapshot(symbols, token, timeout, secrets, *, stop, archive, owner, journal, run_id, entries):
+@dataclass
+class SnapshotJournal:
+    """Held evidence root and attribution for a sampled request attempt."""
+
+    handle: RootHandle
+    run_id: str
+    entries: list[dict]
+
+
+def _controlled_snapshot(
+    symbols, token, timeout, secrets, *, stop, archive, owner, attempt
+):
     """Reserve in the owner and keep its flock alive through worker exit."""
     if http.client.HTTPConnection.debuglevel or http.client.HTTPSConnection.debuglevel:
         raise FutuError("unsafe_http_debug")
     request_id = uuid.uuid4().hex
     started = datetime.now(timezone.utc).isoformat()
+
     def fail(category, details=(None, None, None, None)):
-        raise FutuError(category, request_id=request_id, started_at_utc=started,
-                        http_status=details[0], received_bytes=details[1],
-                        encoded_bytes=details[2], decoded_bytes=details[3])
+        raise FutuError(
+            category,
+            request_id=request_id,
+            started_at_utc=started,
+            http_status=details[0],
+            received_bytes=details[1],
+            encoded_bytes=details[2],
+            decoded_bytes=details[3],
+        )
 
     with owner.borrow(coordination_directory()):
         # A fresh owner has no persisted history, so it waits a full window.
-        delay = owner._acquired_at + owner.budget().window - time.monotonic()
+        delay = owner.acquired_at + owner.budget().window - time.monotonic()
         while delay > 0:
             if stop.wait(min(delay, 0.05)):
                 fail("stopped")
             if archive.stop.is_set() or archive.error or not archive.thread.is_alive():
                 fail("archive_failure")
-            delay = owner._acquired_at + owner.budget().window - time.monotonic()
+            delay = owner.acquired_at + owner.budget().window - time.monotonic()
         try:
             _reserve(owner)
         except FutuError as exc:
             fail(exc.category)
         # Symbols are arbitrary caller input and may contain credentials.  The
         # journal needs the request shape, not the caller-supplied identifiers.
-        scope = {asset: sum(entry["asset"] == asset for entry in entries)
-                 for asset in ("equity", "etf", "option", "future")}
-        _event(journal, "attempt", request_id, {"session_id": run_id, "scope": scope,
-               "started_at_utc": started, "status": "unknown"})
+        scope = {
+            asset: sum(entry["asset"] == asset for entry in attempt.entries)
+            for asset in ("equity", "etf", "option", "future")
+        }
+        _event(
+            attempt.handle,
+            "attempt",
+            request_id,
+            {
+                "session_id": attempt.run_id,
+                "scope": scope,
+                "started_at_utc": started,
+                "status": "unknown",
+            },
+        )
         context = multiprocessing.get_context("spawn")
         receive, send = context.Pipe(duplex=False)
-        command = [sys.executable, "-m", "openbb_futu.sampled_snapshot", "--worker",
-                   str(owner._fd), str(send.fileno())]
-        payload = json.dumps([symbols, token, timeout, list(secrets), request_id, started]).encode()
+        command = [
+            sys.executable,
+            "-m",
+            "openbb_futu.sampled_snapshot",
+            "--worker",
+            str(owner.descriptor),
+            str(send.fileno()),
+        ]
+        payload = json.dumps(
+            [symbols, token, timeout, list(secrets), request_id, started]
+        ).encode()
         result = []
         done = threading.Event()
+
         def read_result():
             try:
                 result.append(receive.recv())
@@ -157,65 +208,80 @@ def _controlled_snapshot(symbols, token, timeout, secrets, *, stop, archive, own
                 pass
             finally:
                 done.set()
-        started_process = False
+
         writer_started = False
         try:
-            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,  # noqa: S603
-                                       stderr=subprocess.DEVNULL, pass_fds=(owner._fd, send.fileno()))
-            started_process = True
-            send.close()
-            def write_request():
+            with subprocess.Popen(  # noqa: S603
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                pass_fds=(owner.descriptor, send.fileno()),
+            ) as process:
                 try:
-                    process.stdin.write(payload)
-                except OSError:
-                    pass
+                    request_stream = process.stdin
+                    if request_stream is None:
+                        raise RuntimeError("worker input pipe unavailable")
+                    send.close()
+
+                    def write_request():
+                        try:
+                            request_stream.write(payload)
+                        except OSError:
+                            pass
+                        finally:
+                            with suppress(OSError):
+                                request_stream.close()
+
+                    writer = threading.Thread(target=write_request, daemon=True)
+                    reader = threading.Thread(target=read_result, daemon=True)
+                    deadline = time.monotonic() + timeout
+                    writer.start()
+                    writer_started = True
+                    reader.start()
+                    failure = None
+                    while not done.wait(0.02):
+                        if stop.is_set():
+                            failure = "stopped"
+                            break
+                        if (
+                            archive.stop.is_set()
+                            or archive.error
+                            or not archive.thread.is_alive()
+                        ):
+                            failure = "archive_failure"
+                            break
+                        if time.monotonic() >= deadline:
+                            failure = "timeout"
+                            break
+                    if failure:
+                        fail(failure)
+                    if not result:
+                        fail("transport")
+                    try:
+                        process.wait(timeout=max(0.001, deadline - time.monotonic()))
+                    except subprocess.TimeoutExpired:
+                        fail("timeout")
+                    if process.returncode != 0:
+                        fail("transport")
+                    kind, value = result[0]
+                    if kind != "ok":
+                        fail(value[0], value[1:])
+                    return value
                 finally:
-                    with suppress(OSError):
-                        process.stdin.close()
-            writer = threading.Thread(target=write_request, daemon=True)
-            reader = threading.Thread(target=read_result, daemon=True)
-            deadline = time.monotonic() + timeout
-            writer.start()
-            writer_started = True
-            reader.start()
-            failure = None
-            while not done.wait(0.02):
-                if stop.is_set():
-                    failure = "stopped"
-                    break
-                if archive.stop.is_set() or archive.error or not archive.thread.is_alive():
-                    failure = "archive_failure"
-                    break
-                if time.monotonic() >= deadline:
-                    failure = "timeout"
-                    break
-            if failure:
-                fail(failure)
-            if not result:
-                fail("transport")
-            try:
-                process.wait(timeout=max(0.001, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                fail("timeout")
-            if process.returncode != 0:
-                fail("transport")
-            kind, value = result[0]
-            if kind != "ok":
-                fail(value[0], value[1:])
-            return value
+                    send.close()
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
+                    if writer_started:
+                        writer.join()
+                    # Count the attempt through actual worker exit, including a
+                    # delayed dispatch, so it cannot age out before the send.
+                    owner.record_dispatch()
         except OSError:
             fail("transport")
         finally:
             send.close()
-            if started_process:
-                if process.poll() is None:
-                    process.kill()
-                process.wait()
-                if writer_started:
-                    writer.join()
-                # Count the attempt through actual worker exit, including a
-                # delayed dispatch, so it cannot age out before the send.
-                owner._requests[-1] = time.monotonic()
             receive.close()
 
 
@@ -247,7 +313,8 @@ def rebuild_rest_coverage(manifest_path, symbols):
         data = payload.get("data")
         rows = data.get("snapshot_list") if isinstance(data, dict) else None
         if not isinstance(rows, list) or any(
-            not isinstance(row, dict) or not isinstance(row.get("code"), str) for row in rows
+            not isinstance(row, dict) or not isinstance(row.get("code"), str)
+            for row in rows
         ):
             return
         codes = [row["code"] for row in rows]
@@ -258,7 +325,11 @@ def rebuild_rest_coverage(manifest_path, symbols):
                 coverage[symbol] = "returned_code"
             elif coverage[symbol] != "returned_code":
                 coverage[symbol] = "missing"
-    if verify(path, on_record=consume, on_manifest=check_manifest)["status"] != "verified":
+
+    if (
+        verify(path, on_record=consume, on_manifest=check_manifest)["status"]
+        != "verified"
+    ):
         raise ValueError("invalid manifest")
     return coverage
 
@@ -270,15 +341,19 @@ def _valid_polling_bounds(polls, interval, timeout):
     def bounded_number(value, low, high, *, inclusive_low):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return False
-        return math.isfinite(value) and (low <= value if inclusive_low else low < value) and value <= high
+        return (
+            math.isfinite(value)
+            and (low <= value if inclusive_low else low < value)
+            and value <= high
+        )
 
     return bounded_number(interval, 0.1, 86400, inclusive_low=True) and bounded_number(
         timeout, 0, 60, inclusive_low=False
     )
 
 
-def run(config, token, output, *, stop=None, secrets=()):  # noqa: PLR0912
-    """Collect explicit dimensions and report only synced response evidence."""
+def _sampling_parameters(config, token, secrets):
+    """Validate caller dimensions, credentials and all polling bounds before side effects."""
     entries = config["symbols"]
     if not isinstance(entries, list) or not 1 <= len(entries) <= 400:
         raise ValueError("expected 1 to 400 symbols")
@@ -297,13 +372,16 @@ def run(config, token, output, *, stop=None, secrets=()):  # noqa: PLR0912
     # request. These identifiers are intentionally retained in public metadata.
     secrets = tuple(secrets)
     credentials = (token, *secrets)
-    if not isinstance(token, str) or not token or any(
-        not isinstance(value, str) for value in secrets
+    if (
+        not isinstance(token, str)
+        or not token
+        or any(not isinstance(value, str) for value in secrets)
     ):
         raise ValueError("invalid credentials")
     if any(
         secret and (secret == symbol or (len(secret) >= 8 and secret in symbol))
-        for symbol in symbols for secret in credentials
+        for symbol in symbols
+        for secret in credentials
     ):
         raise ValueError("target conflicts with credentials")
     if len(set(symbols)) != len(symbols):
@@ -313,6 +391,14 @@ def run(config, token, output, *, stop=None, secrets=()):  # noqa: PLR0912
     timeout = config.get("timeout_seconds", 10)
     if not _valid_polling_bounds(polls, interval, timeout):
         raise ValueError("invalid polling bounds")
+    return entries, symbols, secrets, polls, interval, timeout
+
+
+def run(config, token, output, *, stop=None, secrets=()):  # noqa: PLR0912
+    """Collect explicit dimensions and report only synced response evidence."""
+    entries, symbols, secrets, polls, interval, timeout = _sampling_parameters(
+        config, token, secrets
+    )
     stop = stop or threading.Event()
     root = Path(output)
     with RootHandle.create(root):
@@ -334,13 +420,23 @@ def run(config, token, output, *, stop=None, secrets=()):  # noqa: PLR0912
             for index in range(polls):
                 if stop.is_set():
                     break
-                if archive.stop.is_set() or archive.error or not archive.thread.is_alive():
+                if (
+                    archive.stop.is_set()
+                    or archive.error
+                    or not archive.thread.is_alive()
+                ):
                     failure = "archive_failure"
                     break
                 try:
                     response = _controlled_snapshot(
-                        symbols, token, timeout, secrets, stop=stop, archive=archive, owner=owner,
-                        journal=journal, run_id=run_id, entries=entries
+                        symbols,
+                        token,
+                        timeout,
+                        secrets,
+                        stop=stop,
+                        archive=archive,
+                        owner=owner,
+                        attempt=SnapshotJournal(journal, run_id, entries),
                     )
                 except FutuError as exc:
                     failure = exc.category
@@ -363,11 +459,20 @@ def run(config, token, output, *, stop=None, secrets=()):  # noqa: PLR0912
                             }
                         )
                     break
-                _event(journal, "result", response.request_id, {
-                    "session_id": run_id, "status": "response", "http_status": response.status,
-                    "raw_payload": base64.b64encode(response.body).decode("ascii"),
-                    "payload_encoding": "base64", "payload_representation": "http_content_decoded",
-                    "http_content_encoding": response.content_encoding})
+                _event(
+                    journal,
+                    "result",
+                    response.request_id,
+                    {
+                        "session_id": run_id,
+                        "status": "response",
+                        "http_status": response.status,
+                        "raw_payload": base64.b64encode(response.body).decode("ascii"),
+                        "payload_encoding": "base64",
+                        "payload_representation": "http_content_decoded",
+                        "http_content_encoding": response.content_encoding,
+                    },
+                )
                 now = datetime.now(timezone.utc).isoformat()
                 record = {
                     "schema_version": "futu_raw_v1",
@@ -409,7 +514,8 @@ def run(config, token, output, *, stop=None, secrets=()):  # noqa: PLR0912
                 ):
                     rows = obj["data"].get("snapshot_list")
                     if isinstance(rows, list) and all(
-                        isinstance(row, dict) and isinstance(row.get("code"), str) for row in rows
+                        isinstance(row, dict) and isinstance(row.get("code"), str)
+                        for row in rows
                     ):
                         codes = [row["code"] for row in rows]
                         if set(codes) <= set(symbols):
@@ -431,7 +537,11 @@ def run(config, token, output, *, stop=None, secrets=()):  # noqa: PLR0912
                     while time.monotonic() < deadline:
                         if stop.wait(min(0.1, max(0, deadline - time.monotonic()))):
                             break
-                        if archive.stop.is_set() or archive.error or not archive.thread.is_alive():
+                        if (
+                            archive.stop.is_set()
+                            or archive.error
+                            or not archive.thread.is_alive()
+                        ):
                             failure = "archive_failure"
                             break
                     if stop.is_set() or failure:
@@ -443,11 +553,17 @@ def run(config, token, output, *, stop=None, secrets=()):  # noqa: PLR0912
     coverage = dict.fromkeys(symbols, "unknown")
     if not manifest["error"] and manifest["durable_seq"] == manifest["received_frames"]:
         try:
-            coverage = rebuild_rest_coverage(root / "futu-manifests" / (manifest["session_id"] + ".json"), symbols)
+            coverage = rebuild_rest_coverage(
+                root / "futu-manifests" / (manifest["session_id"] + ".json"), symbols
+            )
         except (OSError, ValueError, KeyError, TypeError):
             failure = "archive_failure"
     try:
-        integrity_status = verify(Path(manifest["manifest"]))["status"] if manifest.get("manifest") else "missing"
+        integrity_status = (
+            verify(Path(manifest["manifest"]))["status"]
+            if manifest.get("manifest")
+            else "missing"
+        )
     except (OSError, ValueError, KeyError, TypeError):
         integrity_status = "failed"
     if integrity_status != "verified":
@@ -464,7 +580,11 @@ def run(config, token, output, *, stop=None, secrets=()):  # noqa: PLR0912
         "original_commit_status_basis": "no_trustworthy_commit_confirmation",
         "quote_evidence": {
             symbol: {
-                "response_item_present": (True if status == "returned_code" else False if status == "missing" else None),
+                "response_item_present": (
+                    True
+                    if status == "returned_code"
+                    else False if status == "missing" else None
+                ),
                 "quote_fields_present": "unknown",
                 "quote_fields_valid": "unknown",
                 "quote_observed": "unknown",
@@ -505,14 +625,18 @@ def main():
                 if key in credentials
             ),
         )
-        sys.stdout.write(json.dumps({"run_id": result["run_id"], "failure": result["failure"]}) + "\n")
+        sys.stdout.write(
+            json.dumps({"run_id": result["run_id"], "failure": result["failure"]})
+            + "\n"
+        )
         if result["failure"]:
             sys.stderr.write("sampled snapshot failed: " + result["failure"] + "\n")
         return 1 if result["failure"] else 0
     except Exception as exc:
         reason = exc.category if isinstance(exc, FutuError) else type(exc).__name__
-        if type(exc) is RuntimeError and (
-            str(exc) == "recovery_unresolved" or str(exc).startswith("sampled_unresolved:")
+        if (isinstance(exc, RuntimeError) and exc.__class__ is RuntimeError) and (
+            str(exc) == "recovery_unresolved"
+            or str(exc).startswith("sampled_unresolved:")
         ):
             reason = str(exc)
         sys.stderr.write("sampled snapshot failed: " + reason + "\n")
@@ -522,10 +646,25 @@ def main():
 if __name__ == "__main__":
     if len(sys.argv) == 4 and sys.argv[1] == "--worker":
         from multiprocessing.connection import Connection
+
         worker_lock = int(sys.argv[2])
         worker_connection = Connection(int(sys.argv[3]), readable=False)
-        worker_symbols, worker_token, worker_timeout, worker_secrets, worker_id, worker_started = json.load(sys.stdin)
-        _snapshot_child(worker_connection, worker_lock, worker_symbols, worker_token, worker_timeout,
-                        worker_secrets, request=(worker_id, worker_started))
+        (
+            worker_symbols,
+            worker_token,
+            worker_timeout,
+            worker_secrets,
+            worker_id,
+            worker_started,
+        ) = json.load(sys.stdin)
+        _snapshot_child(
+            worker_connection,
+            worker_lock,
+            worker_symbols,
+            worker_token,
+            timeout=worker_timeout,
+            secrets=worker_secrets,
+            request=(worker_id, worker_started),
+        )
     else:
         raise SystemExit(main())

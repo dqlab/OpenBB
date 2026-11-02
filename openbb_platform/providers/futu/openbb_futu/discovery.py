@@ -60,25 +60,45 @@ def discover(
         ):
             raise ValueError("invalid discovery seed")
     if any(
-        secret and (secret == seed["symbol"] or (len(secret) >= 8 and secret in seed["symbol"]))
-        for seed in seeds for secret in (token, *secrets)
+        secret
+        and (
+            secret == seed["symbol"] or (len(secret) >= 8 and secret in seed["symbol"])
+        )
+        for seed in seeds
+        for secret in (token, *secrets)
     ):
         raise ValueError("target conflicts with credentials")
     output = Path(output)
     with RootHandle.create(output) as root:
-        return _discover_private(seeds, token, output, root, max_bytes, secrets, owner)
+        return _discover_private(
+            seeds,
+            token,
+            output,
+            root,
+            max_bytes=max_bytes,
+            secrets=secrets,
+            owner=owner,
+        )
 
 
-def _discover_private(seeds, token, output, root, max_bytes, secrets, owner):
+def _discover_private(seeds, token, output, root, *, max_bytes, secrets, owner):
     directory = output / uuid4().hex
     os.mkdir(directory.name, 0o700, dir_fd=root.fds[-1])
     os.fsync(root.fds[-1])
     root.check()
     with RootHandle(directory) as evidence_root:
-        return _capture(seeds, token, directory, evidence_root, max_bytes, secrets, owner)
+        return _capture(
+            seeds,
+            token,
+            directory,
+            evidence_root,
+            max_bytes=max_bytes,
+            secrets=secrets,
+            owner=owner,
+        )
 
 
-def _capture(seeds, token, directory, evidence_root, max_bytes, secrets, owner):
+def _capture(seeds, token, directory, evidence_root, *, max_bytes, secrets, owner):
     report: dict = {
         "evidence_dir": str(directory),
         "target_status": {x: "unknown" for x in ("equity", "etf", "option", "future")},
@@ -112,19 +132,23 @@ def _capture(seeds, token, directory, evidence_root, max_bytes, secrets, owner):
             return any(sensitive(v) for v in value)
         return isinstance(value, str) and (
             bool(re.search(r"(?i)\bbearer\s+\S+", value))
-            or any(secret and (secret == value or (len(secret) >= 8 and secret in value))
-                   for secret in (token, *secrets))
+            or any(
+                secret and (secret == value or (len(secret) >= 8 and secret in value))
+                for secret in (token, *secrets)
+            )
         )
 
     directory_owner = coordination_directory()
     with (
-        (owner.borrow(directory_owner) if owner else Owner(directory_owner)) as active_owner,
+        (
+            owner.borrow(directory_owner) if owner else Owner(directory_owner)
+        ) as active_owner,
         active_owner.borrow(directory_owner),
         requests.Session() as session,
     ):
         session.trust_env = False
         if owner is None and seeds:
-            _reserve_wait = active_owner._acquired_at + active_owner.budget().window
+            _reserve_wait = active_owner.acquired_at + active_owner.budget().window
             time.sleep(max(0, _reserve_wait - time.monotonic()))
         for index, seed in enumerate(seeds):
             endpoint, field = ENDPOINTS[seed["asset"]]
@@ -137,18 +161,29 @@ def _capture(seeds, token, directory, evidence_root, max_bytes, secrets, owner):
                 response = make_request(
                     _base() + "/api/v1.0/quote/" + seed["symbol"] + "/" + endpoint,
                     method="GET",
-                    headers={"Authorization": "Bearer " + token, "Accept-Encoding": "identity"},
+                    headers={
+                        "Authorization": "Bearer " + token,
+                        "Accept-Encoding": "identity",
+                    },
                     timeout=10,
                     stream=True,
                     allow_redirects=False,
                     session=session,
                 )
                 try:
-                    if response.headers.get("Content-Encoding", "identity").lower().strip() != "identity":
+                    if (
+                        response.headers.get("Content-Encoding", "identity")
+                        .lower()
+                        .strip()
+                        != "identity"
+                    ):
                         raise ValueError("unsupported_content_encoding")
                     chunks = bytearray()
                     while True:
-                        chunk = response.raw.read(min(65536, max_bytes - len(chunks) + 1), decode_content=False)
+                        chunk = response.raw.read(
+                            min(65536, max_bytes - len(chunks) + 1),
+                            decode_content=False,
+                        )
                         if not chunk:
                             break
                         chunks.extend(chunk)
@@ -172,14 +207,17 @@ def _capture(seeds, token, directory, evidence_root, max_bytes, secrets, owner):
                 obj = json.loads(raw, object_pairs_hook=unique)
                 if sensitive(obj) or any(
                     len(secret) >= 8 and secret.encode() in raw
-                    for secret in (token, *secrets) if secret
+                    for secret in (token, *secrets)
+                    if secret
                 ):
                     raise ValueError("credential_in_response")
                 path = directory / f"response-{index:04d}.bin"
                 evidence_root.check()
                 fd = os.open(
-                    path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                    0o600, dir_fd=evidence_root.fds[-1],
+                    path.name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=evidence_root.fds[-1],
                 )
                 with os.fdopen(fd, "wb") as stream:
                     stream.write(raw)
@@ -220,13 +258,18 @@ def _capture(seeds, token, directory, evidence_root, max_bytes, secrets, owner):
                 item["error"] = (
                     str(exc)
                     if isinstance(exc, ValueError)
-                    and str(exc) in {"response_too_large", "credential_in_response", "unsupported_content_encoding"}
+                    and str(exc)
+                    in {
+                        "response_too_large",
+                        "credential_in_response",
+                        "unsupported_content_encoding",
+                    }
                     else "invalid_response_or_transport"
                 )
             finally:
                 # Keep the request charged through completion, including
                 # delayed sends and failures, while the Owner is borrowed.
-                active_owner._requests[-1] = time.monotonic()
+                active_owner.record_dispatch()
     os.fsync(evidence_root.fds[-1])
     evidence_root.check()
     return report

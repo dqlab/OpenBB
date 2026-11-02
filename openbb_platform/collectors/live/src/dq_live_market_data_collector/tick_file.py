@@ -140,6 +140,17 @@ class IngressCounts:
     rejection_reasons: dict[str, int] = field(default_factory=dict)
 
 
+@dataclass
+class SegmentState:
+    """Path, timing and held identity for the writer's current segment."""
+
+    path: Path | None = None
+    date: str | None = None
+    opened: float = 0.0
+    chain: Any = None
+    identity: tuple[int, int] | None = None
+
+
 class TickWriter:
     """Single-owner exclusive append segments; callers serialize all access.
 
@@ -171,13 +182,52 @@ class TickWriter:
         self.session_id = uuid4().hex
         self.part = 0
         self.stream: BinaryIO | None = None
-        self.path: Path | None = None
-        self.date: str | None = None
-        self.opened = 0.0
+        self._segment = SegmentState()
         self.written = self.durable = 0
         self._chain_factory = directory_chain_factory
-        self._chain = None
-        self._identity = None
+
+    @property
+    def path(self) -> Path | None:
+        """Return the current segment's path."""
+        return self._segment.path
+
+    @path.setter
+    def path(self, value: Path | None) -> None:
+        self._segment.path = value
+
+    @property
+    def date(self) -> str | None:
+        """Return the current segment's receive date."""
+        return self._segment.date
+
+    @date.setter
+    def date(self, value: str | None) -> None:
+        self._segment.date = value
+
+    @property
+    def opened(self) -> float:
+        """Return the monotonic time at which the segment opened."""
+        return self._segment.opened
+
+    @opened.setter
+    def opened(self, value: float) -> None:
+        self._segment.opened = value
+
+    @property
+    def _chain(self):
+        return self._segment.chain
+
+    @_chain.setter
+    def _chain(self, value):
+        self._segment.chain = value
+
+    @property
+    def _identity(self) -> tuple[int, int] | None:
+        return self._segment.identity
+
+    @_identity.setter
+    def _identity(self, value: tuple[int, int] | None) -> None:
+        self._segment.identity = value
 
     @property
     def max_bytes(self) -> int:
@@ -205,29 +255,38 @@ class TickWriter:
         if self._chain_factory is not None:
             if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
                 raise ValueError("invalid received date")
-            parts = [f"source_id={self.source_id}", f"recv_date={date}",
-                     f"session={self.session_id}"]
+            parts = [
+                f"source_id={self.source_id}",
+                f"recv_date={date}",
+                f"session={self.session_id}",
+            ]
             chain = self._chain_factory(parts, create=True)
-            self._chain = chain
+            self._segment.chain = chain
             self.part += 1
-            self.path = self.root.joinpath(*parts, f"part-{self.part:06d}.jsonl.open")
+            self._segment.path = self.root.joinpath(
+                *parts, f"part-{self.part:06d}.jsonl.open"
+            )
             try:
                 chain.check()
-                fd = os.open(self.path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                             0o600, dir_fd=chain.fd)
+                fd = os.open(
+                    self._segment.path.name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=chain.fd,
+                )
                 self.stream = os.fdopen(fd, "wb", buffering=0)
                 info = os.fstat(self.stream.fileno())
-                self._identity = (info.st_dev, info.st_ino)
+                self._segment.identity = (info.st_dev, info.st_ino)
                 chain.check()
                 os.fsync(chain.fd)
                 chain.check()
-                self.date, self.opened = date, time.monotonic()
+                self._segment.date, self._segment.opened = date, time.monotonic()
             except BaseException:
                 if self.stream is not None:
                     self.stream.close()
                     self.stream = None
                 chain.close()
-                self._chain = None
+                self._segment.chain = None
                 raise
             return
         directory = (
@@ -238,10 +297,10 @@ class TickWriter:
         )
         _make_durable_directory(directory)
         self.part += 1
-        self.path = directory / f"part-{self.part:06d}.jsonl.open"
-        self.stream = self.path.open("xb")
+        self._segment.path = directory / f"part-{self.part:06d}.jsonl.open"
+        self.stream = self._segment.path.open("xb")
         _sync_directory(directory)
-        self.date, self.opened = date, time.monotonic()
+        self._segment.date, self._segment.opened = date, time.monotonic()
 
     def append(self, record: dict[str, Any]) -> None:
         encoded = (
@@ -252,17 +311,17 @@ class TickWriter:
         ).encode("utf-8")
         date = record["received_at_utc"][:10]
         if self.stream and (
-            date != self.date
+            date != self._segment.date
             or self.stream.tell() + len(encoded) > self.rotation.max_bytes
-            or time.monotonic() - self.opened >= self.rotation.max_seconds
+            or time.monotonic() - self._segment.opened >= self.rotation.max_seconds
         ):
             self.seal()
         if self.stream is None:
-            if self._chain is not None:
+            if self._segment.chain is not None:
                 raise RuntimeError("segment sealing incomplete")
             self._open(date)
         assert self.stream is not None
-        if self._chain is not None:
+        if self._segment.chain is not None:
             remaining = memoryview(encoded)
             while remaining:
                 self._check_anchored_file()
@@ -277,52 +336,64 @@ class TickWriter:
 
     def sync(self) -> None:
         if self.stream:
-            if self._chain is not None:
+            if self._segment.chain is not None:
                 self._check_anchored_file()
             self.stream.flush()
             os.fsync(self.stream.fileno())
-            if self._chain is not None:
+            if self._segment.chain is not None:
                 self._check_anchored_file()
             self.durable = self.written
 
     def _check_anchored_file(self) -> None:
-        assert self._chain is not None and self.path is not None
-        self._chain.check()
-        info = os.stat(self.path.name, dir_fd=self._chain.fd, follow_symlinks=False)
-        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != self._identity:
+        assert self._segment.chain is not None and self._segment.path is not None
+        self._segment.chain.check()
+        info = os.stat(
+            self._segment.path.name,
+            dir_fd=self._segment.chain.fd,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or (info.st_dev, info.st_ino) != self._segment.identity
+        ):
             raise OSError("open segment replaced")
 
     def seal(self) -> None:
-        if self._chain is not None:
+        if self._segment.chain is not None:
             if self.stream:
                 self.sync()
                 self._check_anchored_file()
                 self.stream.close()
                 self.stream = None
             self._check_anchored_file()
-            assert self.path is not None
-            target = self.path.with_suffix("")
-            os.link(self.path.name, target.name, src_dir_fd=self._chain.fd,
-                    dst_dir_fd=self._chain.fd, follow_symlinks=False)
-            self._chain.check()
-            os.fsync(self._chain.fd)
+            assert self._segment.path is not None
+            target = self._segment.path.with_suffix("")
+            os.link(
+                self._segment.path.name,
+                target.name,
+                src_dir_fd=self._segment.chain.fd,
+                dst_dir_fd=self._segment.chain.fd,
+                follow_symlinks=False,
+            )
+            self._segment.chain.check()
+            os.fsync(self._segment.chain.fd)
             self._check_anchored_file()
-            os.unlink(self.path.name, dir_fd=self._chain.fd)
-            os.fsync(self._chain.fd)
-            self._chain.check()
-            self.path = target
-            self._chain.close()
-            self._chain = None
+            os.unlink(self._segment.path.name, dir_fd=self._segment.chain.fd)
+            os.fsync(self._segment.chain.fd)
+            self._segment.chain.check()
+            self._segment.path = target
+            self._segment.chain.close()
+            self._segment.chain = None
             return
         if self.stream:
             self.sync()
             self.stream.close()
             self.stream = None
-            assert self.path is not None
-            target = self.path.with_suffix("")
-            os.rename(self.path, target)
+            assert self._segment.path is not None
+            target = self._segment.path.with_suffix("")
+            os.rename(self._segment.path, target)
             _sync_directory(target.parent)
-            self.path = target
+            self._segment.path = target
 
     close = seal
 
@@ -336,9 +407,9 @@ class TickWriter:
                 self.stream.close()
         finally:
             self.stream = None
-            if self._chain is not None:
-                self._chain.close()
-                self._chain = None
+            if self._segment.chain is not None:
+                self._segment.chain.close()
+                self._segment.chain = None
 
 
 class TickIngress:

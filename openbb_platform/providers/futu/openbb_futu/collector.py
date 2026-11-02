@@ -126,6 +126,7 @@ class CollectorLifecycle:
     mode: str | None = None
     fatal_errno: int | None = None
     failure: str | None = None
+    gap: bool = False
 
 
 class _EventLog:
@@ -139,9 +140,17 @@ class _EventLog:
         self.lock = threading.Lock()
         try:
             self.chain.check()
-            self.fd = os.open(self.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                              os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600,
-                              dir_fd=self.chain.fd)
+            self.fd = os.open(
+                self.name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_APPEND
+                | os.O_NOFOLLOW
+                | os.O_NONBLOCK,
+                0o600,
+                dir_fd=self.chain.fd,
+            )
             info = os.fstat(self.fd)
             if not stat.S_ISREG(info.st_mode):
                 raise ValueError("event log is not regular")
@@ -156,7 +165,10 @@ class _EventLog:
     def _check(self):
         self.chain.check()
         info = os.stat(self.name, dir_fd=self.chain.fd, follow_symlinks=False)
-        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != self.identity:
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or (info.st_dev, info.st_ino) != self.identity
+        ):
             raise OSError("event log replaced")
 
     def append(self, record):
@@ -199,10 +211,18 @@ class Collector:
         self.pending = {}
         self.run_id = uuid.uuid4().hex
         self.archive = None
-        self.gap = False
         self.logfile = None
         self.lifecycle = CollectorLifecycle()
         self._test_isolated = False
+
+    @property
+    def gap(self):
+        """Return whether an interrupted subscription still has an unresolved gap."""
+        return self.lifecycle.gap
+
+    @gap.setter
+    def gap(self, value):
+        self.lifecycle.gap = value
 
     @classmethod
     def _isolated_for_test(cls, *args, **kwargs):
@@ -223,9 +243,11 @@ class Collector:
         if path is None:
             return None
         try:
-            relative = Path(os.path.abspath(path)).relative_to(
-                Path(os.path.abspath(self.root))
-            ).as_posix()
+            relative = (
+                Path(os.path.abspath(path))
+                .relative_to(Path(os.path.abspath(self.root)))
+                .as_posix()
+            )
         except (ValueError, TypeError):
             return None
         pattern = rf"{directory}/[0-9a-f]{{32}}{suffix}"
@@ -331,7 +353,11 @@ class Collector:
         if token["expires_at"] <= time.time() + margin:
             token = await asyncio.to_thread(self.store.rotate, owner)
         self.archive.add_secrets(
-            (token["access_token"], token["refresh_token"], token.get("client_secret", ""))
+            (
+                token["access_token"],
+                token["refresh_token"],
+                token.get("client_secret", ""),
+            )
         )
         quiet_logger = logging.Logger(
             "futu.websocket.suppressed", level=logging.CRITICAL + 1
@@ -367,13 +393,13 @@ class Collector:
                     status="unknown",
                 )
                 self.set_mode("streaming")
-                if self.gap:
+                if self.lifecycle.gap:
                     self.event(
                         "gap_end",
                         connection=self.lifecycle.connection,
                         recovery="resubscribed; missing data not recovered",
                     )
-                    self.gap = False
+                    self.lifecycle.gap = False
                 last_refresh = last_subscription = time.monotonic()
                 while not self.stop.is_set():
                     delay = max(
@@ -445,7 +471,7 @@ class Collector:
                         await asyncio.wait_for(socket.close(), timeout=5)
                         await asyncio.wait_for(asyncio.shield(reader), timeout=5)
                     except Exception:
-                        self.gap = True
+                        self.lifecycle.gap = True
                         self.lifecycle.failure = (
                             self.lifecycle.failure or "shutdown_receive_uncertain"
                         )
@@ -454,6 +480,107 @@ class Collector:
                     reader.cancel()
                 await asyncio.gather(reader, return_exceptions=True)
 
+    def _prepare_plan(self, root_handle):
+        """Revalidate historical plans before publishing coverage and the new plan."""
+        report_root = root_handle
+        report_budget = Budget()
+        planned, self.config["channels"] = prepare(
+            self.config, budget=report_budget, root_handle=report_root
+        )
+        snapshots = []
+        for name in sorted(report_budget.entries_at(report_root)):
+            if name.startswith("futu-plan-") and name.endswith(".json"):
+                previous_id = name[len("futu-plan-") : -len(".json")]
+                if previous_id != self.run_id:
+                    snapshots.append(
+                        (
+                            previous_id,
+                            report_budget.read_identity_at(
+                                report_root, name, max_bytes=8_388_608
+                            ),
+                        )
+                    )
+        historical = []
+        for previous_id, snapshot in snapshots:
+            historical.append(
+                (
+                    previous_id,
+                    _report(
+                        self.root,
+                        previous_id,
+                        publish=False,
+                        budget=report_budget,
+                        root_handle=report_root,
+                        plan_snapshot=snapshot,
+                    ),
+                )
+            )
+        for previous_id, snapshot in snapshots:
+            report_budget.check_identity_at(
+                report_root, f"futu-plan-{previous_id}.json", snapshot[1]
+            )
+        self.event("historical_reports_publish_started", count=len(historical))
+        for previous_id, reconstructed in historical:
+            try:
+                write_json(
+                    self.root / f"futu-coverage-{previous_id}.json",
+                    reconstructed,
+                    root_handle=report_root,
+                    replace=True,
+                )
+            except Exception as exc:
+                self.event(
+                    "historical_report_publish_failure",
+                    run_id=previous_id,
+                    publication_status=(
+                        "visible_durability_unknown"
+                        if isinstance(exc, PublicationDurabilityUnknown)
+                        else "not_replaced"
+                    ),
+                )
+                raise
+            self.event("historical_report_published", run_id=previous_id)
+        self.event("historical_reports_publish_completed", count=len(historical))
+        write_json(
+            self.root / f"futu-plan-{self.run_id}.json",
+            planned,
+            root_handle=report_root,
+        )
+        self.event("plan_created", selected=len(planned["selected"]))
+        return report_budget
+
+    async def _prepare_recovery(self, root_handle, owner):
+        """Respect owner cooldown and retain every unresolved recovery alert."""
+        delay = max(0.0, owner.acquired_at + owner.budget().window - time.monotonic())
+        if delay:
+            try:
+                await asyncio.wait_for(self.stop.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+            else:
+                raise FutuError("stopped_during_cooldown")
+
+        def recovery_unresolved():
+            self.lifecycle.failure = "recovery_unresolved"
+            self.event("recovery_unresolved", gap="unresolved")
+
+        for recovery in recover_open_files(
+            self.root,
+            root_handle=root_handle,
+            on_unresolved=recovery_unresolved,
+        ):
+            self.lifecycle.failure = self.lifecycle.failure or "recovery_unresolved"
+            self.event(
+                "interrupted_segment",
+                evidence_dir=self._event_path(
+                    recovery["evidence_dir"], "futu-recovery", ""
+                ),
+                gap="unresolved",
+                error=recovery["error"],
+            )
+        if self.lifecycle.failure == "recovery_unresolved":
+            raise FutuError("recovery_unresolved")
+
     async def run(self):  # noqa: PLR0912
         """Handle run."""
         root_handle = None
@@ -461,66 +588,9 @@ class Collector:
             root_handle = RootHandle.create(self.root)
             self.logfile = _EventLog(root_handle, self.run_id)
             with Owner(coordination_directory()) as owner:
-                delay = max(0.0, owner._acquired_at + owner.budget().window - time.monotonic())
-                if delay:
-                    try:
-                        await asyncio.wait_for(self.stop.wait(), timeout=delay)
-                    except asyncio.TimeoutError:
-                        pass
-                    else:
-                        raise FutuError("stopped_during_cooldown")
-                def recovery_unresolved():
-                    self.lifecycle.failure = "recovery_unresolved"
-                    self.event("recovery_unresolved", gap="unresolved")
-
-                for recovery in recover_open_files(
-                    self.root, root_handle=root_handle, on_unresolved=recovery_unresolved
-                ):
-                    self.lifecycle.failure = self.lifecycle.failure or "recovery_unresolved"
-                    self.event(
-                        "interrupted_segment",
-                        evidence_dir=self._event_path(recovery["evidence_dir"], "futu-recovery", ""),
-                        gap="unresolved",
-                        error=recovery["error"],
-                    )
-                if self.lifecycle.failure == "recovery_unresolved":
-                    raise FutuError("recovery_unresolved")
+                await self._prepare_recovery(root_handle, owner)
                 if "dimensions" in self.config:
-                    report_root = root_handle
-                    report_budget = Budget()
-                    planned, self.config["channels"] = prepare(self.config, budget=report_budget, root_handle=report_root)
-                    snapshots = []
-                    for name in sorted(report_budget.entries_at(report_root)):
-                        if name.startswith("futu-plan-") and name.endswith(".json"):
-                            previous_id = name[len("futu-plan-"):-len(".json")]
-                            if previous_id != self.run_id:
-                                snapshots.append((previous_id, report_budget.read_identity_at(
-                                    report_root, name, max_bytes=8_388_608)))
-                    historical = []
-                    for previous_id, snapshot in snapshots:
-                        historical.append((previous_id, _report(
-                            self.root, previous_id, publish=False, budget=report_budget,
-                            root_handle=report_root, plan_snapshot=snapshot,
-                        )))
-                    for previous_id, snapshot in snapshots:
-                        report_budget.check_identity_at(
-                            report_root, f"futu-plan-{previous_id}.json", snapshot[1])
-                    self.event("historical_reports_publish_started", count=len(historical))
-                    for previous_id, reconstructed in historical:
-                        try:
-                            write_json(
-                                self.root / f"futu-coverage-{previous_id}.json",
-                                reconstructed, root_handle=report_root, replace=True,
-                            )
-                        except Exception as exc:
-                            self.event("historical_report_publish_failure", run_id=previous_id,
-                                       publication_status=("visible_durability_unknown" if isinstance(
-                                           exc, PublicationDurabilityUnknown) else "not_replaced"))
-                            raise
-                        self.event("historical_report_published", run_id=previous_id)
-                    self.event("historical_reports_publish_completed", count=len(historical))
-                    write_json(self.root / f"futu-plan-{self.run_id}.json", planned, root_handle=report_root)
-                    self.event("plan_created", selected=len(planned["selected"]))
+                    report_budget = self._prepare_plan(root_handle)
                 self.archive = Archive(
                     self.root,
                     run_id=self.run_id,
@@ -536,8 +606,8 @@ class Collector:
                             exc.category if isinstance(exc, FutuError) else "transport"
                         )
                         self.event("session_failure", category=category)
-                        if not self.gap:
-                            self.gap = True
+                        if not self.lifecycle.gap:
+                            self.lifecycle.gap = True
                             self.event("gap_start", reason=category)
                         if category not in (
                             "transport",
@@ -555,15 +625,17 @@ class Collector:
                         self.event("reconnect_wait", attempt=retries, seconds=delay)
                         with contextlib.suppress(asyncio.TimeoutError):
                             await asyncio.wait_for(self.stop.wait(), timeout=delay)
-                if self.gap:
+                if self.lifecycle.gap:
                     self.lifecycle.failure = self.lifecycle.failure or "gap_unresolved"
                     self.event("gap_unresolved")
-                if self.lifecycle.failure or self.gap:
+                if self.lifecycle.failure or self.lifecycle.gap:
                     self.archive.error = self.archive.error or "incomplete_receive"
                 result = await asyncio.to_thread(self.archive.close)
                 self.event(
                     "archive_closed",
-                    manifest=self._event_path(result.get("manifest"), "futu-manifests", r"\.json"),
+                    manifest=self._event_path(
+                        result.get("manifest"), "futu-manifests", r"\.json"
+                    ),
                     error=result["error"],
                     durable=result["durable_seq"],
                 )
@@ -574,16 +646,29 @@ class Collector:
                     "stopped", status="failed" if self.lifecycle.failure else "stopped"
                 )
                 if "dimensions" in self.config:
-                    outcome = report(self.root, self.run_id, budget=report_budget, root_handle=root_handle)
+                    outcome = report(
+                        self.root,
+                        self.run_id,
+                        budget=report_budget,
+                        root_handle=root_handle,
+                    )
                     if outcome.get("budget_or_input_error"):
-                        self.lifecycle.failure = self.lifecycle.failure or "coverage_report_failure"
-                        self.event("coverage_report_failure", publication_status=outcome.get(
-                            "publication_status", "not_replaced"))
+                        self.lifecycle.failure = (
+                            self.lifecycle.failure or "coverage_report_failure"
+                        )
+                        self.event(
+                            "coverage_report_failure",
+                            publication_status=outcome.get(
+                                "publication_status", "not_replaced"
+                            ),
+                        )
                         self.event("stopped", status="failed")
                 self.lifecycle.finalized = True
         except Exception as exc:
             self.lifecycle.failure = self.lifecycle.failure or (
-                exc.category if isinstance(exc, (FutuError, SealedSegmentError)) else "collector_failure"
+                exc.category
+                if isinstance(exc, (FutuError, SealedSegmentError))
+                else "collector_failure"
             )
             self.lifecycle.fatal_errno = exc.errno if isinstance(exc, OSError) else None
             with contextlib.suppress(Exception):
@@ -600,15 +685,22 @@ class Collector:
                     self.lifecycle.failure = self.lifecycle.failure or "archive_failure"
             try:
                 if not self.lifecycle.finalized and self.logfile is not None:
-                    self.event("stopped", status="failed" if self.lifecycle.failure else "stopped")
+                    self.event(
+                        "stopped",
+                        status="failed" if self.lifecycle.failure else "stopped",
+                    )
             except Exception:
-                self.lifecycle.failure = self.lifecycle.failure or "status_write_failure"
+                self.lifecycle.failure = (
+                    self.lifecycle.failure or "status_write_failure"
+                )
             finally:
                 if self.logfile is not None:
                     try:
                         self.logfile.close()
                     except Exception:
-                        self.lifecycle.failure = self.lifecycle.failure or "status_write_failure"
+                        self.lifecycle.failure = (
+                            self.lifecycle.failure or "status_write_failure"
+                        )
             if root_handle is not None:
                 root_handle.close()
             if self.lifecycle.failure:

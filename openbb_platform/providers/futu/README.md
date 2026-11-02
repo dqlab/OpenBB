@@ -187,3 +187,24 @@ archive or prevent coordinated replacement of a manifest and its data. Protect
 and retain the original evidence; a later fsync cannot prove an earlier commit.
 Filesystem, mount and hardware behavior determines actual crash guarantees.
 These offline checks do not verify live provider access or account entitlement.
+
+### Reproducing offline development checks
+
+Use a clean checkout and a dedicated CPython 3.12.13 venv for the internal lab
+checks. From the repository root, install the declared packages, run the sandboxed
+suites, and check the Python diff against the target branch:
+
+```sh
+python .github/scripts/lab_ci.py install
+python .github/scripts/run_lab_offline.py
+python .github/scripts/lint_ci.py --base origin/develop
+```
+
+The inventory includes Futu, the real CTP SDK with its generated GB18030 locale,
+and the live collector. The sandbox permits loopback HTTP and WebSocket fixtures
+while isolating external networking and user settings. Ubuntu hosts that restrict
+user namespaces must select the lab AppArmor profile as described in the
+[CI instructions](../../../.github/workflows/README.md).
+Black, mypy and pylint check changed production Python; Ruff also checks changed
+tests. Keep a separate worktree for unfinished experiments so they do not enter
+the clean checkout's test selection.

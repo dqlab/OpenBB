@@ -30,7 +30,9 @@ class DirectoryChain:
                         pass
                     else:
                         os.fsync(parent)
-                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                fd = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent
+                )
                 self.fds.append(fd)
                 self.names.append(name)
                 self.check()
@@ -50,7 +52,10 @@ class DirectoryChain:
             for parent, fd, name in zip(self.fds, self.fds[1:], self.names):
                 actual = os.stat(name, dir_fd=parent, follow_symlinks=False)
                 held = os.fstat(fd)
-                if not stat.S_ISDIR(actual.st_mode) or (actual.st_dev, actual.st_ino) != (held.st_dev, held.st_ino):
+                if not stat.S_ISDIR(actual.st_mode) or (
+                    actual.st_dev,
+                    actual.st_ino,
+                ) != (held.st_dev, held.st_ino):
                     raise EvidenceChanged("directory replaced")
         except OSError as exc:
             raise EvidenceChanged("directory changed") from exc

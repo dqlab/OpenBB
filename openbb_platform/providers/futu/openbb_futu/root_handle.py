@@ -1,4 +1,5 @@
 """Descriptor-anchored, no-follow publication under an existing root."""
+
 import os
 import secrets
 import stat
@@ -26,13 +27,16 @@ class RootHandle:
             raise ValueError("parent directory component is not allowed")
         path = Path(os.path.abspath(raw))
         fds = [os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
-        names = []
+        names: list[str] = []
         try:
             for name in path.parts[1:]:
                 for parent, held, component in zip(fds, fds[1:], names):
                     actual = os.stat(component, dir_fd=parent, follow_symlinks=False)
                     info = os.fstat(held)
-                    if not stat.S_ISDIR(actual.st_mode) or (actual.st_dev, actual.st_ino) != (info.st_dev, info.st_ino):
+                    if not stat.S_ISDIR(actual.st_mode) or (
+                        actual.st_dev,
+                        actual.st_ino,
+                    ) != (info.st_dev, info.st_ino):
                         raise EvidenceChanged("root or ancestor replaced")
                 try:
                     os.mkdir(name, 0o700, dir_fd=fds[-1])
@@ -40,11 +44,17 @@ class RootHandle:
                     pass
                 else:
                     os.fsync(fds[-1])
-                fds.append(os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
+                fds.append(
+                    os.open(
+                        name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=fds[-1],
+                    )
+                )
                 names.append(name)
             result = cls(path)
-            actual, held = os.fstat(result.fds[-1]), os.fstat(fds[-1])
-            if (actual.st_dev, actual.st_ino) != (held.st_dev, held.st_ino):
+            actual, original = os.fstat(result.fds[-1]), os.fstat(fds[-1])
+            if (actual.st_dev, actual.st_ino) != (original.st_dev, original.st_ino):
                 result.close()
                 raise EvidenceChanged("root replaced")
             return result
@@ -61,8 +71,13 @@ class RootHandle:
         self.fds = [os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
         try:
             for name in self.names:
-                self.fds.append(os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                                        dir_fd=self.fds[-1]))
+                self.fds.append(
+                    os.open(
+                        name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=self.fds[-1],
+                    )
+                )
             self.check()
         except BaseException:
             self.close()
@@ -84,13 +99,22 @@ class RootHandle:
     def check(self):
         """Reject a changed root or ancestor."""
         root = os.fstat(self.fds[-1])
-        if not stat.S_ISDIR(root.st_mode) or root.st_uid != os.geteuid() or root.st_mode & 0o022:
-            raise PermissionError("output root must be owned by the effective user and not group/other writable")
+        if (
+            not stat.S_ISDIR(root.st_mode)
+            or root.st_uid != os.geteuid()
+            or root.st_mode & 0o022
+        ):
+            raise PermissionError(
+                "output root must be owned by the effective user and not group/other writable"
+            )
         try:
             for parent, fd, name in zip(self.fds, self.fds[1:], self.names):
                 actual = os.stat(name, dir_fd=parent, follow_symlinks=False)
                 held = os.fstat(fd)
-                if not stat.S_ISDIR(actual.st_mode) or (actual.st_dev, actual.st_ino) != (held.st_dev, held.st_ino):
+                if not stat.S_ISDIR(actual.st_mode) or (
+                    actual.st_dev,
+                    actual.st_ino,
+                ) != (held.st_dev, held.st_ino):
                     raise EvidenceChanged("root or ancestor replaced")
         except OSError as exc:
             raise EvidenceChanged("root or ancestor changed") from exc
@@ -106,7 +130,9 @@ class RootHandle:
                     with suppress(FileExistsError):
                         os.mkdir(name, 0o700, dir_fd=fd)
                     self.check()
-                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                child = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
+                )
                 os.close(fd)
                 fd = child
             return fd
@@ -123,8 +149,12 @@ class RootHandle:
         for _ in range(TEMP_ATTEMPTS):
             temp = ".tmp-" + secrets.token_hex(16)
             try:
-                fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                             0o600, dir_fd=parent)
+                fd = os.open(
+                    temp,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent,
+                )
                 break
             except FileExistsError:
                 continue
@@ -141,7 +171,13 @@ class RootHandle:
                 if replace:
                     os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
                 else:
-                    os.link(temp, name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+                    os.link(
+                        temp,
+                        name,
+                        src_dir_fd=parent,
+                        dst_dir_fd=parent,
+                        follow_symlinks=False,
+                    )
                 published = True
                 os.fsync(parent)
                 self.check()
@@ -150,6 +186,8 @@ class RootHandle:
                     os.unlink(temp, dir_fd=parent)
         except Exception as exc:
             if published:
-                raise PublicationDurabilityUnknown(getattr(exc, "errno", None),
-                                                   "published; durability or location unknown") from exc
+                raise PublicationDurabilityUnknown(
+                    getattr(exc, "errno", None),
+                    "published; durability or location unknown",
+                ) from exc
             raise

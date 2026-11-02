@@ -94,12 +94,18 @@ def business_frame(
             return any(secret_value(v) for v in value)
         return isinstance(value, str) and (
             bool(re.search(r"(?i)\bbearer\s+\S+", value))
-            or any(secret and (secret == value or (len(secret) >= 8 and secret in value))
-                   for secret in active_secrets)
+            or any(
+                secret and (secret == value or (len(secret) >= 8 and secret in value))
+                for secret in active_secrets
+            )
         )
 
-    if sensitive(obj) or secret_value(obj) or any(
-        len(secret) >= 8 and secret in raw for secret in active_secrets if secret
+    if (
+        sensitive(obj)
+        or secret_value(obj)
+        or any(
+            len(secret) >= 8 and secret in raw for secret in active_secrets if secret
+        )
     ):
         raise ValueError("frame contains credential material")
     typ = obj["type"]

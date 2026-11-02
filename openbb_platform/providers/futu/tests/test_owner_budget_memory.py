@@ -189,6 +189,8 @@ def test_public_collection_obeys_owner_cooldown(tmp_path, monkeypatch):
         with pytest.raises(client.FutuError, match="stopped"):
             sampled_snapshot._controlled_snapshot(
                 ["US.A"], "token", 1, (), stop=stop, archive=None, owner=owner,
-                journal=None, run_id="test", entries=[{"asset": "equity", "symbol": "US.A"}],
+                attempt=sampled_snapshot.SnapshotJournal(
+                    None, "test", [{"asset": "equity", "symbol": "US.A"}]
+                ),
             )
         assert not owner._requests

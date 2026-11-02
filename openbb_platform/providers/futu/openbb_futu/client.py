@@ -74,7 +74,7 @@ class OAuthTokens:
 def _reserve(owner, *, wait_for_cooldown=False):
     """Wait only for a newly acquired owner; report exhausted shared budgets."""
     if wait_for_cooldown:
-        delay = owner._acquired_at + owner.budget().window - time.monotonic()
+        delay = owner.acquired_at + owner.budget().window - time.monotonic()
         if delay > 0:
             time.sleep(delay)
     if owner.budget().acquire() > 0:
@@ -86,19 +86,27 @@ def _post(path: str, *, owner: Owner | None = None, **kwargs: Any) -> dict:
         raise FutuError("unsafe_http_debug")
     directory = coordination_directory()
     try:
-        with (owner.borrow(directory) if owner else Owner(directory)) as active_owner, active_owner.borrow(directory):
+        with (
+            owner.borrow(directory) if owner else Owner(directory)
+        ) as active_owner, active_owner.borrow(directory):
             _reserve(active_owner, wait_for_cooldown=owner is None)
             try:
                 with requests.Session() as session:
                     session.trust_env = False
-                    response = make_request(_base() + path, method="POST", timeout=10,
-                                            allow_redirects=False, session=session, **kwargs)
+                    response = make_request(
+                        _base() + path,
+                        method="POST",
+                        timeout=10,
+                        allow_redirects=False,
+                        session=session,
+                        **kwargs,
+                    )
             except Exception:
                 raise FutuError("transport") from None
             finally:
                 # The reservation must cover a delayed dispatch and the entire
                 # request while the owner's reentrant operation lock is held.
-                active_owner._requests[-1] = time.monotonic()
+                active_owner.record_dispatch()
     except FutuError:
         raise
     except Exception:
@@ -150,7 +158,9 @@ def refresh_tokens(
         raise FutuError("authentication") from None
 
 
-def snapshot(symbols: list[str], access_token: str, *, owner: Owner | None = None) -> list[dict]:
+def snapshot(
+    symbols: list[str], access_token: str, *, owner: Owner | None = None
+) -> list[dict]:
     """Fetch a snapshot using the shared owner budget."""
     if not access_token:
         raise FutuError("not_configured")
@@ -344,13 +354,16 @@ def _raw_snapshot_reserved(
                 return any(sensitive(v) for v in value)
             return isinstance(value, str) and (
                 bool(re.search(r"(?i)\bbearer\s+\S+", value))
-                or any(s and (value == s or (len(s) >= 8 and s in value))
-                       for s in (access_token, *secrets))
+                or any(
+                    s and (value == s or (len(s) >= 8 and s in value))
+                    for s in (access_token, *secrets)
+                )
             )
 
         if sensitive(obj) or any(
             len(secret) >= 8 and secret.encode() in body
-            for secret in (access_token, *secrets) if secret
+            for secret in (access_token, *secrets)
+            if secret
         ):
             raise FutuError(
                 "sensitive_response",
@@ -400,16 +413,21 @@ def raw_snapshot(
         raise FutuError("unsafe_http_debug")
     directory = coordination_directory()
     try:
-        with (owner.borrow(directory) if owner else Owner(directory)) as active_owner, active_owner.borrow(directory):
+        with (
+            owner.borrow(directory) if owner else Owner(directory)
+        ) as active_owner, active_owner.borrow(directory):
             _reserve(active_owner, wait_for_cooldown=owner is None)
             try:
                 return _raw_snapshot_reserved(
-                    symbols, access_token, timeout=timeout, max_bytes=max_bytes,
+                    symbols,
+                    access_token,
+                    timeout=timeout,
+                    max_bytes=max_bytes,
                     secrets=secrets,
                     request=(uuid.uuid4().hex, datetime.now(timezone.utc).isoformat()),
                 )
             finally:
-                active_owner._requests[-1] = time.monotonic()
+                active_owner.record_dispatch()
     except FutuError:
         raise
     except Exception:

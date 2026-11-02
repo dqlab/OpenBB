@@ -18,16 +18,24 @@ def open_directory(path, *, identities=None):
     paths = ["/"]
     try:
         for component in components:
-            fds.append(os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                               dir_fd=fds[-1]))
+            fds.append(
+                os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=fds[-1],
+                )
+            )
             paths.append(os.path.join(paths[-1], component))
         for index, fd in enumerate(fds):
             info = os.fstat(fd)
             identity = (info.st_dev, info.st_ino)
             if index:
-                current = os.stat(components[index - 1], dir_fd=fds[index - 1],
-                                  follow_symlinks=False)
-                if (current.st_dev, current.st_ino) != identity or not stat.S_ISDIR(current.st_mode):
+                current = os.stat(
+                    components[index - 1], dir_fd=fds[index - 1], follow_symlinks=False
+                )
+                if (current.st_dev, current.st_ino) != identity or not stat.S_ISDIR(
+                    current.st_mode
+                ):
                     raise EvidenceChanged("directory replaced")
             if identities is not None:
                 previous = identities.setdefault(paths[index], identity)
@@ -44,7 +52,9 @@ def open_regular(path, *, identities=None):
     parent, name = os.path.split(os.fspath(path))
     parent_fd = open_directory(parent or ".", identities=identities)
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        fd = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd
+        )
     finally:
         os.close(parent_fd)
     try:
@@ -67,10 +77,17 @@ class BudgetExceeded(ValueError):
 class Budget:
     """Mutable report-wide byte and line allowance, injectable by callers."""
 
-    def __init__(self, *, bytes_limit=64 * 1024 * 1024, lines_limit=100_000,
-                 chunk_size=64 * 1024, line_limit=1024 * 1024, entries_limit=100_000):
+    def __init__(
+        self,
+        *,
+        bytes_limit=64 * 1024 * 1024,
+        lines_limit=100_000,
+        chunk_size=64 * 1024,
+        line_limit=1024 * 1024,
+        entries_limit=100_000,
+    ):
         for value in (bytes_limit, lines_limit, chunk_size, line_limit, entries_limit):
-            if type(value) is not int or value <= 0:
+            if not (isinstance(value, int) and value.__class__ is int) or value <= 0:
                 raise ValueError("budget limits must be positive integers")
         self._directory_identities = {}
         self._root_entry_identities = {}
@@ -101,7 +118,9 @@ class Budget:
     def entries_at(self, handle):
         """Enumerate the held root, charging every entry and checking its name."""
         handle.check()
-        fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=handle.fds[-1])
+        fd = os.open(
+            ".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=handle.fds[-1]
+        )
         try:
             with os.scandir(fd) as entries:
                 for entry in entries:
@@ -110,7 +129,13 @@ class Budget:
                     self.entries_left -= 1
                     st = entry.stat(follow_symlinks=False)
                     self._root_entry_identities[(id(handle), entry.name)] = (
-                        st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+                        st.st_dev,
+                        st.st_ino,
+                        st.st_mode,
+                        st.st_size,
+                        st.st_mtime_ns,
+                        st.st_ctime_ns,
+                    )
                     yield entry.name
             handle.check()
         finally:
@@ -121,8 +146,9 @@ class Budget:
         if name in ("", ".", "..") or "/" in name:
             raise ValueError("invalid evidence name")
         handle.check()
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                     dir_fd=handle.fds[-1])
+        fd = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=handle.fds[-1]
+        )
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise ValueError("evidence is not a regular file")
@@ -133,20 +159,34 @@ class Budget:
 
     def read_identity_at(self, handle, name, *, max_bytes):
         """Read and revalidate an entry relative to the same held root."""
-        if type(max_bytes) is not int or max_bytes <= 0:
+        if (
+            not (isinstance(max_bytes, int) and max_bytes.__class__ is int)
+            or max_bytes <= 0
+        ):
             raise ValueError("max_bytes must be positive")
         fd = self.open_regular_at(handle, name)
         try:
+
             def identity(st):
-                return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+                return (
+                    st.st_dev,
+                    st.st_ino,
+                    st.st_mode,
+                    st.st_size,
+                    st.st_mtime_ns,
+                    st.st_ctime_ns,
+                )
+
             initial = identity(os.fstat(fd))
             discovered = self._root_entry_identities.get((id(handle), name))
             if discovered is not None and discovered != initial:
                 raise EvidenceChanged("discovered evidence changed")
-            parts = []
+            parts: list[bytes] = []
             total = 0
             while True:
-                chunk = os.read(fd, min(self.chunk_size, max_bytes - total + 1, self.bytes_left + 1))
+                chunk = os.read(
+                    fd, min(self.chunk_size, max_bytes - total + 1, self.bytes_left + 1)
+                )
                 if not chunk:
                     if identity(os.fstat(fd)) != initial:
                         raise EvidenceChanged("evidence changed")
@@ -165,7 +205,14 @@ class Budget:
         fd = self.open_regular_at(handle, name)
         try:
             st = os.fstat(fd)
-            if (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns) != identity:
+            if (
+                st.st_dev,
+                st.st_ino,
+                st.st_mode,
+                st.st_size,
+                st.st_mtime_ns,
+                st.st_ctime_ns,
+            ) != identity:
                 raise EvidenceChanged("evidence replaced or changed")
             handle.check()
         finally:
@@ -193,16 +240,28 @@ class Budget:
 
     def read_identity(self, path, *, max_bytes):
         """Read a file and return its checked identity for later revalidation."""
-        if type(max_bytes) is not int or max_bytes <= 0:
+        if (
+            not (isinstance(max_bytes, int) and max_bytes.__class__ is int)
+            or max_bytes <= 0
+        ):
             raise ValueError("max_bytes must be positive")
         fd = self.open_regular(path)
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise ValueError("evidence is not a regular file")
             initial = os.fstat(fd)
+
             def identity(st):
-                return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
-            parts = []
+                return (
+                    st.st_dev,
+                    st.st_ino,
+                    st.st_mode,
+                    st.st_size,
+                    st.st_mtime_ns,
+                    st.st_ctime_ns,
+                )
+
+            parts: list[bytes] = []
             total = 0
             while True:
                 size = min(self.chunk_size, max_bytes - total + 1, self.bytes_left + 1)
@@ -244,10 +303,18 @@ class Budget:
                     check_fd = self.open_regular(path)
                     try:
                         current = os.fstat(check_fd)
-                        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-                        if any(getattr(current, key) != getattr(initial, key)
-                               or getattr(os.fstat(fd), key) != getattr(initial, key)
-                               for key in fields):
+                        fields = (
+                            "st_dev",
+                            "st_ino",
+                            "st_size",
+                            "st_mtime_ns",
+                            "st_ctime_ns",
+                        )
+                        if any(
+                            getattr(current, key) != getattr(initial, key)
+                            or getattr(os.fstat(fd), key) != getattr(initial, key)
+                            for key in fields
+                        ):
                             raise EvidenceChanged("event evidence changed")
                     finally:
                         os.close(check_fd)

@@ -22,7 +22,7 @@ def run(root, **patches):
     class ReadyOwner:
         """A ready owner double for tests that stop before any network send."""
 
-        _acquired_at = time.monotonic() - 1
+        acquired_at = time.monotonic() - 1
 
         def __enter__(self):
             return self

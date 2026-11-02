@@ -26,7 +26,7 @@ class WebSocketSource:
         self._timeout = timeout
         self._connection_factory = connection_factory
         self._socket: Any = None
-        self._owner = None
+        self._owner: Owner | None = None
         self._authenticated = False
         self._session_id = None
         self._pending: deque = deque()
