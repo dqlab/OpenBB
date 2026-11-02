@@ -1,0 +1,7 @@
+abi <abi/4.0>,
+
+# Selected explicitly by aa-exec for this ephemeral CI job, without attaching
+# to a system executable or changing global user-namespace restrictions.
+profile openbb-lab-ci-bwrap flags=(unconfined) {
+  userns,
+}

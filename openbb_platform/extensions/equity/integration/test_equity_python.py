@@ -560,6 +560,8 @@ def test_equity_ownership_institutional(params, obb):
                 "start_date": "2023-01-01",
                 "end_date": "2023-11-01",
                 "provider": "fmp",
+                "symbol": None,
+                "limit": 1000,
             }
         ),
     ],
@@ -905,14 +907,7 @@ def test_equity_fundamental_revenue_per_segment(params, obb):
 @pytest.mark.parametrize(
     "params",
     [
-        (
-            {
-                "symbol": "AAPL",
-                "form_type": "144",
-                "limit": 100,
-                "provider": "fmp",
-            }
-        ),
+        ({"symbol": "AAPL", "limit": 100, "provider": "fmp"}),
         (
             {
                 "provider": "intrinio",
