@@ -7,6 +7,7 @@ from importlib import import_module
 from openbb_core.provider.abstract.provider import Provider
 from openbb_core.provider.registry import RegistryLoader
 
+from providers.tests.utils.lab_coverage import declaration, validate_declaration
 from providers.tests.utils.unit_tests_generator import (
     check_pattern_in_file,
     get_provider_fetchers,
@@ -37,6 +38,10 @@ class ProviderFetcherTest(unittest.TestCase):
 
         for provider_name, provider_cls in self.providers.items():
             with self.subTest(i=provider_name):
+                spec = declaration(provider_name)
+                if spec is not None:
+                    validate_declaration(provider_cls, spec)
+                    continue
                 path = get_provider_test_files(provider_cls)
 
                 self.assertTrue(os.path.exists(path))
@@ -47,6 +52,11 @@ class ProviderFetcherTest(unittest.TestCase):
         provider_fetchers = get_provider_fetchers()
 
         for provider_name, fetcher_dict in provider_fetchers.items():
+            spec = declaration(provider_name)
+            if spec is not None:
+                with self.subTest(i=provider_name):
+                    validate_declaration(self.providers[provider_name], spec)
+                continue
             for _, fetcher_cls in fetcher_dict.items():
                 path = get_provider_test_files(self.providers[provider_name])
 

@@ -186,6 +186,7 @@ def install_platform_local(_extras: bool = False):
     except (Exception, KeyboardInterrupt) as e:
         print(e)  # noqa: T201
         print("Restoring pyproject.toml and poetry.lock")  # noqa: T201
+        raise
 
     finally:
         # Revert pyproject.toml and poetry.lock to their original state.
@@ -227,6 +228,7 @@ def install_platform_cli():
     except (Exception, KeyboardInterrupt) as e:
         print(e)  # noqa: T201
         print("Restoring pyproject.toml and poetry.lock")  # noqa: T201
+        raise
 
     finally:
         # Revert pyproject.toml and poetry.lock to their original state.

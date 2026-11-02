@@ -10,7 +10,12 @@ from dq_historical_market_data_collector.config import load_config
 from dq_historical_market_data_collector.planner import chunks
 from dq_historical_market_data_collector.providers import validate_providers
 from dq_historical_market_data_collector.runtime import Collector
-from dq_historical_market_data_collector.storage import Journal, read_records, read_status
+from dq_historical_market_data_collector.storage import (
+    Journal,
+    read_records,
+    read_status,
+)
+from openbb_core.app.model.example import APIEx
 from openbb_core.app.model.obbject import OBBject
 from openbb_core.app.router import Router
 from pydantic import AwareDatetime
@@ -18,11 +23,13 @@ from pydantic import AwareDatetime
 from openbb_collection._utils import _safe_errors
 from openbb_collection.live_router import router as live_router
 
-router = Router(description="Historical bars and scheduled live market-data collection.")
+router = Router(
+    description="Historical bars and scheduled live market-data collection."
+)
 router.include_router(live_router)
 
 
-@router.command()
+@router.command(examples=[APIEx(parameters={"config_path": "/path/to/collector.yaml"})])
 def validate_config(config_path: str) -> OBBject[dict]:
     """Validate a collector YAML file and its request budgets without fetching data.
 
@@ -39,8 +46,10 @@ def validate_config(config_path: str) -> OBBject[dict]:
         return OBBject(results={"status": "valid", "config_hash": config.fingerprint()})
 
 
-@router.command()
-def plan(config_path: str, as_of: date | None = None, limit: int = 100) -> OBBject[dict]:
+@router.command(examples=[APIEx(parameters={"config_path": "/path/to/collector.yaml"})])
+def plan(
+    config_path: str, as_of: date | None = None, limit: int = 100
+) -> OBBject[dict]:
     """Preview bounded historical request chunks without fetching or writing data.
 
     Parameters
@@ -57,17 +66,24 @@ def plan(config_path: str, as_of: date | None = None, limit: int = 100) -> OBBje
             raise ValueError("Invalid limit")
         config = load_config(config_path)
         cutoff = as_of or datetime.now(ZoneInfo(config.schedule.timezone)).date()
-        planned = []
+        planned: list[dict] = []
         truncated = False
         for chunk in chunks(config, cutoff):
             if len(planned) == limit:
                 truncated = True
                 break
             planned.append(chunk.payload())
-        return OBBject(results={"chunks": planned, "truncated": truncated, "end_exclusive": True})
+        return OBBject(
+            results={"chunks": planned, "truncated": truncated, "end_exclusive": True}
+        )
 
 
-@router.command(methods=["POST"])
+@router.command(
+    methods=["POST"],
+    examples=[
+        APIEx(parameters={"config_path": "/path/to/collector.yaml", "max_seconds": 1})
+    ],
+)
 def once(
     config_path: str,
     as_of: date | None = None,
@@ -97,7 +113,9 @@ def once(
         validate_providers(config)
         stop = threading.Event()
         with Journal(config.storage) as journal:
-            collector = Collector(config, journal, stop=stop, config_path=Path(config_path))
+            collector = Collector(
+                config, journal, stop=stop, config_path=Path(config_path)
+            )
             timer = threading.Timer(max_seconds, stop.set)
             timer.daemon = True
             try:
@@ -109,7 +127,7 @@ def once(
                 collector.close()
 
 
-@router.command()
+@router.command(examples=[APIEx(parameters={"config_path": "/path/to/collector.yaml"})])
 def status(config_path: str, limit: int = 20) -> OBBject[dict]:
     """Read recent collector session reports without creating storage.
 
@@ -125,7 +143,17 @@ def status(config_path: str, limit: int = 20) -> OBBject[dict]:
         return OBBject(results={"sessions": read_status(config.storage.root, limit)})
 
 
-@router.command()
+@router.command(
+    examples=[
+        APIEx(
+            parameters={
+                "config_path": "/path/to/collector.yaml",
+                "instrument": "aapl",
+                "as_of": "2026-11-02T16:00:00+00:00",
+            }
+        )
+    ]
+)
 def query(
     config_path: str,
     instrument: str,

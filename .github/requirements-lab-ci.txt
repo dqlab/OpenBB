@@ -1,0 +1,27 @@
+# Test and lint tools are explicit: installing a released devtools package does
+# not guarantee its executables match this checkout.
+pytest==9.2.0
+pytest-asyncio==1.4.1.post1
+pytest-recorder==1.0.0
+pytest-order==1.5.0
+pytest-freezegun==0.4.2
+pytest-cov==4.1.0
+pytest-subtests==0.11.0
+httpx==0.28.1
+defusedxml==0.7.1
+poetry-core==2.4.0
+tomlkit==0.15.1
+packaging==26.3
+ruff==0.15.22
+black==26.10.1
+mypy==1.20.2
+pylint==3.3.9
+codespell==2.4.3
+types-pytz
+types-requests
+types-termcolor
+types-tabulate
+types-PyYAML
+types-python-dateutil
+types-setuptools
+types-six

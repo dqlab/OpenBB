@@ -1,11 +1,15 @@
 """OpenBB commands for the independently installed live snapshot collector."""
 
+# Keep live-engine imports lazy at the command boundary.
+# pylint: disable=import-outside-toplevel
+
 import math
 import threading
 from datetime import date
 from typing import TYPE_CHECKING
 
 from openbb_core.app.model.abstract.error import OpenBBError
+from openbb_core.app.model.example import APIEx
 from openbb_core.app.model.obbject import OBBject
 from openbb_core.app.router import Router
 
@@ -14,7 +18,9 @@ from openbb_collection._utils import _safe_errors
 if TYPE_CHECKING:
     from dq_live_market_data_collector.config import CollectorConfig
 
-router = Router(prefix="/live", description="Scheduled market quote snapshot collection.")
+router = Router(
+    prefix="/live", description="Scheduled market quote snapshot collection."
+)
 
 
 def _load_config(config_path: str) -> "CollectorConfig":
@@ -31,7 +37,7 @@ def _load_config(config_path: str) -> "CollectorConfig":
         return load_config(config_path)
 
 
-@router.command()
+@router.command(examples=[APIEx(parameters={"config_path": "/path/to/collector.yaml"})])
 def validate_config(config_path: str) -> OBBject[dict]:
     """Validate a live collector configuration without connecting to a provider.
 
@@ -57,7 +63,16 @@ def validate_config(config_path: str) -> OBBject[dict]:
     )
 
 
-@router.command()
+@router.command(
+    examples=[
+        APIEx(
+            parameters={
+                "config_path": "/path/to/collector.yaml",
+                "session_date": "2026-11-02",
+            }
+        )
+    ]
+)
 def plan(config_path: str, session_date: date) -> OBBject[dict]:
     """Preview configured quote-polling sessions on a local calendar date.
 
@@ -88,10 +103,17 @@ def plan(config_path: str, session_date: date) -> OBBject[dict]:
                     "fields": collection.fields,
                 }
             )
-        return OBBject(results={"collections": planned, "calendar_basis": "operator_configuration"})
+        return OBBject(
+            results={"collections": planned, "calendar_basis": "operator_configuration"}
+        )
 
 
-@router.command(methods=["POST"])
+@router.command(
+    methods=["POST"],
+    examples=[
+        APIEx(parameters={"config_path": "/path/to/collector.yaml", "max_seconds": 1})
+    ],
+)
 def once(config_path: str, max_seconds: float = 180) -> OBBject[dict]:
     """Perform one scheduled live collection pass and return bounded journal status.
 
@@ -136,7 +158,7 @@ def once(config_path: str, max_seconds: float = 180) -> OBBject[dict]:
         )
 
 
-@router.command()
+@router.command(examples=[APIEx(parameters={"config_path": "/path/to/collector.yaml"})])
 def status(config_path: str, limit: int = 20) -> OBBject[dict]:
     """Read recent live sessions and pending output without creating storage.
 
@@ -154,7 +176,12 @@ def status(config_path: str, limit: int = 20) -> OBBject[dict]:
         return OBBject(results=read_status(config.storage.root, limit))
 
 
-@router.command(methods=["POST"])
+@router.command(
+    methods=["POST"],
+    examples=[
+        APIEx(parameters={"config_path": "/path/to/collector.yaml", "max_batches": 1})
+    ],
+)
 def export(config_path: str, max_batches: int = 100) -> OBBject[dict]:
     """Replay bounded pending live output batches without fetching new quotes.
 
@@ -174,4 +201,6 @@ def export(config_path: str, max_batches: int = 100) -> OBBject[dict]:
         from dq_live_market_data_collector.storage import Journal
 
         with Journal(config.storage) as journal:
-            return OBBject(results={"exported_records": journal.export_pending(max_batches)})
+            return OBBject(
+                results={"exported_records": journal.export_pending(max_batches)}
+            )
