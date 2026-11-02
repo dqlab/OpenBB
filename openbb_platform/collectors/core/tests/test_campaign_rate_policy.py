@@ -9,6 +9,8 @@ control documents, or the recorded source-call counts.
 
 import json
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 from test_baostock_campaign import BOOTSTRAP, Harness, evidence_for_link, task
@@ -245,7 +247,7 @@ def test_daily_budget_returns_partial_then_a_new_day_resumes(tmp_path):
     child, summary = h.run()
     assert child.returncode == 1 and summary["status"] == "partial"
     assert summary["daily_budget_exhausted"] is True and summary["source_calls"] == 1
-    today = time.strftime("%Y-%m-%d")
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
     assert budget_document(h) == dict(day=today, calls=3)
     child, blocked = h.run()
     assert child.returncode == 1 and blocked["status"] == "partial"
