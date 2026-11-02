@@ -69,13 +69,14 @@ def check_docstring_examples() -> list[str]:
 
 
 def filter_eps(eps: EntryPoints | dict, group: str) -> tuple[EntryPoint, ...]:
+    """Return entry points belonging to the requested group."""
     if version_info[:2] == (3, 12):
         return eps.select(group=group) or ()  # type: ignore[union-attr]
     return eps.get(group, ())  # type: ignore[union-attr]
 
 
 def list_openbb_extensions() -> tuple[set[str], set[str], set[str]]:
-    """list installed openbb extensions and providers.
+    """List installed openbb extensions and providers.
 
     Returns
     -------
@@ -171,36 +172,19 @@ def find_decorator(file_path: str, function_name: str) -> str:
     base_path = normalized_dir.split("openbb_platform/")[0]
     file_path = os.path.join(base_path, "openbb_platform", file_path)
 
-    with open(file_path) as file:
-        lines = file.readlines()
-
-    decorator_lines = []
-    capturing_decorator = False
-    for line in lines:
-        stripped_line = line.strip()
-        # Start capturing lines if we encounter a decorator
-        if stripped_line.startswith("@router.command"):
-            capturing_decorator = True
-            decorator_lines.append(stripped_line)
-        elif capturing_decorator:
-            # If we're currently capturing a decorator and the line is part of it (indentation or open parenthesis)
-            if (
-                stripped_line.startswith("@")
-                or "def" in stripped_line
-                and function_name in stripped_line
-            ):
-                # If we've reached another decorator or the function definition, stop capturing
-                capturing_decorator = False
-                # If it's the target function, break, else clear decorator_lines for the next decorator
-                if "def" in stripped_line and function_name in stripped_line:
-                    break
-                decorator_lines = []
-            else:
-                # It's part of the multiline decorator
-                decorator_lines.append(stripped_line)
-
-    decorator = " ".join(decorator_lines)
-    return decorator
+    with open(file_path, encoding="utf-8") as file:
+        tree = parse(file.read(), filename=file_path)
+    for node in tree.body:
+        if (
+            isinstance(node, (FunctionDef, AsyncFunctionDef))
+            and node.name == function_name
+        ):
+            for decorator in node.decorator_list:
+                target = decorator.func if isinstance(decorator, Call) else decorator
+                if unparse(target) == "router.command":
+                    return "@" + unparse(decorator)
+            return ""
+    return ""
 
 
 @dataclass
@@ -212,9 +196,15 @@ class Decorator:
     kwargs: dict | None = None
 
 
-def get_decorator_details(function) -> Decorator | None:
+def get_decorator_details(
+    function, decorator_source: str | None = None
+) -> Decorator | None:
     """Extract decorators and their arguments from a function."""
-    source = inspect.getsource(function)
+    source = (
+        decorator_source + "\ndef __route__():\n    pass\n"
+        if decorator_source is not None
+        else inspect.getsource(function)
+    )
     parsed_source = parse(source)
 
     if isinstance(parsed_source.body[0], (FunctionDef, AsyncFunctionDef)):
@@ -232,7 +222,9 @@ def get_decorator_details(function) -> Decorator | None:
                 name = (
                     decorator.id if isinstance(decorator, Name) else unparse(decorator)
                 )
-        return Decorator(name, args, kwargs)
+                args, kwargs = {}, {}
+            if name == "router.command":
+                return Decorator(name, args, kwargs)
     return None
 
 
