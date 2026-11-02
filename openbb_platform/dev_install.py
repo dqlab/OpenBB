@@ -25,6 +25,8 @@ openbb-platform-api = { path = "./extensions/platform_api", develop = true }
 
 openbb-akshare = { path = "./providers/akshare", develop = true, markers = "python_version >= '3.11'" }
 openbb-baostock = { path = "./providers/baostock", develop = true }
+openbb-ctp = { path = "./providers/ctp", develop=true, markers="python_version >= '3.11' and python_version < '3.14'" }
+openbb-futu = { path = "./providers/futu", develop=true, markers="python_version >= '3.11' and python_version < '3.14'" }
 openbb-benzinga = { path = "./providers/benzinga", develop = true }
 openbb-bls = { path = "./providers/bls", develop = true }
 openbb-cftc = { path = "./providers/cftc", develop = true }
