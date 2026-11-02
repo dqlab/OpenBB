@@ -20,7 +20,9 @@ def server(monkeypatch, tmp_path):
         status = 200
         delay = 0
         drip = False
+        endless_drip = False
         requests = 0
+        body_progress = set()
         body = b'{"ret_code":0,"data":{"snapshot_list":[{"code":"HK.00700"}]}}'
 
         def do_POST(self):
@@ -28,14 +30,21 @@ def server(monkeypatch, tmp_path):
 
             self.rfile.read(int(self.headers["Content-Length"]))
             type(self).requests += 1
+            request_number = type(self).requests
             time.sleep(self.delay)
             self.send_response(self.status)
             self.send_header("Authorization", "secret-header")
             self.end_headers()
-            with contextlib.suppress(BrokenPipeError):
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                 if self.drip:
                     for byte in self.body:
                         self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        type(self).body_progress.add(request_number)
+                        time.sleep(0.08)
+                    # Whitespace keeps the JSON valid while the entity never ends.
+                    while self.endless_drip and not finished.is_set():
+                        self.wfile.write(b" ")
                         self.wfile.flush()
                         time.sleep(0.08)
                 else:
@@ -44,12 +53,14 @@ def server(monkeypatch, tmp_path):
         def log_message(self, *args):
             pass
 
+    finished = threading.Event()
     http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=http.serve_forever, daemon=True)
     thread.start()
     monkeypatch.setenv("FUTU_TEST_HTTP_BASE", f"http://127.0.0.1:{http.server_port}")
     monkeypatch.setenv("FUTU_COORDINATION_DIR", str(tmp_path / "coord"))
     yield Handler
+    finished.set()
     http.shutdown()
     thread.join()
 
@@ -299,6 +310,46 @@ def test_no_response_connection_metadata(server, tmp_path, monkeypatch):
     assert "secret DNS detail" not in json.dumps(result)
 
 
+def test_worker_startup_deadline_prevents_http(server, tmp_path, monkeypatch):
+    """A small request budget includes a real worker's slow startup."""
+    import subprocess
+    import sys
+    import time
+
+    from openbb_futu import sampled_snapshot
+    from openbb_futu.coordination import Owner, coordination_directory
+
+    popen = subprocess.Popen
+    children = []
+
+    def delayed_worker(command, **kwargs):
+        assert "--worker" in command
+        child = popen([sys.executable, "-c", "import time; time.sleep(5)"], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(sampled_snapshot.subprocess, "Popen", delayed_worker)
+    start = time.monotonic()
+    try:
+        result = run(
+            {"symbols": [{"asset": "equity", "symbol": "HK.00700"}], "timeout_seconds": 0.6},
+            "private-access", tmp_path / "startup-timeout",
+        )
+        assert time.monotonic() - start < 3
+        assert result["failure"] == "timeout" and server.requests == 0
+        assert children and all(child.poll() is not None for child in children)
+        attempt = result["attempts"][0]
+        assert attempt["request_id"] and attempt["send_status"] == "unknown"
+        assert attempt["body"] is None and attempt["durability"] == "unknown"
+        with Owner(coordination_directory()):
+            pass
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+
+
 def test_drip_cli_deadline_and_signal(server, tmp_path):
     """A real drip response cannot defeat the parent deadline or SIGTERM."""
     import signal
@@ -309,21 +360,42 @@ def test_drip_cli_deadline_and_signal(server, tmp_path):
     from openbb_futu.coordination import Owner, coordination_directory
 
     server.drip = True
+    server.endless_drip = True
+    request_budget = 3
     config = tmp_path / "drip.json"
     token = tmp_path / "private.json"
     token.write_text(json.dumps({"client_id": "private-client", "access_token": "private-access",
                                  "refresh_token": "private-refresh", "expires_at": 9999999999}))
     token.chmod(0o600)
     config.write_text(json.dumps({"symbols": [{"asset": "equity", "symbol": "HK.00700"}],
-                                  "timeout_seconds": 0.6, "max_polls": 3, "interval_seconds": 0.1}))
+                                  "timeout_seconds": request_budget, "max_polls": 3, "interval_seconds": 0.1}))
     command = [sys.executable, "-m", "openbb_futu.sampled_snapshot", "--config", str(config),
                "--token-file", str(token), "--output", str(tmp_path / "drip")]
-    start = time.monotonic()
-    result = subprocess.run(command, capture_output=True, text=True, timeout=5, check=False)  # noqa: S603
-    assert time.monotonic() - start < 3 and result.returncode != 0
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)  # noqa: S603
+    try:
+        startup_deadline = time.monotonic() + 8
+        while True:
+            attempts = list((tmp_path / "drip").glob("futu-sampled-event-*-attempt.json"))
+            if attempts:
+                assert len(attempts) == 1 and json.loads(attempts[0].read_text())["event"] == "attempt"
+                break
+            assert proc.poll() is None
+            assert time.monotonic() < startup_deadline
+            time.sleep(0.01)
+        # Observe publication separately from CLI imports. Production still
+        # includes worker startup in the configured request deadline.
+        observed_attempt = time.monotonic()
+        cli_out, cli_err = proc.communicate(timeout=request_budget + 2)
+        assert time.monotonic() - observed_attempt < request_budget + 2
+        assert proc.returncode != 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=3)
     report = json.loads(next((tmp_path / "drip" / "futu-sampled-coverage").glob("*.json")).read_text())
     assert report["failure"] == "timeout" and report["attempts"][0]["send_status"] == "unknown"
     assert report["attempts"][0]["request_id"] and server.requests == 1
+    assert 1 in server.body_progress
     with Owner(coordination_directory()) as restarted_owner:
         # Memory state is intentionally not persisted; restart must cool down.
         assert restarted_owner.budget().acquire() > 0
@@ -332,7 +404,7 @@ def test_drip_cli_deadline_and_signal(server, tmp_path):
         if path.is_file():
             assert all(secret not in path.read_bytes() for secret in
                        (b"private-access", b"private-refresh", b"private-client"))
-    assert all(secret not in result.stdout + result.stderr for secret in
+    assert all(secret not in cli_out + cli_err for secret in
                ("private-access", "private-refresh", "private-client"))
     config.write_text(json.dumps({"symbols": [{"asset": "equity", "symbol": "HK.00700"}],
                                   "timeout_seconds": 10, "max_polls": 3}))
@@ -341,9 +413,10 @@ def test_drip_cli_deadline_and_signal(server, tmp_path):
     proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: S603
     try:
         deadline = time.monotonic() + 5
-        while server.requests == before and time.monotonic() < deadline:
+        while before + 1 not in server.body_progress and time.monotonic() < deadline:
             time.sleep(0.02)
         assert server.requests == before + 1
+        assert before + 1 in server.body_progress
         start = time.monotonic()
         proc.send_signal(signal.SIGTERM)
         out, err = proc.communicate(timeout=3)
