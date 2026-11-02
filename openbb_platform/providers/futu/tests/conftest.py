@@ -9,7 +9,7 @@ import pytest
 def short_window_for_synthetic_rest_tests(request, monkeypatch, tmp_path):
     """Isolate legacy synthetic REST cases and avoid production cooldown waits."""
     if request.module.__name__.split(".")[-1] in {
-        "test_provider", "test_sampled_snapshot", "test_review_regressions",
+        "test_futu_provider", "test_sampled_snapshot", "test_review_regressions",
         "test_review_blockers", "test_review_transport", "test_recovery_compat_alert",
         "test_snapshot_independent_review",
     }:
