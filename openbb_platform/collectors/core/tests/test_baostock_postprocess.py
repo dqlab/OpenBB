@@ -161,3 +161,37 @@ def test_captured_calendar_uncertainty_is_not_silently_cleared(catalog):
         ).fetchone()[0]
         == 0
     )
+
+
+def test_failed_duplicate_does_not_veto_confirmed_partial_data(catalog, evidence):
+    assert (
+        catalog.execute(
+            "SELECT count(*) FROM literal18_variants WHERE source_status_warning "
+            "AND has_confirmed_partial AND has_admissible_source"
+        ).fetchone()[0]
+        > 0
+    )
+    assert (
+        catalog.execute(
+            "SELECT count(*) FROM literal18_variants WHERE has_confirmed_partial "
+            "AND NOT has_admissible_source"
+        ).fetchone()[0]
+        == 0
+    )
+    from openbb_duckdb.models.equity_historical import DuckDBEquityHistoricalFetcher as fetcher
+
+    query = fetcher.transform_query(
+        {
+            "symbol": "sh.601600",
+            "start_date": "2007-04-30",
+            "end_date": "2007-04-30",
+            "database_path": str(evidence / "sample/candidate.duckdb"),
+            "table": "equity_unadjusted",
+            "adjustment": "unadjusted",
+            "limit": 10,
+        }
+    )
+    result = fetcher.transform_data(query, fetcher.extract_data(query, credentials={}))
+    assert len(result) == 1
+    assert result[0].model_dump()["has_confirmed_partial"] is True
+    assert result[0].model_dump()["source_status_warning"] is True

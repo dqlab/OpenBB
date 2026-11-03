@@ -38,6 +38,7 @@ EXTRA = [
 ]
 VERSION = "baostock-literal18-candidate-v1"
 QUALITY_VERSION = "baostock-calendar-review-v2"
+CATALOG_VERSION = "baostock-source-admission-v3"
 
 
 def sha(path):
@@ -479,6 +480,7 @@ def build_catalog(output, evidence):
             "output": str(output),
             "parse_contract_sha256": sha(output / "parse_contract.json"),
             "quality_version": QUALITY_VERSION,
+            "catalog_version": CATALOG_VERSION,
         }
     )
     if target.exists():
@@ -492,10 +494,12 @@ def build_catalog(output, evidence):
     if temp.exists():
         raise ValueError("catalog_partial_exists; retain_for_investigation")
     con = duckdb.connect(str(temp))
+    con.execute("SET threads=2")
+    con.execute("SET memory_limit='3GB'")
     con.execute("CREATE TABLE candidate_contract AS SELECT ? AS contract", [contract])
     for view, pattern in [
         ("raw_observations", "parsed/*.parquet"),
-        ("literal18_variants", "variants/*.parquet"),
+        ("literal18_storage", "variants/*.parquet"),
         ("row_lineage", "lineage/*.parquet"),
     ]:
         con.execute(
@@ -505,6 +509,30 @@ def build_catalog(output, evidence):
             + sql_string(output / pattern)
             + ")"
         )
+    # A failed duplicate origin must not veto matching independently usable data.
+    con.execute(
+        "CREATE TABLE source_admission AS SELECT l.value_id,"
+        "bool_or(l.complete AND l.source_ok) AS has_clean_complete_source,"
+        "bool_or(l.confirmed_partial_data) AS has_confirmed_partial_source,"
+        "bool_or((l.complete AND l.source_ok) OR l.confirmed_partial_data) "
+        "AS has_admissible_source FROM row_lineage l JOIN "
+        "(SELECT value_id FROM literal18_storage WHERE NOT all_source_ok) s "
+        "USING(value_id) GROUP BY l.value_id"
+    )
+    admission_path = output / "quality" / "source_admission.parquet"
+    if not admission_path.exists():
+        con.execute(
+            "COPY source_admission TO "
+            + sql_string(admission_path)
+            + " (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+    con.execute(
+        "CREATE VIEW literal18_variants AS SELECT s.*,"
+        "coalesce(a.has_admissible_source,"
+        "(s.has_complete OR s.has_confirmed_partial) AND s.all_source_ok) "
+        "AS has_admissible_source,NOT s.all_source_ok AS source_status_warning "
+        "FROM literal18_storage s LEFT JOIN source_admission a USING(value_id)"
+    )
     con.execute(
         "CREATE TABLE capture_inventory AS SELECT * FROM read_json_auto(?)",
         [str(output / "capture_inventory.json")],
@@ -523,8 +551,8 @@ def build_catalog(output, evidence):
     con.execute(
         "CREATE VIEW quarantine AS SELECT * FROM literal18_variants WHERE "
         "variant_count>1 OR adjustment_mismatch OR date_anomaly OR numeric_anomaly OR ohlc_anomaly "
-        "OR flag_anomaly OR identity_or_range_anomaly OR core_price_empty OR NOT all_source_ok "
-        "OR NOT (has_complete OR has_confirmed_partial)"
+        "OR flag_anomaly OR identity_or_range_anomaly OR core_price_empty "
+        "OR NOT has_admissible_source "
     )
     for flag, view, basis in [
         ("3", "equity_unadjusted", "unadjusted"),
@@ -547,6 +575,8 @@ def build_catalog(output, evidence):
             "requested_adjustflag",
             "adjustflag AS source_adjustflag",
             "has_confirmed_partial",
+            "has_admissible_source",
+            "source_status_warning",
             "calendar_unknown",
             "calendar_source_conflict",
             "NULL::DATE AS fixed_qfq_basis_date",
@@ -562,7 +592,7 @@ def build_catalog(output, evidence):
             "requested_adjustflag="
             + sql_string(flag)
             + " AND adjustflag=requested_adjustflag AND variant_count=1 "
-            "AND (has_complete OR has_confirmed_partial) AND all_source_ok "
+            "AND has_admissible_source "
             "AND NOT (date_anomaly OR numeric_anomaly OR ohlc_anomaly OR "
             "flag_anomaly OR identity_or_range_anomaly OR core_price_empty)"
         )
