@@ -117,8 +117,14 @@ separate from full source-price/calendar/adjustment acceptance.
 | `equity_forward_dynamic` | Matching flag-2 dynamic source snapshots; fixed basis is NULL |
 
 Consumption views exclude conflicts, wrong returned adjustments, invalid
-identity/date/numeric/OHLC/flag values, empty core prices, and unconfirmed-only
-partial data. Calendar uncertainty remains visible as flags. Quality version
+identity/date/numeric/OHLC/flag values, empty core prices, and observations without an admissible origin.
+Catalog version `baostock-source-admission-v3` admits a literal version when at
+least one matching observation is a clean complete capture or an independently
+confirmed retained partial capture. Failed duplicate origins remain visible in
+`source_status_warning`; they do not veto an otherwise admissible exact version.
+Original `all_source_ok`, every source observation, and partial terminal status
+remain unchanged. `source_admission` and `quality/source_admission.parquet` record
+the origin evidence for versions with source-status warnings. Calendar uncertainty remains visible as flags. Quality version
 `baostock-calendar-review-v2` treats every reviewed status except
 `independent_session_present` as unverified. This includes captured rows without
 independent calendar evidence and closure inferences without formal daily notices.
