@@ -140,3 +140,24 @@ def test_existing_openbb_fetcher_real_query(evidence):
         result = fetcher.transform_data(query, fetcher.extract_data(query, credentials={}))
         assert len(result) == 3
         assert all(r.symbol == "SH.600000" and r.close > 0 for r in result)
+
+
+def test_captured_calendar_uncertainty_is_not_silently_cleared(catalog):
+    expected = catalog.execute(
+        "SELECT count(*) FROM literal18_variants v JOIN calendar_review k "
+        "ON v.code=k.code AND v.date=k.date AND v.requested_adjustflag=k.adjustflag "
+        "WHERE k.new_status<>'independent_session_present'"
+    ).fetchone()[0]
+    assert expected > 0
+    actual = catalog.execute(
+        "SELECT count(*) FROM literal18_variants WHERE calendar_unknown"
+    ).fetchone()[0]
+    assert actual == expected
+    assert (
+        catalog.execute(
+            "SELECT count(*) FROM literal18_variants v JOIN calendar_review k "
+            "ON v.code=k.code AND v.date=k.date AND v.requested_adjustflag=k.adjustflag "
+            "WHERE k.new_status='independent_session_present' AND v.calendar_unknown"
+        ).fetchone()[0]
+        == 0
+    )

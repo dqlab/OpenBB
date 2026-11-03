@@ -118,7 +118,12 @@ separate from full source-price/calendar/adjustment acceptance.
 
 Consumption views exclude conflicts, wrong returned adjustments, invalid
 identity/date/numeric/OHLC/flag values, empty core prices, and unconfirmed-only
-partial data. Calendar uncertainty remains visible as flags. No comprehensive
+partial data. Calendar uncertainty remains visible as flags. Quality version
+`baostock-calendar-review-v2` treats every reviewed status except
+`independent_session_present` as unverified. This includes captured rows without
+independent calendar evidence and closure inferences without formal daily notices.
+Review rows lacking a source observation remain in `calendar_review`; they do not
+create synthetic price rows. No comprehensive
 calendar or financial-ratio correctness is implied by the remaining rows.
 
 Read through the unchanged existing provider:
