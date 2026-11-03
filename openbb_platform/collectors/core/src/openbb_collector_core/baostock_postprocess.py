@@ -37,6 +37,7 @@ EXTRA = [
     "source_ok",
 ]
 VERSION = "baostock-literal18-candidate-v1"
+QUALITY_VERSION = "baostock-calendar-review-v2"
 
 
 def sha(path):
@@ -335,6 +336,7 @@ def materialize(output, evidence, buckets=32):
             "buckets": buckets,
             "bucket": bucket,
             "version": VERSION,
+            "quality_version": QUALITY_VERSION,
         }
         if ticket.exists():
             saved = json.loads(ticket.read_text())
@@ -374,7 +376,7 @@ def materialize(output, evidence, buckets=32):
             "(open='' OR high='' OR low='' OR close='' OR preclose='') AS core_price_empty, "
             "(tradestatus NOT IN ('0','1') OR isST NOT IN ('0','1') OR "
             "u.adjustflag NOT IN ('1','2','3')) AS flag_anomaly, "
-            "coalesce(k.new_status LIKE 'calendar_unknown%',false) AS calendar_unknown, "
+            "coalesce(k.new_status<>'independent_session_present',false) AS calendar_unknown, "
             "(cc.code IS NOT NULL) AS calendar_source_conflict "
             "FROM unique_values u LEFT JOIN unknowns k ON u.code=k.code AND u.date=k.date "
             "AND u.requested_adjustflag=k.adjustflag LEFT JOIN calendar_conflicts cc "
@@ -476,6 +478,7 @@ def build_catalog(output, evidence):
             "version": VERSION,
             "output": str(output),
             "parse_contract_sha256": sha(output / "parse_contract.json"),
+            "quality_version": QUALITY_VERSION,
         }
     )
     if target.exists():
