@@ -37,6 +37,17 @@ def main():
     raw.mkdir()
     capture = raw / "capture.json.gz"
     capture.write_bytes(b"local synthetic immutable capture")
+    admission_root = root / "output"
+    relative = "baostock_campaign_full18_joblevel/private/baostock-page-capture-v1/" + "a" * 64
+    capture_directory = admission_root / relative
+    capture_directory.mkdir(parents=True)
+    for name, body in {
+        "authority.json": b'{"synthetic":true}',
+        "eligible.json": b'{"eligible":true}',
+        "page-000.body": b"local synthetic immutable page",
+        "page-000.fragments.jsonl": b'{"fragment":0}\n',
+    }.items():
+        (capture_directory / name).write_bytes(body)
     with duckdb.connect(str(target)) as c:
         for schema in ddl["schemas"]:
             # The saved inventory contains schema names.
@@ -94,9 +105,9 @@ def main():
 
     candidate = root / "candidate.duckdb"
     make_candidate(candidate, rows=50001, quarantined=15838)
-    # Absolute captured source paths exercise the identical production reference resolver.
+    # Production captures are relative directory locators, distinct from legacy raw files.
     with duckdb.connect(str(candidate)) as c:
-        c.execute("UPDATE capture_inventory SET relative=?", [str(capture)])
+        c.execute("UPDATE capture_inventory SET relative=?", [relative])
     manifest = prepare_manifest(candidate, end_date="2300-01-01")
     write_json(root / "manifest.json", manifest)
     write_json(root / "baseline.json", baseline)
@@ -106,7 +117,7 @@ def main():
         "manifest": str(root / "manifest.json"),
         "baseline": str(root / "baseline.json"),
         "reference_root": str(root),
-        "admission_root": str(root),
+        "admission_root": str(admission_root),
         "json_root": str(root),
         "window_started_at": utcnow().isoformat(),
         "approved_manifest_hash": hashlib.sha256(encoded(manifest).encode()).hexdigest(),

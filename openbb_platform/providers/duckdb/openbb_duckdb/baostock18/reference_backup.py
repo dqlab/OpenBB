@@ -99,6 +99,62 @@ def stable_hash(path, deadline):
     return before.st_size, digest.hexdigest()
 
 
+def directory_files(path, root, deadline):
+    """Enumerate canonical capture trees, rejecting links and special members.
+
+    Never follow a symlink, including intermediate components. Check directory
+    identity and membership metadata again after walking each directory.
+    File bytes are hashed separately with stable_hash under the same deadline.
+    """
+    path, root = Path(path), Path(root)
+    check_deadline(deadline)
+    try:
+        before = path.lstat()
+        if (
+            not path.is_absolute()
+            or path.resolve(strict=True) != path
+            or not path.is_relative_to(root)
+            or not stat.S_ISDIR(before.st_mode)
+        ):
+            raise AdmissionError(f"Capture requires a canonical directory within its root: {path}")
+        files = []
+        with os.scandir(path) as entries:
+            members = sorted(entries, key=lambda entry: entry.name)
+        for entry in members:
+            check_deadline(deadline)
+            info = entry.stat(follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                files.extend(directory_files(Path(entry.path), root, deadline))
+            elif stat.S_ISREG(info.st_mode):
+                member = Path(entry.path)
+                if member.resolve(strict=True) != member:
+                    raise AdmissionError(f"Noncanonical capture member: {member}")
+                files.append(member)
+            else:
+                raise AdmissionError(f"Nonregular capture member (including symlink): {entry.path}")
+        after = path.lstat()
+        if any(getattr(before, k) != getattr(after, k) for k in ("st_dev", "st_ino", "st_mtime_ns", "st_ctime_ns")):
+            raise AdmissionError(f"Capture directory changed during enumeration: {path}")
+        return sorted(files)
+    except OSError as exc:
+        raise AdmissionError(f"Capture directory missing or unreadable: {path}") from exc
+
+
+def directory_inventory(path, expected_hash, deadline):
+    """Read the byte-bound capture inventory frozen by the candidate gate."""
+    if stable_hash(path, deadline)[1] != expected_hash:
+        raise AdmissionError("Capture directory inventory changed")
+    result = {}
+    with Path(path).open() as stream:
+        for line in stream:
+            check_deadline(deadline)
+            item = json.loads(line)
+            if item["directory"] in result:
+                raise AdmissionError("Duplicate frozen capture directory")
+            result[item["directory"]] = item["files"]
+    return result
+
+
 def copy_checked(source, target, deadline):
     """Copy through bounded buffers; independently hash the durable destination."""
     source = Path(source)
@@ -141,8 +197,10 @@ def enumerate_references(connection, contract, ledger, expected_fingerprint, dea
     path-like columns require an explicit provenance-only explanation. Embedded
     JSON references are also traversed; their relative root must be explicit.
     """
-    if (contract.get("format") != "baostock18-catalog-reference-contract-v1"
-            or contract.get("catalog_fingerprint") != expected_fingerprint):
+    if (
+        contract.get("format") != "baostock18-catalog-reference-contract-v1"
+        or contract.get("catalog_fingerprint") != expected_fingerprint
+    ):
         raise AdmissionError("Reference enumeration contract must bind catalog fingerprint")
     columns = connection.execute(
         "SELECT c.table_schema,c.table_name,c.column_name FROM information_schema.columns c "
@@ -189,20 +247,35 @@ def enumerate_references(connection, contract, ledger, expected_fingerprint, dea
         root = Path(rule["root"])
         if not root.is_absolute() or root.resolve(strict=True) != root:
             raise AdmissionError("Reference root must be canonical absolute directory")
+        directory_rule = rule.get("kind") == "capture_directory"
+        if directory_rule and key != ("baostock18_admission", "row_lineage", "source_path"):
+            raise AdmissionError("Directory semantics are limited to capture lineage")
+        pinned = directory_inventory(rule["inventory"], rule["inventory_sha256"], deadline) if directory_rule else {}
+        distinct = "DISTINCT " if directory_rule else ""
         cursor = connection.execute(
-            f"SELECT {column},{digest_sql} FROM {schema}.{table} WHERE {column} IS NOT NULL"
+            f"SELECT {distinct}{column},{digest_sql} FROM {schema}.{table} WHERE {column} IS NOT NULL"
         )
         count = 0
+        file_count = 0
         while rows := cursor.fetchmany(512):
             for value, digest in rows:
                 check_deadline(deadline)
-                mark(value, digest, root)
+                if directory_rule:
+                    source = Path(value) if Path(value).is_absolute() else root / value
+                    files = directory_files(source, root, deadline)
+                    expected = pinned.get(str(source))
+                    if expected is None or [str(p) for p in files] != [f["path"] for f in expected]:
+                        raise AdmissionError(f"Capture directory membership missing/changed: {source}")
+                    for item in expected:
+                        mark(item["path"], item["sha256"], root)
+                        file_count += 1
+                else:
+                    mark(value, digest, root)
                 count += 1
-        rule_counts.append({**rule, "references": count})
+        rule_counts.append({**rule, "references": count, **({"files": file_count} if directory_rule else {})})
     for exclusion in contract.get("provenance_columns", []):
         key = tuple(exclusion.get("column", []))
-        if (key not in columns or key in covered or not exclusion.get("reason")
-                or key[2] not in PROVENANCE_COLUMNS):
+        if key not in columns or key in covered or not exclusion.get("reason") or key[2] not in PROVENANCE_COLUMNS:
             raise AdmissionError("Invalid provenance-only column declaration")
         covered.add(key)
     required = {row for row in columns if PATH_COLUMN.search(row[2])}
@@ -260,9 +333,16 @@ def verify_references(connection, contract, manifest, destination, fingerprint, 
     """Verify every enumerated reference against a frozen SHA256 without copying."""
     started = time.monotonic()
     database = destination / "reference-index.sqlite"
-    result = {"count": 0, "bytes": 0, "missing": 0, "mismatch": 0, "status": "running",
-              "coverage": "all persistent file references in reviewed catalog contract",
-              "contents_copied": False}
+    result = {
+        "count": 0,
+        "bytes": 0,
+        "missing": 0,
+        "mismatch": 0,
+        "changed": 0,
+        "status": "running",
+        "coverage": "all persistent file references in reviewed catalog contract",
+        "contents_copied": False,
+    }
     try:
         with sqlite3.connect(database) as ledger, bounded_sql(connection, deadline):
             ledger.execute("CREATE TABLE expected(path TEXT PRIMARY KEY, size INTEGER, sha256 TEXT, seen INTEGER)")
@@ -272,12 +352,20 @@ def verify_references(connection, contract, manifest, destination, fingerprint, 
                     check_deadline(deadline)
                     item = json.loads(line)
                     path, size, digest = item["path"], item["size"], item["sha256"]
-                    if (not isinstance(path, str) or path <= previous or not Path(path).is_absolute()
-                            or type(size) is not int or size < 0 or not HASH.fullmatch(digest)):
+                    if (
+                        not isinstance(path, str)
+                        or path <= previous
+                        or not Path(path).is_absolute()
+                        or type(size) is not int
+                        or size < 0
+                        or not HASH.fullmatch(digest)
+                    ):
                         raise AdmissionError("Sorted unique SHA256 reference inventory required")
                     ledger.execute("INSERT INTO expected VALUES (?,?,?,0)", [path, size, digest])
                     previous = path
             result["projections"] = enumerate_references(connection, contract, ledger, fingerprint, deadline)
+            result["directories"] = sum(p["references"] for p in result["projections"]
+                                        if p.get("kind") == "capture_directory")
             with (destination / "reference-verification.jsonl").open("x") as output:
                 for path, size, digest in ledger.execute("SELECT path,size,sha256 FROM expected ORDER BY path"):
                     try:
@@ -288,13 +376,24 @@ def verify_references(connection, contract, manifest, destination, fingerprint, 
                         raise
                     if actual != (size, digest):
                         result["mismatch"] += 1
+                        result["changed"] += 1
                         raise AdmissionError(f"Reference hash/size mismatch: {path}")
                     result["count"] += 1
                     result["bytes"] += size
                     info = Path(path).stat()
-                    output.write(json.dumps({"path": path, "size": size, "sha256": digest,
-                                             "mtime_ns": info.st_mtime_ns, "device": info.st_dev,
-                                             "inode": info.st_ino}) + "\n")
+                    output.write(
+                        json.dumps(
+                            {
+                                "path": path,
+                                "size": size,
+                                "sha256": digest,
+                                "mtime_ns": info.st_mtime_ns,
+                                "device": info.st_dev,
+                                "inode": info.st_ino,
+                            }
+                        )
+                        + "\n"
+                    )
                 output.flush()
                 os.fsync(output.fileno())
             result["status"] = "passed"
@@ -303,6 +402,8 @@ def verify_references(connection, contract, manifest, destination, fingerprint, 
         result["error"] = str(exc)
         if "inventory missing/hash mismatch" in str(exc):
             result["mismatch"] += 1
+        if "membership missing/changed" in str(exc) or "inventory changed" in str(exc):
+            result["changed"] += 1
         raise
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
         result["status"] = "failed"

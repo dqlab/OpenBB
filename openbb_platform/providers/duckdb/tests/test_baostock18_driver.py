@@ -113,8 +113,8 @@ def test_post_switch_abort_withdraws_current_visibility(tmp_path):
     assert (tmp_path / "withdrawal.json").is_file()
 
 
-def test_candidate_precheck_refuses_missing_and_directory_locators(tmp_path):
-    """Unknown or directory provenance cannot pass as verified regular files."""
+def test_candidate_precheck_hashes_directory_members(tmp_path):
+    """A relative capture directory freezes actual files, never a directory hash."""
     from openbb_duckdb.baostock18.driver import precheck_input_references
 
     manifest = make_candidate(tmp_path / "candidate.duckdb")
@@ -125,6 +125,84 @@ def test_candidate_precheck_refuses_missing_and_directory_locators(tmp_path):
     assert result["status"] == "failed" and result["missing"] == 1
     (tmp_path / "raw").mkdir()
     (tmp_path / "raw/capture.json.gz").mkdir()
-    result = precheck_input_references(config)
-    assert result["status"] == "failed" and result["directories"] == 1
+    (tmp_path / "raw/capture.json.gz/authority.json").write_bytes(b"authority")
+    (tmp_path / "raw/capture.json.gz/page-000.body").write_bytes(b"page")
+    result = precheck_input_references(config, destination=tmp_path / "directories.jsonl")
+    assert result["status"] == "passed" and result["directories"] == 1
+    assert result["regular_files"] == 2 and result["bytes"] == 13
+    assert result["root"] == result["resolved_admission_root"] == str(tmp_path)
+    assert result["missing"] == result["changed"] == result["invalid"] == 0
     assert result["target_catalog_connections"] == 0
+
+
+@pytest.mark.parametrize("bad", ["symlink", "fifo", "file", "escape", "unreadable"])
+def test_candidate_directory_refuses_unsafe_members(tmp_path, bad, monkeypatch):
+    """Reject nonregular/unreadable trees and locators escaping their root."""
+    import os
+    from pathlib import Path
+
+    from openbb_duckdb.baostock18.driver import precheck_input_references
+
+    manifest = make_candidate(tmp_path / "candidate.duckdb")
+    write_json(tmp_path / "manifest.json", manifest)
+    capture = tmp_path / "raw/capture.json.gz"
+    capture.mkdir(parents=True)
+    if bad == "symlink":
+        (capture / "link").symlink_to(tmp_path / "candidate.duckdb")
+    elif bad == "fifo":
+        os.mkfifo(capture / "fifo")
+    elif bad == "file":
+        with duckdb.connect(str(tmp_path / "candidate.duckdb")) as c:
+            c.execute("UPDATE capture_inventory SET relative='candidate.duckdb'")
+    elif bad == "escape":
+        with duckdb.connect(str(tmp_path / "candidate.duckdb")) as c:
+            c.execute("UPDATE capture_inventory SET relative='../outside'")
+    else:
+        real_lstat = Path.lstat
+
+        def deny(path):
+            if path == capture:
+                raise PermissionError("synthetic unreadable capture")
+            return real_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", deny)
+    config = {"manifest": str(tmp_path / "manifest.json"), "admission_root": str(tmp_path),
+              "output": str(tmp_path / "run"), "max_verify_seconds": 30}
+    result = precheck_input_references(config)
+    assert result["status"] == "failed" and result["target_catalog_connections"] == 0
+    assert sum(result[k] for k in ("missing", "invalid", "changed", "nonregular", "unreadable")) == 1
+
+
+@pytest.mark.parametrize("change", ["bytes", "added", "removed"])
+def test_staged_directory_freeze_refuses_changed_capture(tmp_path, change):
+    """A staged catalog remains bound to the pre-import members and byte hashes."""
+    import time
+
+    from openbb_duckdb.baostock18.driver import precheck_input_references
+
+    manifest = make_candidate(tmp_path / "candidate.duckdb")
+    write_json(tmp_path / "manifest.json", manifest)
+    capture = tmp_path / "raw/capture.json.gz"
+    capture.mkdir(parents=True)
+    member = capture / "page-000.body"
+    member.write_bytes(b"page")
+    config = {"manifest": str(tmp_path / "manifest.json"), "admission_root": str(tmp_path),
+              "output": str(tmp_path / "run"), "max_verify_seconds": 30}
+    frozen = precheck_input_references(config, destination=tmp_path / "directories.jsonl")
+    assert frozen["status"] == "passed"
+    with duckdb.connect() as c:
+        c.execute("CREATE SCHEMA baostock18_admission")
+        c.execute("CREATE TABLE baostock18_admission.row_lineage(source_path VARCHAR)")
+        c.execute("INSERT INTO baostock18_admission.row_lineage VALUES ('raw/capture.json.gz')")
+        contract = reference_contract(c, {}, reference_root=str(tmp_path), admission_root=str(tmp_path),
+                                      json_root=str(tmp_path), capture_inventory=frozen)
+        result = freeze_reference_inventory(c, contract, tmp_path / "good.jsonl", {}, time.monotonic() + 30)
+        assert result["count"] == 1 and result["bytes"] == 4
+        if change == "bytes":
+            member.write_bytes(b"evil")
+        elif change == "added":
+            (capture / "new").write_bytes(b"new")
+        else:
+            member.unlink()
+        with pytest.raises(AdmissionError, match="mismatch|membership missing/changed"):
+            freeze_reference_inventory(c, contract, tmp_path / "bad.jsonl", {}, time.monotonic() + 30)

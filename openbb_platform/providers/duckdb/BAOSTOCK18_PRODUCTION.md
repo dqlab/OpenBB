@@ -424,15 +424,27 @@ service recovery waits for that receipt even after a transport failure. Preserve
 the original container inventory and every run directory. The wrapper neither
 installs into deployed service environments nor rewrites the approved baseline.
 
-Before CHECKPOINT the driver also reads candidate `capture_inventory.relative`
-against `admission_root`. `--check-input-references --output <new-receipt.json>`
-runs that same check without connecting to the target catalog. Missing files,
-symlinks, escaped roots and directory locators fail; a directory identifier is
-never silently certified as a regular file. The service wrapper runs this check
-before any target stop. An unresolvable lineage location aborts the window packet;
-resolve the actual immutable archive mapping and explicitly support its reference
-contract before production admission. Do not omit the column or label directory
-content IDs as byte hashes to get through the gate.
+Before CHECKPOINT the driver resolves candidate `capture_inventory.relative` as
+a **directory** against `admission_root`. The production container mapping is
+`/home/zdqclawbot/work/app/openbb/output`; the receipt records the actual resolved
+root. `--check-input-references --output <new-receipt.json>` runs the same check
+without connecting to the target catalog. It requires canonical directories,
+recursively enumerates every regular member and measures its byte SHA256, size
+and stable identity. Missing/unreadable directories or members, symlinks,
+nonregular entries, escaped roots and changes during hashing abort. The receipt
+records capture/directory/file counts, bytes, missing/changed/error counts,
+elapsed seconds and measured throughput; periodic hashing progress is retained.
+
+The adjacent `*.directories.jsonl` freezes each directory's complete file list,
+individual sizes and SHA256 values. The driver also freezes an inventory inside
+its execution directory and binds its hash in the staged reference contract.
+Only admission `row_lineage.source_path` has directory semantics: the resolver
+compares its complete membership to that inventory and projects each regular
+file into the existing independent backup hash verification. Directory/content
+IDs are never treated as file hashes. Other reference and admission gates retain
+their existing semantics. The service wrapper completes this check before any
+target stop. The local production-shaped fixture uses the same relative capture
+directory shape with authority, eligibility, page body and fragment files.
 
 The wrapper also supports `--precheck-only` with an **already running** maintenance
 container and a new directory within its existing recovery mount. It installs the

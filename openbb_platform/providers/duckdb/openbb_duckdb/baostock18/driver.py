@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import resource
-import stat
 import subprocess
 import sys
 import time
@@ -39,56 +38,116 @@ from openbb_duckdb.baostock18.reference_backup import (
     PROVENANCE_COLUMNS,
     REDUCED_SCOPE,
     bounded_sql,
+    check_deadline,
+    directory_files,
     freeze_reference_inventory,
+    stable_hash,
 )
 from openbb_duckdb.baostock18.store import transaction, utcnow
 
 
-def precheck_input_references(config):
-    """Check candidate lineage against the same file contract before a window.
+def precheck_input_references(config, *, destination=None):
+    """Freeze every regular member of each candidate capture directory.
 
-    This reads only the frozen candidate and file metadata, never the target DB.
-    A directory locator is not silently relabeled as a backed-up regular file.
+    This reads only the frozen candidate and capture bytes, never the target DB.
+    The persisted per-file SHA256 inventory also binds staged catalog backups.
     """
     started = time.monotonic()
+    deadline = started + config["max_verify_seconds"]
     root = Path(config["admission_root"])
     manifest = load_json(config["manifest"])
-    result = dict(capture_records=0, regular_files=0, directories=0, missing=0, invalid=0, samples=[])
-    with (
-        source_connection(Path(manifest["candidate"]), Path(config["output"]).parent / "precheck-spill") as c,
-        bounded_sql(c, started + config["max_verify_seconds"]),
-    ):
-        cursor = c.execute("SELECT relative FROM capture_inventory")
-        while rows := cursor.fetchmany(512):
-            for (value,) in rows:
-                path = Path(value) if Path(value).is_absolute() else root / value
-                result["capture_records"] += 1
-                try:
-                    info = path.lstat()
-                    if path.resolve() != path or not path.is_relative_to(root):
-                        kind = "invalid"
-                    elif stat.S_ISREG(info.st_mode):
-                        kind = "regular_files"
-                    elif stat.S_ISDIR(info.st_mode):
-                        kind = "directories"
-                    else:
-                        kind = "invalid"
-                except FileNotFoundError:
-                    kind = "missing"
-                result[kind] += 1
-                if kind != "regular_files" and len(result["samples"]) < 5:
-                    result["samples"].append({"path": str(path), "kind": kind})
+    result = dict(
+        capture_records=0,
+        regular_files=0,
+        directories=0,
+        bytes=0,
+        missing=0,
+        changed=0,
+        invalid=0,
+        unreadable=0,
+        nonregular=0,
+        samples=[],
+    )
+    frozen = []
+    files_seen = set()
+    try:
+        if not root.is_absolute() or root.resolve(strict=True) != root or not root.is_dir():
+            raise AdmissionError("Admission root must be a canonical absolute directory")
+        with (
+            source_connection(Path(manifest["candidate"]), Path(config["output"]).parent / "precheck-spill") as c,
+            bounded_sql(c, deadline),
+        ):
+            cursor = c.execute("SELECT relative,count(*) FROM capture_inventory GROUP BY relative ORDER BY relative")
+            reported = started
+            while rows := cursor.fetchmany(512):
+                for value, records in rows:
+                    check_deadline(deadline)
+                    if not isinstance(value, str) or not value or "://" in value or any(x in value for x in "*?["):
+                        raise AdmissionError("Invalid capture directory locator")
+                    path = Path(value) if Path(value).is_absolute() else root / value
+                    result["capture_records"] += records
+                    members = directory_files(path, root, deadline)
+                    result["directories"] += records
+                    files = []
+                    for member in members:
+                        size, digest = stable_hash(member, deadline)
+                        files.append({"path": str(member), "size": size, "sha256": digest})
+                        if member not in files_seen:
+                            files_seen.add(member)
+                            result["regular_files"] += 1
+                            result["bytes"] += size
+                    if directory_files(path, root, deadline) != members:
+                        raise AdmissionError(f"Capture directory changed while hashing: {path}")
+                    frozen.append({"directory": str(path), "files": files})
+                    if time.monotonic() - reported >= 15:
+                        print(
+                            json.dumps(
+                                {
+                                    "stage": "capture-directory-hashing",
+                                    "seconds": time.monotonic() - started,
+                                    **{k: result[k] for k in ("directories", "regular_files", "bytes")},
+                                }
+                            ),
+                            flush=True,
+                        )
+                        reported = time.monotonic()
+        result["status"] = "passed"
+    except (AdmissionError, OSError) as exc:
+        message = str(exc)
+        result.update(status="failed", error=message)
+        if isinstance(exc, FileNotFoundError) or isinstance(exc.__cause__, FileNotFoundError):
+            kind = "missing"
+        elif "changed" in message:
+            kind = "changed"
+        elif "Nonregular" in message:
+            kind = "nonregular"
+        elif isinstance(exc, PermissionError) or isinstance(exc.__cause__, PermissionError):
+            kind = "unreadable"
+        else:
+            kind = "invalid"
+        result[kind] += 1
+        result["samples"].append({"error": message, "kind": kind})
+    if destination is not None:
+        with Path(destination).open("x") as stream:
+            for item in frozen:
+                stream.write(json.dumps(item) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        result["inventory"] = str(destination)
+        if result["status"] == "passed":
+            result["inventory_sha256"] = stable_hash(destination, deadline)[1]
     result.update(
-        status="passed" if result["capture_records"] == result["regular_files"] else "failed",
         read_only=True,
         target_catalog_connections=0,
         root=str(root),
+        resolved_admission_root=str(root.resolve()),
         seconds=time.monotonic() - started,
     )
+    result["bytes_per_second"] = result["bytes"] / result["seconds"]
     return result
 
 
-def reference_contract(connection, observed, *, reference_root, admission_root, json_root):
+def reference_contract(connection, observed, *, reference_root, admission_root, json_root, capture_inventory=None):
     """Normalize column triples before either serialization or in-memory validation."""
     columns = [
         list(row)
@@ -131,6 +190,14 @@ def reference_contract(connection, observed, *, reference_root, admission_root, 
                 "root": admission_root if schema == SCHEMA else reference_root,
             }
         )
+        if (schema, table, column) == (SCHEMA, "row_lineage", "source_path"):
+            if capture_inventory is None:
+                raise AdmissionError("Capture directory inventory required for admission lineage")
+            rules[-1].update(
+                kind="capture_directory",
+                inventory=capture_inventory["inventory"],
+                inventory_sha256=capture_inventory["inventory_sha256"],
+            )
     return {
         "format": "baostock18-catalog-reference-contract-v1",
         "catalog_fingerprint": observed,
@@ -251,6 +318,7 @@ class Driver:
                     reference_root=self.config["reference_root"],
                     admission_root=self.config["admission_root"],
                     json_root=self.config["json_root"],
+                    capture_inventory=self.capture_inventory,
                 )
                 cp = self.root / (label + "-reference-contract.json")
                 ip = self.root / (label + "-references.jsonl")
@@ -387,12 +455,18 @@ class Driver:
 
     def run(self):
         """Execute every gate and retain a receipt even when a stage fails."""
-        result = {"format": "baostock18-driver-v1", "config": self.config}
+        result = {
+            "format": "baostock18-driver-v1",
+            "config": self.config,
+            "resolved_admission_root": str(Path(self.config["admission_root"]).resolve(strict=True)),
+        }
         try:
-            candidate = precheck_input_references(self.config)
+            candidate = precheck_input_references(self.config, destination=self.root / "capture-directories.jsonl")
+            self.capture_inventory = candidate
+            result["capture_reference_verification"] = candidate
             write_json(self.root / "candidate-reference-precheck.json", candidate)
             if candidate["status"] != "passed":
-                raise AdmissionError("Candidate lineage cannot satisfy the regular-file reference contract")
+                raise AdmissionError("Candidate capture directory verification failed")
             common = self.prepare("before-import")
             self.cli("production-preflight", "preflight", common=common)
             imported = self.cli("production-import", "import", "--manifest", self.config["manifest"], common=common)
@@ -483,7 +557,7 @@ def main():
     if args.check_input_references:
         if not args.output:
             parser.error("--output required with --check-input-references")
-        result = precheck_input_references(config)
+        result = precheck_input_references(config, destination=Path(args.output).with_suffix(".directories.jsonl"))
         write_json(args.output, result)
         print(json.dumps(result), flush=True)
         if result["status"] != "passed":
