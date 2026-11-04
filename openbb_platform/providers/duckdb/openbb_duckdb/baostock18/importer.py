@@ -129,7 +129,7 @@ def _write_batch(target, source, table, snapshot_id, number, fault_hook):
 
 
 def import_candidate(manifest: dict, target, *, batch_size=50_000, fault_hook=None,
-                     rehearsal_receipt=None) -> dict:
+                     rehearsal_receipt=None, production=None) -> dict:
     """Stage all selected literals, lineage, quality and narrow bars atomically per batch.
 
     No visibility pointer is changed here. A crash leaves committed batches
@@ -138,6 +138,13 @@ def import_candidate(manifest: dict, target, *, batch_size=50_000, fault_hook=No
     """
     if not 50_000 <= batch_size <= 100_000:
         raise AdmissionError("batch_size must be between 50,000 and 100,000")
+    if production is not None:
+        if rehearsal_receipt is not None:
+            raise AdmissionError("Production and rehearsal authorizations are mutually exclusive")
+        production.check_target(target)
+        if (hashlib.sha256(encoded(manifest).encode()).hexdigest() != production.approved_manifest_hash
+                or batch_size != production.approved_batch_size):
+            raise AdmissionError("Manifest hash/batch size differs from approval")
     target = Path(target).expanduser().resolve()
     if target == Path(manifest["candidate"]).resolve() or str(target) in {x["path"] for x in manifest["files"]}:
         raise AdmissionError("Target must not overwrite an input")
@@ -153,7 +160,7 @@ def import_candidate(manifest: dict, target, *, batch_size=50_000, fault_hook=No
         expected = source.execute(
             "SELECT count(*) FROM literal18_variants WHERE " + selection, params,
         ).fetchone()[0]
-        with offline_writer(target, rehearsal_receipt=rehearsal_receipt) as connection:
+        with _writer(target, rehearsal_receipt, production) as connection:
             existing = connection.execute(
                 f"SELECT expected_rows,state FROM {SCHEMA}.snapshot WHERE snapshot_id=?", [snapshot_id],
             ).fetchone()
@@ -201,14 +208,20 @@ def import_candidate(manifest: dict, target, *, batch_size=50_000, fault_hook=No
 
 
 def set_visible(target, snapshot_id: str | None, *, basis: str,
-                expected_clean_rows: int | None = None, rehearsal_receipt=None) -> dict:
+                expected_clean_rows: int | None = None, rehearsal_receipt=None, production=None,
+                fault_hook=None) -> dict:
     """Approve/retract an OFFLINE pointer in one short transaction, keeping history.
 
     A full snapshot replaces the previous scope for this basis; there is no
     fallback to older dates/symbols. None records an explicit soft withdrawal.
     """
     require_basis(basis)
-    with offline_writer(target, rehearsal_receipt=rehearsal_receipt) as connection, transaction(connection):
+    if production is not None:
+        production.check_target(target)
+        if snapshot_id is not None and snapshot_id != production.approved_manifest_hash:
+            raise AdmissionError("Visibility snapshot differs from approved manifest hash")
+    with _writer(target, rehearsal_receipt, production, verify_ready=snapshot_id is not None) as connection, \
+            transaction(connection):
         current = connection.execute(
             f"SELECT snapshot_id,event_id FROM {SCHEMA}.dataset_pointer WHERE adjustment_basis=?", [basis],
         ).fetchone()
@@ -244,4 +257,17 @@ def set_visible(target, snapshot_id: str | None, *, basis: str,
             f"INSERT INTO {SCHEMA}.dataset_pointer VALUES (?,?,?) ON CONFLICT(adjustment_basis) "
             "DO UPDATE SET snapshot_id=excluded.snapshot_id,event_id=excluded.event_id", [basis, snapshot_id, event],
         )
+        if fault_hook:
+            fault_hook(connection)
         return {"snapshot_id": snapshot_id, "event_id": event, "known_at": now.isoformat(), "changed": True}
+
+
+def _writer(target, rehearsal_receipt, production, *, verify_ready=False):
+    """Keep default/rehearsal refusal separate from explicit production approval."""
+    if production is None:
+        return offline_writer(target, rehearsal_receipt=rehearsal_receipt)
+    if rehearsal_receipt is not None:
+        raise AdmissionError("Production and rehearsal authorizations are mutually exclusive")
+    from openbb_duckdb.baostock18.production import production_writer
+
+    return production_writer(production, verify_ready=verify_ready)

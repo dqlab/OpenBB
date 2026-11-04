@@ -1,7 +1,9 @@
 # BaoStock18 offline admission
 
 `openbb_duckdb.baostock18` stages a separate narrow price-basis dataset. It is
-an offline Python API and CLI, with no acquisition calls or production mode.
+a Python API and CLI, with no acquisition calls. The explicit production
+admission commands and maintenance-window sequence are documented in
+[BAOSTOCK18_PRODUCTION.md](BAOSTOCK18_PRODUCTION.md).
 Install `openbb-duckdb[baostock18]` to supply PyArrow for the importer. The reader
 needs DuckDB only (in addition to the provider's normal OpenBB dependencies).
 No provider registration, router, service or `a_share` table/view is changed.
@@ -12,7 +14,8 @@ No provider registration, router, service or `a_share` table/view is changed.
 SHA256. A later run refuses a changed migration/version. A writer first inspects
 an existing file read-only and refuses catalogs containing other datasets. There
 is no default database path. Use a dedicated local scratch file; this command is
-not the approved production migration/publisher entrypoint.
+not a production entrypoint. Production-named catalogs additionally require the
+separate explicit production authorization.
 
 The Python functions `import_candidate` and `set_visible` accept an explicit
 `rehearsal_receipt` for a production-shape **copy**. The CLI has no such option.
@@ -127,6 +130,6 @@ withdrawal, basis rejection, reader bounds, checksummed migrations and refusal
 of a foreign catalog. Real candidate rehearsal receipts and old/new
 reconciliation belong in the application run directory, not this source tree.
 
-Production still requires independent raw/reference acceptance, conflict review,
-deployment integration and an explicitly authorized maintenance/backup window.
-Passing these offline checks does not mean central admission occurred.
+Production execution requires approved input/batch/baseline artifacts, independent
+raw/reference acceptance and a maintenance/backup window. Implementing or testing
+the production entrypoint on a local copy does not mean central admission occurred.

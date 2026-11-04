@@ -1,4 +1,4 @@
-"""Checksummed migration runner restricted to a dedicated offline database."""
+"""Checksummed migration shared by isolated offline and gated production writers."""
 
 # SQL interpolation below uses only the constant schema, never user identifiers.
 # ruff: noqa: S608
@@ -85,6 +85,8 @@ def transaction(connection):
 def offline_writer(path, *, rehearsal_receipt=None):
     """Inspect existing catalogs READ_ONLY before opening a writer; no production defaults."""
     path = Path(path).expanduser().resolve()
+    if path.name == "dq_quant_invest_data.duckdb":
+        raise AdmissionError("Explicit --production-target admission required for production DB name")
     if path.with_name(path.name + ".access-windows").exists():
         raise AdmissionError("Access-window policy present; no offline writer bypass")
     baseline = _rehearsal_baseline(path, rehearsal_receipt)
@@ -98,12 +100,19 @@ def offline_writer(path, *, rehearsal_receipt=None):
     }) as connection:
         connection.execute("SET TimeZone='UTC'")
         owned = _check_owned(connection, baseline)
-        sql = Path(__file__).with_name("migrations").joinpath("001_narrow_basis.sql").read_text()
-        digest = hashlib.sha256(sql.encode()).hexdigest()
-        if not owned:
-            with transaction(connection):
-                connection.execute(sql)
-                connection.execute(f"INSERT INTO {SCHEMA}.schema_version VALUES (1,?,?)", [digest, utcnow()])
-        elif connection.execute(f"SELECT version,sha256 FROM {SCHEMA}.schema_version").fetchall() != [(1, digest)]:
-            raise AdmissionError("Migration checksum/version mismatch")
+        migrate(connection, owned)
         yield connection
+
+
+def migrate(connection, owned, *, read_only=False):
+    """Apply the same checksummed migration, or validate it without writing."""
+    sql = Path(__file__).with_name("migrations").joinpath("001_narrow_basis.sql").read_text()
+    digest = hashlib.sha256(sql.encode()).hexdigest()
+    if not owned:
+        if read_only:
+            raise AdmissionError("Admission schema has not been migrated")
+        with transaction(connection):
+            connection.execute(sql)
+            connection.execute(f"INSERT INTO {SCHEMA}.schema_version VALUES (1,?,?)", [digest, utcnow()])
+    elif connection.execute(f"SELECT version,sha256 FROM {SCHEMA}.schema_version").fetchall() != [(1, digest)]:
+        raise AdmissionError("Migration checksum/version mismatch")
