@@ -16,6 +16,7 @@ from openbb_duckdb.baostock18.production import (
     verify_production,
     write_json,
 )
+from openbb_duckdb.baostock18.reference_backup import SCOPES
 
 
 def main():
@@ -61,9 +62,19 @@ def main():
         command.add_argument("--approved-batch-size", required=True, type=int)
         command.add_argument("--output", required=True, help="New receipt file (exclusive creation)")
         if name == "backup":
+            command.add_argument("--backup-scope", choices=SCOPES, default="full")
+            command.add_argument("--reference-manifest", help="Frozen sorted JSONL path/size/SHA256 inventory")
+            command.add_argument("--reference-contract", help="Fingerprint-bound catalog enumeration contract")
+            command.add_argument("--restore-admission-state", choices=("baseline", "staged_unpublished"),
+                                 default="baseline", help="Initial schema absent; staged requires zero publication")
             command.add_argument("--destination", required=True)
             command.add_argument("--checkpoint-receipt", required=True)
             command.add_argument("--dependency", action="append", default=[])
+            command.add_argument("--dependency-manifest", help="Sorted JSONL paths; copied in batches of 512")
+            command.add_argument("--expected-files", type=int)
+            command.add_argument("--expected-bytes", type=int)
+            command.add_argument("--estimated-seconds", type=float)
+            command.add_argument("--max-backup-seconds", type=float)
         else:
             command.add_argument("--backup-receipt", required=True)
         if name == "import":
@@ -115,7 +126,15 @@ def production_command(args):
             backup_receipt=getattr(args, "backup_receipt", None),
         )
         if args.command == "production-backup":
-            result = create_backup(admission, args.destination, args.checkpoint_receipt, args.dependency)
+            result = create_backup(
+                admission, args.destination, args.checkpoint_receipt, args.dependency,
+                dependency_manifest=args.dependency_manifest,
+                expected_files=args.expected_files, expected_bytes=args.expected_bytes,
+                estimated_seconds=args.estimated_seconds, max_seconds=args.max_backup_seconds,
+                backup_scope=args.backup_scope, reference_manifest=args.reference_manifest,
+                reference_contract=args.reference_contract,
+                restore_admission_state=args.restore_admission_state,
+            )
         elif args.command == "production-preflight":
             result = preflight(admission)
         elif args.command == "production-import":

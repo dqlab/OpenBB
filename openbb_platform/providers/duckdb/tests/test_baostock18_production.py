@@ -17,6 +17,7 @@ import duckdb
 import pytest
 from openbb_duckdb.baostock18 import import_candidate, read_bars, set_visible
 from openbb_duckdb.baostock18.__main__ import main
+from openbb_duckdb.baostock18.backup import backup_items, copy_manifest
 from openbb_duckdb.baostock18.contract import SCHEMA, AdmissionError
 from openbb_duckdb.baostock18.manifest import encoded, sha256
 from openbb_duckdb.baostock18.production import (
@@ -104,6 +105,57 @@ def test_each_fingerprint_field_must_match(prepared, field, value):
     with pytest.raises(AdmissionError, match="fingerprint mismatch"):
         import_candidate(manifest, target, production=approval)
     assert (fingerprint(target), sha256(target)) == before
+
+
+def test_manifest_cli_backup_and_tamper_rejection(prepared, tmp_path, monkeypatch):
+    """The real CLI carries one manifest path and preflight checks every payload."""
+    _, target, approval = prepared
+    dependency = tmp_path / "literal spaces $() `quote`\nreference.json"
+    dependency.write_text('{"reference":"immutable"}')
+    manifest = tmp_path / "dependencies.jsonl"
+    manifest.write_text(json.dumps(str(dependency)) + "\n")
+    destination = tmp_path / "manifest-backup"
+    output = tmp_path / "manifest-command.json"
+    monkeypatch.setattr(sys, "argv", [
+        "baostock18", "production-backup", "--production-target", str(target),
+        "--expected-catalog-fingerprint", approval.expected_catalog_fingerprint,
+        "--window-started-at", approval.window_started_at, "--baseline", approval.baseline,
+        "--approved-manifest-hash", approval.approved_manifest_hash,
+        "--approved-batch-size", str(approval.approved_batch_size),
+        "--checkpoint-receipt", str(Path(approval.expected_catalog_fingerprint).with_name("checkpoint.json")),
+        "--dependency-manifest", str(manifest), "--destination", str(destination),
+        "--expected-files", "2", "--expected-bytes", str(target.stat().st_size + dependency.stat().st_size),
+        "--estimated-seconds", "1", "--max-backup-seconds", "60", "--output", str(output),
+    ])
+    before = sha256(target)
+    main()
+    approval = replace(approval, backup_receipt=str(destination / "receipt.json"))
+    assert preflight(approval)["preflight"] == "passed"
+    items = list(backup_items(destination / "manifest.jsonl"))
+    assert {x["source"] for x in items} == {str(target), str(dependency)}
+    Path(items[-1]["backup"]).write_bytes(b"tampered")
+    with pytest.raises(AdmissionError, match="payload hash"):
+        preflight(approval)
+    assert sha256(target) == before
+
+
+def test_manifest_timeout_retains_partial_without_receipt(tmp_path, monkeypatch):
+    """A deadline abort leaves evidence and never changes the source."""
+    from openbb_duckdb.baostock18 import backup
+
+    source = tmp_path / "source"
+    source.write_bytes(b"original")
+    manifest = tmp_path / "sources.jsonl"
+    manifest.write_text(json.dumps(str(source)) + "\n")
+    destination = tmp_path / "partial"
+    ticks = iter([0, 100])
+    monkeypatch.setattr(backup.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(AdmissionError, match="deadline exceeded"):
+        copy_manifest(manifest, destination, expected_files=1, expected_bytes=8,
+                      estimated_seconds=1, max_seconds=10)
+    assert source.read_bytes() == b"original"
+    assert (destination / "plan.json").exists()
+    assert not (destination / "receipt.json").exists()
 
 
 @pytest.mark.parametrize("change,error", [

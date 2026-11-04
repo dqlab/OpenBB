@@ -65,6 +65,81 @@ the reviewed dependency inventory. Its receipt certifies exactly those listed
 files; catalog-only backup is not evidence that external references can be
 restored. Restore checks belong in a new directory, never over the source.
 
+For large inventories use `--dependency-manifest` instead of repeated
+`--dependency` flags. The file contains sorted unique canonical absolute paths,
+one JSON string per line, excluding the catalog (which is inserted automatically).
+The transport persists batches of at most **512 paths**, runs `rsync --from0 --files-from` for each batch, flushes the backup filesystem
+with `syncfs`, and hashes each source and backup independently. No dependency list is expanded through argv or argparse. The
+streaming `manifest.jsonl` uses `baostock18-backup-files-v2`; preflight verifies
+both that format and the original v1 receipts. Existing small explicit-list
+callers retain their v1 format.
+
+Manifest mode requires measured `--expected-files`/`--expected-bytes`, an
+`--estimated-seconds` value derived from a real NAS exercise, and a positive
+`--max-backup-seconds` cap. Counts include the catalog. The exact totals must
+reconcile, and the estimate must fit the cap before copying. The transport checks
+the deadline between hash blocks and while rsync runs. On expiry it requests
+SIGINT only on its own rsync process, waits for exit, and retains partial evidence
+without a success receipt. NAS I/O and fsync calls may finish after a
+deadline before Python regains control; the cap never justifies killing a service.
+A backup error aborts the window and restores the previously running services.
+First validate a complete real NAS subtree through backup, per-file SHA256 and
+restore reconciliation while services are still running.
+
+### Explicit catalog and reference verification scope
+
+`--backup-scope` defaults to `full`. To explicitly choose the smaller recovery
+set, pass `--backup-scope catalog_with_reference_verification`,
+`--reference-manifest <inventory.jsonl>`, `--reference-contract <contract.json>`
+and `--max-backup-seconds 5400` (a smaller positive cap is permitted). Passing
+reference options without the explicit scope is an error. This scope copies the
+catalog and small explicitly listed metadata; referenced payloads stay in place.
+It does not supply independent recovery of bronze/silver archives.
+
+The frozen inventory is sorted unique JSONL: `{"path":"/absolute/file",
+"size":123,"sha256":"<64 hex characters>"}`. The contract has format
+`baostock18-catalog-reference-contract-v1`, the exact `catalog_fingerprint`,
+`columns` containing all physical `[schema,table,column]` triples sorted by those
+three fields, and `rules` with `schema`, `table`, `path_column`, `hash_column`
+and canonical absolute `root`. Every projection is rerun READ_ONLY, every row
+must be in the inventory, and every inventory entry must be seen. Catalog hashes
+must match the frozen inventory. A null hash column requires separately frozen
+byte hashes; a logical content ID must not be treated as a byte SHA256.
+`provenance_columns` may explain only logical `business_key`, `source_key`,
+`provider_key`, or relocated `original_path` fields. Other path columns,
+unsupported external views, unresolved embedded JSON file references, unknown schema,
+missing references and hash mismatches all abort. This contract never silently
+certifies unsupported reference formats.
+
+Nested JSON file references are traversed recursively and require an explicit
+canonical `json_root`. `freeze_reference_inventory` can build the inventory from
+these same projections, comparing available catalog byte hashes and measuring
+byte hashes for unpinned references. Backup then independently rehashes all of
+them; logical IDs are never substituted for file hashes.
+
+Each reference is opened with O_NOFOLLOW and hashed in bounded blocks, with
+size/mtime/device/inode stability checks. SQLite bounds the deduplication memory.
+`reference-verification.jsonl` and its summary retain count/bytes/missing/mismatch
+and projection coverage. Metadata copies are limited to 64 MiB per file and
+256 MiB total. A failed directory is retained without a success receipt.
+
+The catalog is independently copied to a new `restore_check` directory, opened
+READ_ONLY with external access disabled, and checked against the eight approved
+a_share counts, zero admission physical tables and a `LIMIT 3` read. Source,
+backup and restored hashes must agree. A shared monotonic deadline covers the
+entire reduced operation, including enumeration and restore. Receipt `scope`,
+`uncopied_reference_bytes`, reference coverage, before/after whole catalog SHA256,
+absent WAL, fingerprint and restore duration are mandatory for this scope.
+The original requirement for fresh backup evidence after catalog changes remains;
+a reduced pre-admission backup cannot authorize an already modified catalog.
+After import, explicitly pass `--restore-admission-state staged_unpublished` for
+the required fresh backup. This additional restore gate reconciles the approved
+ready snapshot in both source and restored catalog, requires exactly one snapshot
+and zero rows in basis_admission, visibility_event and dataset_pointer, and checks
+the unchanged a_share baseline. The default `baseline` restore continues to
+require zero admission physical tables. A staged restore never authorizes a
+published catalog or relaxes the ordinary production verification gates.
+
 The default offline/rehearsal rejection remains. The production filename cannot
 use an implicit offline writer even when empty. `rehearsal_receipt` still binds
 only `rehearsal.duckdb` and cannot be combined with production authorization.
@@ -112,7 +187,7 @@ BB_PY=/home/zdqclawbot/work/app/openbb/.venv-market-data/bin/python
 : "${APPROVED_MANIFEST_HASH:?approved canonical manifest hash}"
 : "${APPROVED_BATCH_SIZE:?approved batch size}"
 : "${BASELINE:?approved baseline absolute path under the mounted home}"
-: "${DEPENDENCY_LIST:?absolute JSON array of frozen dependency paths}"
+: "${DEPENDENCY_LIST:?absolute sorted JSONL file of frozen dependency paths}"
 WINDOW=/maintenance-window
 HOST_WINDOW="$PHYSICAL/recovery/baostock18_$WINDOW_ID"
 MAINT="baostock18-production-$WINDOW_ID"
@@ -190,18 +265,17 @@ PY
     --window-started-at "$WINDOW_STARTED_AT" --baseline "$BASELINE" \
     --approved-manifest-hash "$APPROVED_MANIFEST_HASH" \
     --approved-batch-size "$APPROVED_BATCH_SIZE")
-  # JSON argument passing preserves spaces and arbitrary literal characters in paths.
-  "$DOCKER" exec -e PYTHONPATH="$WINDOW/provider" "$MAINT" "$BB_PY" -B -c '
-import json, subprocess, sys
-common=json.loads(sys.argv[1]); dependencies=json.load(open(sys.argv[2]))
-args=[sys.executable,"-B","-m","openbb_duckdb.baostock18","production-backup",*common,
-      "--destination",sys.argv[3],"--checkpoint-receipt",sys.argv[4],"--output",sys.argv[5]]
-for path in dependencies: args.extend(["--dependency",path])
-subprocess.run(args,check=True)
-' "$(printf '%s\0' "${COMMON[@]}" | "$DOCKER" exec -i "$MAINT" "$BB_PY" -c \
-    'import json,sys; print(json.dumps(sys.stdin.buffer.read().decode().split("\0")[:-1]))')" \
-    "$DEPENDENCY_LIST" "$WINDOW/$label-backup" "$WINDOW/$label-checkpoint.json" \
-    "$WINDOW/$label-backup-command.json"
+  # DEPENDENCY_LIST is a sorted UTF-8 JSONL file: one canonical absolute
+  # path encoded as a JSON string per line. Do not expand its contents in argv.
+  # Freeze the inventory after drain; counts include the catalog exactly once.
+  runbb production-backup "${COMMON[@]}" \
+    --dependency-manifest "$DEPENDENCY_LIST" \
+    --expected-files "$EXPECTED_FILES" --expected-bytes "$EXPECTED_BYTES" \
+    --estimated-seconds "$ESTIMATED_BACKUP_SECONDS" \
+    --max-backup-seconds "$MAX_BACKUP_SECONDS" \
+    --destination "$WINDOW/$label-backup" \
+    --checkpoint-receipt "$WINDOW/$label-checkpoint.json" \
+    --output "$WINDOW/$label-backup-command.json"
   COMMON+=(--backup-receipt "$WINDOW/$label-backup/receipt.json")
 }
 
