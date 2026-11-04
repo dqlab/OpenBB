@@ -1,0 +1,432 @@
+"""One explicit CLI chain for copied and production catalogs.
+
+Run with ``python -m openbb_duckdb.baostock18.driver --config /absolute/run.json``.
+All deployment paths, approvals, bounds and times come from the run packet.
+"""
+
+# All interpolated identifiers are fixed admission names or validated inventory.
+# ruff: noqa: S608, S603, T201
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import resource
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import duckdb
+from openbb_duckdb.baostock18.contract import SCHEMA, AdmissionError
+from openbb_duckdb.baostock18.manifest import encoded
+from openbb_duckdb.baostock18.production import (
+    A_SHARE_TABLES,
+    READ_CONFIG,
+    fingerprint,
+    inventory,
+    load_json,
+    market_lock,
+    no_wal,
+    production_path,
+    timestamp,
+    write_json,
+)
+from openbb_duckdb.baostock18.reference_backup import (
+    PATH_COLUMN,
+    PROVENANCE_COLUMNS,
+    REDUCED_SCOPE,
+    bounded_sql,
+    freeze_reference_inventory,
+)
+from openbb_duckdb.baostock18.store import transaction, utcnow
+
+
+def reference_contract(connection, observed, *, reference_root, admission_root, json_root):
+    """Normalize column triples before either serialization or in-memory validation."""
+    columns = [
+        list(row)
+        for row in connection.execute(
+            "SELECT c.table_schema,c.table_name,c.column_name FROM information_schema.columns c "
+            "JOIN duckdb_tables() t ON t.schema_name=c.table_schema AND t.table_name=c.table_name "
+            "WHERE NOT t.internal ORDER BY 1,2,3"
+        ).fetchall()
+    ]
+    rules, provenance = [], []
+    for schema, table, column in columns:
+        if not PATH_COLUMN.search(column):
+            continue
+        if column in PROVENANCE_COLUMNS:
+            provenance.append(
+                {
+                    "column": [schema, table, column],
+                    "reason": "Logical identity or original location; archived files are projected separately",
+                }
+            )
+            continue
+        names = {n for s, t, n in columns if (s, t) == (schema, table)}
+        digest = {
+            "storage_key": "sha256",
+            "manifest_key": "manifest_hash",
+            "evidence_key": "evidence_hash",
+            "payload_key": "evidence_hash",
+            "raw_key": "raw_sha256",
+        }.get(column)
+        if digest not in names:
+            digest = None
+        if (schema, table, column) == ("market_data", "financedatabase_snapshot", "raw_key"):
+            digest = "source_sha256"
+        rules.append(
+            {
+                "schema": schema,
+                "table": table,
+                "path_column": column,
+                "hash_column": digest,
+                "root": admission_root if schema == SCHEMA else reference_root,
+            }
+        )
+    return {
+        "format": "baostock18-catalog-reference-contract-v1",
+        "catalog_fingerprint": observed,
+        "columns": columns,
+        "rules": rules,
+        "provenance_columns": provenance,
+        "json_root": json_root,
+    }
+
+
+class Driver:
+    """No test/production branch: every command uses the production CLI gates."""
+
+    def __init__(self, config):
+        self.config = config
+        self.target = production_path(config["target"])
+        self.root = Path(config["output"])
+        if not self.root.is_absolute() or self.root.resolve() != self.root or self.root.exists():
+            raise AdmissionError("Driver output must be a new canonical absolute directory")
+        for key in ("manifest", "baseline", "reference_root", "admission_root", "json_root"):
+            p = Path(config[key])
+            if not p.is_absolute() or p.resolve(strict=True) != p:
+                raise AdmissionError(f"Explicit canonical {key} required")
+        timestamp(config["window_started_at"])
+        self.cap = config["max_backup_seconds"]
+        if not isinstance(self.cap, (int, float)) or not 0 < self.cap <= 14400:
+            raise AdmissionError("Driver backup cap must be positive and <=14400")
+        if config["approved_batch_size"] not in range(50000, 100001):
+            raise AdmissionError("Invalid approved batch size")
+        manifest = load_json(config["manifest"])
+        if hashlib.sha256(encoded(manifest).encode()).hexdigest() != config["approved_manifest_hash"]:
+            raise AdmissionError("Driver manifest differs from approval")
+        self.root.mkdir(mode=0o700)
+        self.commands = []
+        self.started = time.monotonic()
+        self.before_visibility = None
+        self.published = False
+
+    def cli(self, command, label, *extra, common=()):
+        """Run the installed CLI and retain output, errors and measured duration."""
+        argv = [sys.executable, "-B", "-m", "openbb_duckdb.baostock18", command, *common, *map(str, extra)]
+        if command != "read":
+            argv += ["--output", str(self.root / (label + ".json"))]
+        started = time.monotonic()
+        # Stream stdout/stderr to durable evidence without retaining large results in memory.
+        with (self.root / (label + ".stdout")).open("x") as out, (self.root / (label + ".stderr")).open("x") as err:
+            process = subprocess.run(argv, stdout=out, stderr=err, check=False)
+        record = {"argv": argv, "returncode": process.returncode, "seconds": time.monotonic() - started}
+        write_json(self.root / (label + "-command.json"), record)
+        self.commands.append(record)
+        print(json.dumps({"stage": label, **record}), flush=True)
+        if process.returncode:
+            raise AdmissionError(f"CLI {label} failed: {(self.root / (label + '.stderr')).read_text()[-3000:]}")
+        # DuckDB progress output may share stdout; production receipts are authoritative.
+        result = load_json(self.root / (label + (".stdout" if command == "read" else ".json")))
+        return result
+
+    def checkpoint(self, label):
+        """Prepare the explicit window checkpoint under existing ordered locks."""
+        started = time.monotonic()
+        fd = os.open(self.target.with_suffix(".publisher.lock"), os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as publisher:
+            fcntl.flock(publisher.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with market_lock(self.target):
+                with duckdb.connect(str(self.target), config=READ_CONFIG) as c:
+                    c.execute("CHECKPOINT")
+                no_wal(self.target)
+                value = {
+                    "format": "baostock18-checkpoint-v1",
+                    "target": str(self.target),
+                    "window_started_at": self.config["window_started_at"],
+                    "checkpoint_completed": True,
+                    "completed_at": utcnow().isoformat(),
+                    "catalog_fingerprint": fingerprint(self.target),
+                }
+                write_json(self.root / (label + "-checkpoint.json"), value)
+        write_json(self.root / (label + "-checkpoint-metrics.json"), {"seconds": time.monotonic() - started})
+
+    def prepare(self, label, *, staged=False):
+        """Freeze references and run the same bounded backup/restore CLI."""
+        self.checkpoint(label)
+        fp = self.root / (label + "-fingerprint.json")
+        self.cli(
+            "production-fingerprint",
+            label + "-fingerprint",
+            "--production-target",
+            self.target,
+            "--window-started-at",
+            self.config["window_started_at"],
+        )
+        common = [
+            "--production-target",
+            str(self.target),
+            "--expected-catalog-fingerprint",
+            str(fp),
+            "--window-started-at",
+            self.config["window_started_at"],
+            "--baseline",
+            self.config["baseline"],
+            "--approved-manifest-hash",
+            self.config["approved_manifest_hash"],
+            "--approved-batch-size",
+            str(self.config["approved_batch_size"]),
+        ]
+        started = time.monotonic()
+        with market_lock(self.target):
+            no_wal(self.target)
+            observed = fingerprint(self.target)
+            if observed != load_json(fp)["fingerprint"]:
+                raise AdmissionError("Catalog changed before reference freeze")
+            with (
+                duckdb.connect(str(self.target), read_only=True, config=READ_CONFIG) as c,
+                bounded_sql(c, started + self.config["max_freeze_seconds"]),
+            ):
+                contract = reference_contract(
+                    c,
+                    observed,
+                    reference_root=self.config["reference_root"],
+                    admission_root=self.config["admission_root"],
+                    json_root=self.config["json_root"],
+                )
+                cp = self.root / (label + "-reference-contract.json")
+                ip = self.root / (label + "-references.jsonl")
+                write_json(cp, contract)
+                # Read back the same persisted JSON supplied to production-backup.
+                frozen = freeze_reference_inventory(
+                    c, load_json(cp), ip, observed, started + self.config["max_freeze_seconds"]
+                )
+        write_json(self.root / (label + "-freeze.json"), {"seconds": time.monotonic() - started, **frozen})
+        dependencies = [arg for p in self.config.get("metadata", []) for arg in ("--dependency", p)]
+        result = self.cli(
+            "production-backup",
+            label + "-backup",
+            "--checkpoint-receipt",
+            self.root / (label + "-checkpoint.json"),
+            "--destination",
+            self.root / (label + "-backup"),
+            "--backup-scope",
+            REDUCED_SCOPE,
+            "--reference-manifest",
+            ip,
+            "--reference-contract",
+            cp,
+            "--max-backup-seconds",
+            self.cap,
+            "--restore-admission-state",
+            "staged_unpublished" if staged else "baseline",
+            *dependencies,
+            common=common,
+        )
+        if (
+            result["restore_check"]["status"] != "passed"
+            or result["reference_verification"]["status"] != "passed"
+            or result["reference_verification"]["missing"]
+            or result["reference_verification"]["mismatch"]
+        ):
+            raise AdmissionError("Backup/restore/reference reconciliation failed")
+        return common + ["--backup-receipt", str(self.root / (label + "-backup") / "receipt.json")]
+
+    def inspect(self, label, *, published):
+        """Check visibility, quarantine, batch timing and the foreign baseline."""
+        started = time.monotonic()
+        result = {}
+        deadline = started + self.config["max_verify_seconds"]
+        with (
+            market_lock(self.target),
+            duckdb.connect(str(self.target), read_only=True, config=READ_CONFIG) as c,
+            bounded_sql(c, deadline),
+        ):
+            baseline = load_json(self.config["baseline"])
+            result["a_share_counts"] = {
+                t: c.execute(f'SELECT count(*) FROM a_share."{t}"').fetchone()[0] for t in A_SHARE_TABLES
+            }
+            if inventory(c) != sorted(baseline["tables"]) or result["a_share_counts"] != baseline["a_share_counts"]:
+                raise AdmissionError("Foreign inventory/a_share baseline changed")
+            result["visibility_counts"] = {
+                t: c.execute(f"SELECT count(*) FROM {SCHEMA}.{t}").fetchone()[0]
+                for t in ("basis_admission", "visibility_event", "dataset_pointer")
+            }
+            result["visible_rows"] = c.execute(f"SELECT count(*) FROM {SCHEMA}.consumable").fetchone()[0]
+            result["quarantine_visible"] = c.execute(
+                f"SELECT count(*) FROM {SCHEMA}.consumable b JOIN {SCHEMA}.literal_version l "
+                "USING(snapshot_id,value_id) WHERE l.disposition='quarantine'"
+            ).fetchone()[0]
+            if (
+                result["quarantine_visible"]
+                or result["visible_rows"] != (self.config["expected_clean_rows"] if published else 0)
+                or result["visibility_counts"] != {k: int(published) for k in result["visibility_counts"]}
+            ):
+                raise AdmissionError("Visibility/quarantine count mismatch")
+            sample = c.execute(
+                f"SELECT symbol,date FROM {SCHEMA}.bar_version WHERE snapshot_id=? LIMIT 1",
+                [self.config["approved_manifest_hash"]],
+            ).fetchone()
+            result["batch_seconds"] = c.execute(
+                f"SELECT batch_number,rows,clean,quarantine,elapsed_seconds FROM {SCHEMA}.batch_receipt "
+                "WHERE snapshot_id=? ORDER BY batch_number",
+                [self.config["approved_manifest_hash"]],
+            ).fetchall()
+            result["sample"] = sample
+        result["seconds"] = time.monotonic() - started
+        write_json(self.root / (label + ".json"), result)
+        return sample
+
+    def reader(self, label, sample, *, published, as_of=None):
+        """Execute a bounded real reader CLI and check its visibility result."""
+        symbol, day = sample
+        args = [
+            "--database",
+            self.target,
+            "--symbols",
+            symbol,
+            "--start-date",
+            str(day),
+            "--end-date",
+            str(day),
+            "--basis",
+            "unadjusted",
+            "--limit",
+            self.config["reader_limit"],
+        ]
+        if as_of:
+            args.extend(["--as-of", as_of])
+        rows = self.cli("read", label, *args)
+        if len(rows) != int(published):
+            raise AdmissionError("Bounded reader/as-of mismatch")
+        return rows
+
+    def withdraw(self):
+        """Compensate only this run's committed pointer after a post-switch failure.
+
+        This emergency transaction grants no admission, retains historical events,
+        checks the exact pre-switch foreign baseline, and never rewrites inputs.
+        """
+        if self.before_visibility is None:
+            return
+        with market_lock(self.target), duckdb.connect(str(self.target), config=READ_CONFIG) as c:
+            current = c.execute(
+                f"SELECT snapshot_id FROM {SCHEMA}.dataset_pointer WHERE adjustment_basis=?", ["unadjusted"]
+            ).fetchone()
+            if current != (self.config["approved_manifest_hash"],):
+                return
+            with transaction(c):
+                event = c.execute(f"SELECT coalesce(max(event_id),0)+1 FROM {SCHEMA}.visibility_event").fetchone()[0]
+                c.execute(f"INSERT INTO {SCHEMA}.visibility_event VALUES (?,?,NULL,?)", [event, "unadjusted", utcnow()])
+                c.execute(
+                    f"UPDATE {SCHEMA}.dataset_pointer SET snapshot_id=NULL,event_id=? WHERE adjustment_basis=?",
+                    [event, "unadjusted"],
+                )
+            remaining = c.execute(f"SELECT count(*) FROM {SCHEMA}.consumable").fetchone()[0]
+            if remaining:
+                raise AdmissionError("Emergency withdrawal failed")
+        write_json(self.root / "withdrawal.json", {"status": "passed", "visible_rows": remaining, "event_id": event})
+
+    def run(self):
+        """Execute every gate and retain a receipt even when a stage fails."""
+        result = {"format": "baostock18-driver-v1", "config": self.config}
+        try:
+            common = self.prepare("before-import")
+            self.cli("production-preflight", "preflight", common=common)
+            imported = self.cli("production-import", "import", "--manifest", self.config["manifest"], common=common)
+            expected = {
+                "rows": self.config["expected_rows"],
+                "clean": self.config["expected_clean_rows"],
+                "quarantine": self.config["expected_quarantine"],
+                "conditional": 0,
+                "batches": self.config["expected_batches"],
+                "new_batches": self.config["expected_batches"],
+            }
+            if any(imported[k] != v for k, v in expected.items()):
+                raise AdmissionError("Import reconciliation differs from approved counts")
+            sample = self.inspect("unpublished", published=False)
+            self.reader("reader-unpublished", sample, published=False)
+            common = self.prepare("after-import", staged=True)
+            self.cli("production-preflight", "preflight-after-import", common=common)
+            verified = self.cli("production-verify", "verify", common=common)
+            if (
+                verified["clean_unadjusted"] != self.config["expected_clean_rows"]
+                or verified["quarantine"] != self.config["expected_quarantine"]
+                or verified["batches"] != self.config["expected_batches"]
+            ):
+                raise AdmissionError("Verify differs from approved reconciliation")
+            self.before_visibility = fingerprint(self.target)
+            visible = self.cli(
+                "production-visible",
+                "visible",
+                "--snapshot-id",
+                self.config["approved_manifest_hash"],
+                "--basis",
+                "unadjusted",
+                "--expected-clean-rows",
+                self.config["expected_clean_rows"],
+                common=common,
+            )
+            self.published = True
+            sample = self.inspect("published", published=True)
+            self.reader("reader", sample, published=True)
+            event = datetime.fromisoformat(visible["known_at"])
+            self.reader("reader-before", sample, published=False, as_of=(event - timedelta(microseconds=1)).isoformat())
+            self.reader("reader-at", sample, published=True, as_of=event.isoformat())
+            self.cli(
+                "production-fingerprint",
+                "replay-fingerprint",
+                "--production-target",
+                self.target,
+                "--window-started-at",
+                self.config["window_started_at"],
+            )
+            replay_common = common[:]
+            fp_index = replay_common.index("--expected-catalog-fingerprint") + 1
+            replay_common[fp_index] = str(self.root / "replay-fingerprint.json")
+            replay_common = replay_common[:-2]  # Replay is READ_ONLY and grants no writer authority.
+            replay = self.cli("production-replay", "replay", "--manifest", self.config["manifest"], common=replay_common)
+            if replay["new_batches"] != 0 or any(replay[k] != imported[k] for k in expected if k != "new_batches"):
+                raise AdmissionError("Replay was not idempotent")
+            result.update(status="passed", imported=imported, verified=verified, replay=replay, visible=visible)
+        except BaseException as exc:
+            result.update(status="aborted", error=repr(exc))
+            try:
+                self.withdraw()
+            except BaseException as withdrawal_error:
+                result["withdrawal_error"] = repr(withdrawal_error)
+            raise
+        finally:
+            result.update(
+                seconds=time.monotonic() - self.started,
+                commands=self.commands,
+                peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+            )
+            write_json(self.root / "receipt.json", result)
+        return result
+
+
+def main():
+    """Use an explicit persisted packet; no deployment defaults or implicit target."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True)
+    args = parser.parse_args()
+    result = Driver(load_json(args.config)).run()
+    print(json.dumps({"status": result["status"], "seconds": result["seconds"]}), flush=True)
+
+
+if __name__ == "__main__":
+    main()

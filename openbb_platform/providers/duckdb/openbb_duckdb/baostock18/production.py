@@ -583,6 +583,32 @@ def verify_production(admission):
         return result
 
 
+def replay_production(admission, manifest):
+    """Replay only an already-ready identical input without opening a writer.
+
+    A fresh fingerprint and the approved baseline still bind this target/window.
+    No backup exception is granted to import/visibility: this operation can only
+    return existing receipts and refuses missing, changed or incomplete inputs.
+    """
+    from openbb_duckdb.baostock18.importer import _receipt
+    from openbb_duckdb.baostock18.manifest import verify_manifest, verify_unchanged
+
+    if hashlib.sha256(encoded(manifest).encode()).hexdigest() != admission.approved_manifest_hash:
+        raise AdmissionError("Replay manifest differs from approval")
+    signatures = verify_manifest(manifest)
+    path = production_path(admission.target)
+    with market_lock(path):
+        admission.inspect(require_backup=False)
+        before = fingerprint(path)
+        with duckdb.connect(str(path), read_only=True, config=READ_CONFIG) as connection:
+            reconcile_snapshot(connection, admission.approved_manifest_hash, admission.approved_batch_size)
+            result = _receipt(connection, admission.approved_manifest_hash, 0)
+        verify_unchanged(signatures)
+        if fingerprint(path) != before:
+            raise AdmissionError("Catalog changed during read-only replay")
+    return dict(result, mode="production", read_only=True, target=str(path))
+
+
 def reconcile_snapshot(c, sid, batch_size):
     """Reconcile staged membership, lineage, quality and receipts before visibility."""
     snapshot = c.execute(

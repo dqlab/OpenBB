@@ -13,6 +13,7 @@ from openbb_duckdb.baostock18.production import (
     create_backup,
     load_json,
     preflight,
+    replay_production,
     verify_production,
     write_json,
 )
@@ -52,7 +53,7 @@ def main():
     fingerprint.add_argument("--production-target", required=True)
     fingerprint.add_argument("--window-started-at", required=True)
     fingerprint.add_argument("--output", required=True)
-    for name in ("backup", "preflight", "import", "verify", "visible"):
+    for name in ("backup", "preflight", "import", "verify", "visible", "replay"):
         command = commands.add_parser("production-" + name, help="Explicit production " + name)
         command.add_argument("--production-target", required=True)
         command.add_argument("--expected-catalog-fingerprint", required=True, help="Fresh fingerprint JSON file")
@@ -75,9 +76,9 @@ def main():
             command.add_argument("--expected-bytes", type=int)
             command.add_argument("--estimated-seconds", type=float)
             command.add_argument("--max-backup-seconds", type=float)
-        else:
+        elif name != "replay":
             command.add_argument("--backup-receipt", required=True)
-        if name == "import":
+        if name in ("import", "replay"):
             command.add_argument("--manifest", required=True)
         if name == "visible":
             command.add_argument("--snapshot-id")
@@ -143,6 +144,8 @@ def production_command(args):
             result.update(mode="production", target=args.production_target)
         elif args.command == "production-verify":
             result = verify_production(admission)
+        elif args.command == "production-replay":
+            result = replay_production(admission, load_json(args.manifest))
         else:
             result = set_visible(args.production_target, args.snapshot_id, basis=args.basis,
                                  expected_clean_rows=args.expected_clean_rows, production=admission)

@@ -365,3 +365,61 @@ It saves all CLI argv, stdout/stderr, elapsed times, fingerprint/full-hash abort
 proof, per-operation checkpoint/backup manifests and final reconciliation in
 `LOCAL_DEMO_RECEIPT.json`. The synthetic input has 3 clean rows and 15838 rejected
 rows; these are measured/asserted by the runner, rather than production totals.
+
+## Reusable complete-chain driver
+
+`python -m openbb_duckdb.baostock18.driver --config /absolute/run.json` executes
+one implementation for an isolated production-shaped copy and the production
+catalog. There is no alternate production import script. The JSON packet must
+supply canonical absolute `target`, new `output`, `manifest`, approved `baseline`,
+`reference_root`, `admission_root`, `json_root`, `window_started_at`,
+`approved_manifest_hash`, `approved_batch_size`, `max_backup_seconds` (at most
+14400), `max_freeze_seconds`, `max_verify_seconds`, `expected_rows`,
+`expected_clean_rows`, `expected_quarantine`, `expected_batches`, `reader_limit`,
+and optional small `metadata` files. Fingerprint/checkpoint/contract paths are
+namespaced under the explicitly supplied output directory and created fresh.
+The freeze and backup bounds are separate and both recorded in the packet.
+
+The driver performs CHECKPOINT under publisher then market locks; fingerprint;
+reference freeze; the actual `production-backup` CLI with the explicit reduced
+scope and cap; restore-check receipt checks; preflight; migration/import; exact
+unpublished counts and a bounded reader; a fresh staged backup/restore;
+preflight/verify; visibility; bounded current and visibility-time as-of readers;
+and an identical-input replay. Every command retains argv, stdout, stderr, return
+code and measured seconds. Batch receipts preserve each batch's rows and measured
+elapsed seconds. A failure retains evidence and stops; a post-switch failure
+withdraws this run's current pointer in an explicit compensating transaction.
+No input, catalog lock or WAL is removed.
+
+Reference contracts normalize DuckDB tuple rows to JSON list triples **before**
+in-memory reference enumeration. The freeze reads back the persisted contract,
+so its schema representation matches that supplied to the backup CLI. Production
+results are loaded from the independent CLI receipt, since DuckDB progress output
+can share stdout with printed JSON.
+
+`production-replay` is deliberately read-only. It requires fresh target/window
+fingerprint, approved manifest/batch and baseline, verifies every frozen input,
+requires an already-ready exact snapshot, and fully reconciles receipts, quality,
+lineage and typed counts. It returns the existing import receipt with
+`new_batches=0`. It grants no write authority and needs no fresh published-state
+backup. Ordinary `production-import`, verify and visibility backup gates remain
+unchanged; an incomplete or changed candidate cannot use replay to resume.
+
+From the repository root, `scripts/baostock18/rehearsal.py --ddl <saved-ddl.json>
+--output <new-absolute-copy-directory> --max-backup-seconds 14400
+--max-freeze-seconds 14400 --max-verify-seconds 600` constructs all saved physical
+tables (at least 79), views and indexes, populates all eight legacy a_share tables,
+and executes the installed driver with two real batches: 50,001 clean and 15,838
+quarantined rows. These are synthetic fixture counts, never production results.
+Use `PYTHONPATH` to select the exact wheel installation and repository test factory.
+
+`scripts/baostock18/window.py --config <deployment-packet.json>` wraps that same
+wheel driver with configured SSH/Docker paths, service identities, mount paths,
+health URLs and waiting bounds. It requires a green local chain receipt, waits
+for native jobs to finish naturally using the read-only host audit, stops only
+previously running targets using `stop --time -1`, and restores data-api, api,
+then the three native services in the configured order. Originally exited
+containers are never started. A remote supervisor records actual driver exit;
+service recovery waits for that receipt even after a transport failure. Preserve
+the original container inventory and every run directory. The wrapper neither
+installs into deployed service environments nor rewrites the approved baseline.
