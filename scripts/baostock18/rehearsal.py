@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--max-backup-seconds", type=float, required=True)
     parser.add_argument("--max-freeze-seconds", type=float, required=True)
     parser.add_argument("--max-verify-seconds", type=float, required=True)
+    parser.add_argument("--backup-scope", default="catalog_with_reference_verification")
     args = parser.parse_args()
     root = Path(args.output)
     root.mkdir(mode=0o700)
@@ -127,6 +128,7 @@ def main():
         "approved_manifest_hash": hashlib.sha256(encoded(manifest).encode()).hexdigest(),
         "approved_batch_size": 50000,
         "max_backup_seconds": args.max_backup_seconds,
+        "backup_scope": args.backup_scope,
         "max_freeze_seconds": args.max_freeze_seconds,
         "max_verify_seconds": args.max_verify_seconds,
         "expected_rows": 65839,

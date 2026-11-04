@@ -25,7 +25,9 @@ from openbb_duckdb.baostock18.backup import BLOCK_BYTES
 from openbb_duckdb.baostock18.contract import AdmissionError
 
 REDUCED_SCOPE = "catalog_with_reference_verification"
-SCOPES = ("full", REDUCED_SCOPE)
+RECORDED_SCOPE = "catalog_with_recorded_reference_verification"
+REFERENCE_SCOPES = (REDUCED_SCOPE, RECORDED_SCOPE)
+SCOPES = ("full", *REFERENCE_SCOPES)
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
 PATH_COLUMN = re.compile(r"(?:^|_)(?:path|key|uri|url|location)$")
@@ -83,7 +85,8 @@ def json_references(value):
                 digest = value.get(prefix + "_sha256")
                 if key == "path":
                     digest = value.get("sha256")
-                yield child, digest
+                yield child, digest, value.get("size" if key == "path" else prefix + "_size",
+                                               value.get("bytes" if key == "path" else prefix + "_bytes"))
             elif isinstance(child, (dict, list)):
                 yield from json_references(child)
     elif isinstance(value, list):
@@ -231,7 +234,7 @@ def _identifier(value):
 
 
 def enumerate_references(connection, contract, ledger, expected_fingerprint, deadline, *,
-                         freeze=False, hash_metrics=None):
+                         freeze=False, hash_metrics=None, record=None):
     """Execute reviewed column projections; compare full schema and view coverage.
 
     A rule has schema/table/path_column/hash_column/root. A hash_column may be
@@ -259,14 +262,17 @@ def enumerate_references(connection, contract, ledger, expected_fingerprint, dea
     rule_counts = []
     roots = json_roots(contract["json_root"]) if "json_root" in contract else []
 
-    def mark(value, digest, root):
+    def mark(value, digest, root, size=None):
         if not value or not isinstance(value, str) or "://" in value or any(x in value for x in "*?["):
             raise AdmissionError("Cannot enumerate nonliteral reference")
         source = Path(value) if Path(value).is_absolute() else root / value
         if source.resolve() != source or not source.is_relative_to(root):
             raise AdmissionError(f"Reference escapes its reviewed root: {source}")
-        if digest is not None and not HASH.fullmatch(digest):
+        if digest is not None and (not isinstance(digest, str) or not HASH.fullmatch(digest)):
             raise AdmissionError("Reference has invalid expected SHA256")
+        if record is not None:
+            record(source, digest, size, root)
+            return
         existing = ledger.execute("SELECT sha256 FROM expected WHERE path=?", [str(source)]).fetchone()
         if freeze and existing is None:
             hashing_started = time.monotonic()
@@ -294,6 +300,7 @@ def enumerate_references(connection, contract, ledger, expected_fingerprint, dea
         covered.add(key)
         hash_column = rule.get("hash_column")
         digest_sql = _identifier(hash_column) if hash_column else "NULL"
+        size_sql = _identifier(rule["size_column"]) if rule.get("size_column") else "NULL"
         root = Path(rule["root"])
         if not root.is_absolute() or root.resolve(strict=True) != root:
             raise AdmissionError("Reference root must be canonical absolute directory")
@@ -303,12 +310,12 @@ def enumerate_references(connection, contract, ledger, expected_fingerprint, dea
         pinned = directory_inventory(rule["inventory"], rule["inventory_sha256"], deadline) if directory_rule else {}
         distinct = "DISTINCT " if directory_rule else ""
         cursor = connection.execute(
-            f"SELECT {distinct}{column},{digest_sql} FROM {schema}.{table} WHERE {column} IS NOT NULL"
+            f"SELECT {distinct}{column},{digest_sql},{size_sql} FROM {schema}.{table} WHERE {column} IS NOT NULL"
         )
         count = 0
         file_count = 0
         while rows := cursor.fetchmany(512):
-            for value, digest in rows:
+            for value, digest, recorded_size in rows:
                 check_deadline(deadline)
                 if directory_rule:
                     source = Path(value) if Path(value).is_absolute() else root / value
@@ -317,10 +324,10 @@ def enumerate_references(connection, contract, ledger, expected_fingerprint, dea
                     if expected is None or [str(p) for p in files] != [f["path"] for f in expected]:
                         raise AdmissionError(f"Capture directory membership missing/changed: {source}")
                     for item in expected:
-                        mark(item["path"], item["sha256"], root)
+                        mark(item["path"], item.get("sha256"), root, item["size"])
                         file_count += 1
                 else:
-                    mark(value, digest, root)
+                    mark(value, digest, root, recorded_size)
                 count += 1
         rule_counts.append({**rule, "references": count, **({"files": file_count} if directory_rule else {})})
     for exclusion in contract.get("provenance_columns", []):
@@ -347,9 +354,9 @@ def enumerate_references(connection, contract, ledger, expected_fingerprint, dea
                     if references:
                         if not roots:
                             raise AdmissionError("Cannot enumerate JSON references without explicit json_root list")
-                        for filename, digest in references:
+                        for filename, digest, recorded_size in references:
                             source, root = resolve_json_reference(filename, roots)
-                            mark(str(source), digest, root)
+                            mark(str(source), digest, root, recorded_size)
                             root_hits[str(root)] += 1
                             count += 1
             if count:
@@ -368,13 +375,19 @@ def json_root_distribution(contract, projections):
             for root in json_roots(contract["json_root"])] if "json_root" in contract else []
 
 
-def freeze_reference_inventory(connection, contract, destination, fingerprint, deadline):
+def freeze_reference_inventory(connection, contract, destination, fingerprint, deadline, *, scope=REDUCED_SCOPE):
     """Freeze byte hashes from the same exhaustive projections used by backup.
 
     Existing catalog hashes take precedence and must match. Unpinned files receive
     a measured byte hash here, then are independently verified during backup.
     The inventory and scratch database must be new operator evidence paths.
     """
+    if scope == RECORDED_SCOPE:
+        from openbb_duckdb.baostock18.recorded_references import recorded_inventory
+
+        return recorded_inventory(connection, contract, destination, fingerprint, deadline)
+    if scope != REDUCED_SCOPE:
+        raise AdmissionError("Unknown reference freeze scope")
     destination = Path(destination)
     hash_metrics = {}
     with sqlite3.connect(destination.with_suffix(".sqlite")) as ledger, bounded_sql(connection, deadline):
@@ -392,8 +405,14 @@ def freeze_reference_inventory(connection, contract, destination, fingerprint, d
             "json_roots": json_root_distribution(contract, projections), "file_hashing": hash_metrics}
 
 
-def verify_references(connection, contract, manifest, destination, fingerprint, deadline):
+def verify_references(connection, contract, manifest, destination, fingerprint, deadline, *, scope=REDUCED_SCOPE):
     """Verify every enumerated reference against a frozen SHA256 without copying."""
+    if scope == RECORDED_SCOPE:
+        from openbb_duckdb.baostock18.recorded_references import recorded_inventory
+
+        return recorded_inventory(connection, contract, manifest, fingerprint, deadline, destination=destination)
+    if scope != REDUCED_SCOPE:
+        raise AdmissionError("Unknown reference verification scope")
     started = time.monotonic()
     database = destination / "reference-index.sqlite"
     result = {

@@ -36,7 +36,9 @@ from openbb_duckdb.baostock18.production import (
 from openbb_duckdb.baostock18.reference_backup import (
     PATH_COLUMN,
     PROVENANCE_COLUMNS,
+    RECORDED_SCOPE,
     REDUCED_SCOPE,
+    REFERENCE_SCOPES,
     bounded_sql,
     check_deadline,
     directory_files,
@@ -71,6 +73,10 @@ def precheck_input_references(config, *, destination=None):
     )
     frozen = []
     files_seen = set()
+    file_sizes = {}
+    from openbb_duckdb.baostock18.recorded_references import Sampler
+
+    sampler = Sampler()
     try:
         if not root.is_absolute() or root.resolve(strict=True) != root or not root.is_dir():
             raise AdmissionError("Admission root must be a canonical absolute directory")
@@ -97,6 +103,8 @@ def precheck_input_references(config, *, destination=None):
                             files_seen.add(member)
                             result["regular_files"] += 1
                             result["bytes"] += size
+                            file_sizes[str(member)] = size
+                            sampler.add(member, root)
                     if directory_files(path, root, deadline) != members:
                         raise AdmissionError(f"Capture directory changed while hashing: {path}")
                     frozen.append({"directory": str(path), "files": files})
@@ -145,6 +153,17 @@ def precheck_input_references(config, *, destination=None):
         seconds=time.monotonic() - started,
     )
     result["bytes_per_second"] = result["bytes"] / result["seconds"]
+    if config.get("backup_scope") == RECORDED_SCOPE:
+        from openbb_duckdb.baostock18.recorded_references import SAMPLE_SEED
+
+        selected = sampler.selected()
+        result.update(mode=RECORDED_SCOPE, recorded_hash_comparisons=0,
+                      recomputed_files=result["regular_files"], recomputed_bytes=result["bytes"],
+                      missing_hash_recomputed_files=result["regular_files"],
+                      sample_recomputed_files=len(selected), sample_paths=sorted(selected),
+                      sample_recomputed_bytes=sum(file_sizes[p] for p in selected),
+                      sample_seed=SAMPLE_SEED, unread_bytes=0, size_mismatch=0, hash_mismatch=0,
+                      hash_origin="candidate locators carry no byte hash; all member bytes recomputed")
     return result
 
 
@@ -188,6 +207,8 @@ def reference_contract(connection, observed, *, reference_root, admission_root, 
                 "table": table,
                 "path_column": column,
                 "hash_column": digest,
+                "size_column": next((n for n in (column.removesuffix("_key") + "_size",
+                                                   "size_bytes", "byte_size", "bytes", "size") if n in names), None),
                 "root": admission_root if schema == SCHEMA else reference_root,
             }
         )
@@ -224,6 +245,9 @@ class Driver:
                 raise AdmissionError(f"Explicit canonical {key} required")
         json_roots(config["json_root"])
         timestamp(config["window_started_at"])
+        self.scope = config.get("backup_scope", REDUCED_SCOPE)
+        if self.scope not in REFERENCE_SCOPES:
+            raise AdmissionError("Unknown driver backup scope")
         self.cap = config["max_backup_seconds"]
         if not isinstance(self.cap, (int, float)) or not 0 < self.cap <= 14400:
             raise AdmissionError("Driver backup cap must be positive and <=14400")
@@ -332,7 +356,7 @@ class Driver:
                 write_json(cp, contract)
                 # Read back the same persisted JSON supplied to production-backup.
                 frozen = freeze_reference_inventory(
-                    c, load_json(cp), ip, observed, started + self.config["max_freeze_seconds"]
+                    c, load_json(cp), ip, observed, started + self.config["max_freeze_seconds"], scope=self.scope
                 )
         write_json(self.root / (label + "-freeze.json"), {"seconds": time.monotonic() - started, **frozen})
         dependencies = [arg for p in self.config.get("metadata", []) for arg in ("--dependency", p)]
@@ -344,7 +368,7 @@ class Driver:
             "--destination",
             self.root / (label + "-backup"),
             "--backup-scope",
-            REDUCED_SCOPE,
+            self.scope,
             "--reference-manifest",
             ip,
             "--reference-contract",
