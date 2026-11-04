@@ -402,6 +402,30 @@ print(json.dumps(result))
             )
             self.created = True
             self.install()
+            config = dict(self.c["driver"], window_started_at=now())
+            self.save("driver-config.json", config)
+            self.probe(
+                "import json,pathlib\np=pathlib.Path("
+                + repr(self.c["mount"] + "/driver-config.json")
+                + ')\nwith p.open("x") as stream:json.dump('
+                + repr(config)
+                + ",stream,indent=2)\n"
+            )
+            self.docker(
+                "exec",
+                "-e",
+                "PYTHONPATH=" + self.c["mount"] + "/provider",
+                self.c["maintenance"],
+                self.c["python"],
+                "-B",
+                "-m",
+                "openbb_duckdb.baostock18.driver",
+                "--config",
+                self.c["mount"] + "/driver-config.json",
+                "--check-input-references",
+                "--output",
+                self.c["mount"] + "/candidate-reference-precheck.json",
+            )
             for short in self.c["stop_order"]:
                 name = self.c["services"][short]
                 old = next(x for x in self.before if x["Name"] == "/" + name)
@@ -413,15 +437,6 @@ print(json.dumps(result))
             audit = self.audit()
             if audit["holders"] or audit["locks"] or audit["errors"]:
                 raise RuntimeError("Catalog handles/locks remain after drain")
-            config = dict(self.c["driver"], window_started_at=now())
-            self.save("driver-config.json", config)
-            self.probe(
-                "import json,pathlib\np=pathlib.Path("
-                + repr(self.c["mount"] + "/driver-config.json")
-                + ')\nwith p.open("x") as stream:json.dump('
-                + repr(config)
-                + ",stream,indent=2)\n"
-            )
             # The exact same installed module that passed the local copy drives all catalog operations.
             r = self.launch_driver()
             driver = self.fetch(config["output"] + "/receipt.json")
@@ -451,13 +466,83 @@ print(json.dumps(result))
         print(json.dumps(result), flush=True)
         return result
 
+    def precheck_only(self):
+        """Use a running maintenance container for input checks without a window.
+
+        Only a new artifact directory is created in its existing recovery mount.
+        No target catalog connection, container start/stop or CHECKPOINT occurs.
+        """
+        import hashlib
+
+        receipt = json.loads(Path(self.c["rehearsal_receipt"]).read_text())
+        if receipt["status"] != "passed":
+            raise RuntimeError("Local E2E receipt is not green")
+        if hashlib.sha256(Path(self.c["wheel"]).read_bytes()).hexdigest() != self.c["wheel_sha256"]:
+            raise RuntimeError("Rehearsed wheel changed")
+        before = self.states()
+        self.save("services-before.json", before)
+        existing = next(x for x in before if x["Name"] == "/" + self.c["maintenance"])
+        if not existing["State"]["Running"]:
+            raise RuntimeError("Precheck requires an already-running maintenance container")
+        self.probe("from pathlib import Path\nPath(" + repr(self.c["mount"]) + ").mkdir(mode=0o700)\n")
+        self.install()
+        config = dict(self.c["driver"], window_started_at=now())
+        self.probe(
+            "import pathlib,json\nwith pathlib.Path("
+            + repr(self.c["mount"] + "/driver-config.json")
+            + ').open("x") as stream:json.dump('
+            + repr(config)
+            + ",stream,indent=2)\n"
+        )
+        r = self.docker(
+            "exec",
+            "-e",
+            "PYTHONPATH=" + self.c["mount"] + "/provider",
+            self.c["maintenance"],
+            self.c["python"],
+            "-B",
+            "-m",
+            "openbb_duckdb.baostock18.driver",
+            "--config",
+            self.c["mount"] + "/driver-config.json",
+            "--check-input-references",
+            "--output",
+            self.c["mount"] + "/candidate-reference-precheck.json",
+            check=False,
+        )
+        precheck = self.fetch(self.c["mount"] + "/candidate-reference-precheck.json")
+        self.save("candidate-reference-precheck.json", precheck)
+        after = self.states([x["Id"] for x in before])
+        self.save("services-after.json", after)
+        unchanged = all(
+            a["Id"] == b["Id"] and all(a["State"][k] == b["State"][k] for k in ("Running", "Pid", "StartedAt", "Status"))
+            for a, b in zip(after, before)
+        )
+        result = {
+            "status": "passed" if r["returncode"] == 0 and unchanged else "aborted",
+            "reason": "candidate reference gate",
+            "precheck": precheck,
+            "all_preexisting_service_states_unchanged": unchanged,
+            "target_service_stops": 0,
+            "target_service_starts": 0,
+            "checkpoint_executions": 0,
+            "target_catalog_connections": 0,
+            "recovery": "not_needed_no_services_stopped",
+            "completed_at": now(),
+        }
+        self.save("receipt.json", result)
+        print(json.dumps(result), flush=True)
+        return result
+
 
 def main():
     """Load a deployment packet containing no implicit production paths."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
+    parser.add_argument("--precheck-only", action="store_true")
     args = parser.parse_args()
-    result = Window(json.loads(Path(args.config).read_text())).execute()
+    window = Window(json.loads(Path(args.config).read_text()))
+    result = window.precheck_only() if args.precheck_only else window.execute()
     if result["status"] != "passed":
         sys.exit(1)
 

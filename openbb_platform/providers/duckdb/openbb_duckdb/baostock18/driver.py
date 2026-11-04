@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import resource
+import stat
 import subprocess
 import sys
 import time
@@ -20,7 +21,7 @@ from pathlib import Path
 
 import duckdb
 from openbb_duckdb.baostock18.contract import SCHEMA, AdmissionError
-from openbb_duckdb.baostock18.manifest import encoded
+from openbb_duckdb.baostock18.manifest import encoded, source_connection
 from openbb_duckdb.baostock18.production import (
     A_SHARE_TABLES,
     READ_CONFIG,
@@ -41,6 +42,50 @@ from openbb_duckdb.baostock18.reference_backup import (
     freeze_reference_inventory,
 )
 from openbb_duckdb.baostock18.store import transaction, utcnow
+
+
+def precheck_input_references(config):
+    """Check candidate lineage against the same file contract before a window.
+
+    This reads only the frozen candidate and file metadata, never the target DB.
+    A directory locator is not silently relabeled as a backed-up regular file.
+    """
+    started = time.monotonic()
+    root = Path(config["admission_root"])
+    manifest = load_json(config["manifest"])
+    result = dict(capture_records=0, regular_files=0, directories=0, missing=0, invalid=0, samples=[])
+    with (
+        source_connection(Path(manifest["candidate"]), Path(config["output"]).parent / "precheck-spill") as c,
+        bounded_sql(c, started + config["max_verify_seconds"]),
+    ):
+        cursor = c.execute("SELECT relative FROM capture_inventory")
+        while rows := cursor.fetchmany(512):
+            for (value,) in rows:
+                path = Path(value) if Path(value).is_absolute() else root / value
+                result["capture_records"] += 1
+                try:
+                    info = path.lstat()
+                    if path.resolve() != path or not path.is_relative_to(root):
+                        kind = "invalid"
+                    elif stat.S_ISREG(info.st_mode):
+                        kind = "regular_files"
+                    elif stat.S_ISDIR(info.st_mode):
+                        kind = "directories"
+                    else:
+                        kind = "invalid"
+                except FileNotFoundError:
+                    kind = "missing"
+                result[kind] += 1
+                if kind != "regular_files" and len(result["samples"]) < 5:
+                    result["samples"].append({"path": str(path), "kind": kind})
+    result.update(
+        status="passed" if result["capture_records"] == result["regular_files"] else "failed",
+        read_only=True,
+        target_catalog_connections=0,
+        root=str(root),
+        seconds=time.monotonic() - started,
+    )
+    return result
 
 
 def reference_contract(connection, observed, *, reference_root, admission_root, json_root):
@@ -344,6 +389,10 @@ class Driver:
         """Execute every gate and retain a receipt even when a stage fails."""
         result = {"format": "baostock18-driver-v1", "config": self.config}
         try:
+            candidate = precheck_input_references(self.config)
+            write_json(self.root / "candidate-reference-precheck.json", candidate)
+            if candidate["status"] != "passed":
+                raise AdmissionError("Candidate lineage cannot satisfy the regular-file reference contract")
             common = self.prepare("before-import")
             self.cli("production-preflight", "preflight", common=common)
             imported = self.cli("production-import", "import", "--manifest", self.config["manifest"], common=common)
@@ -423,8 +472,24 @@ def main():
     """Use an explicit persisted packet; no deployment defaults or implicit target."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--check-input-references",
+        action="store_true",
+        help="Read only candidate/file metadata; never connect to target catalog",
+    )
+    parser.add_argument("--output", help="New precheck receipt, required with --check-input-references")
     args = parser.parse_args()
-    result = Driver(load_json(args.config)).run()
+    config = load_json(args.config)
+    if args.check_input_references:
+        if not args.output:
+            parser.error("--output required with --check-input-references")
+        result = precheck_input_references(config)
+        write_json(args.output, result)
+        print(json.dumps(result), flush=True)
+        if result["status"] != "passed":
+            parser.exit(2, "Candidate references refused before opening a production window\n")
+        return
+    result = Driver(config).run()
     print(json.dumps({"status": result["status"], "seconds": result["seconds"]}), flush=True)
 
 

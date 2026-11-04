@@ -423,3 +423,20 @@ containers are never started. A remote supervisor records actual driver exit;
 service recovery waits for that receipt even after a transport failure. Preserve
 the original container inventory and every run directory. The wrapper neither
 installs into deployed service environments nor rewrites the approved baseline.
+
+Before CHECKPOINT the driver also reads candidate `capture_inventory.relative`
+against `admission_root`. `--check-input-references --output <new-receipt.json>`
+runs that same check without connecting to the target catalog. Missing files,
+symlinks, escaped roots and directory locators fail; a directory identifier is
+never silently certified as a regular file. The service wrapper runs this check
+before any target stop. An unresolvable lineage location aborts the window packet;
+resolve the actual immutable archive mapping and explicitly support its reference
+contract before production admission. Do not omit the column or label directory
+content IDs as byte hashes to get through the gate.
+
+The wrapper also supports `--precheck-only` with an **already running** maintenance
+container and a new directory within its existing recovery mount. It installs the
+same rehearsed wheel only there, runs the driver's read-only input-reference
+mode, and records before/after identities for every preexisting container. This
+mode never starts/stops a service or connects to the target catalog; a failed
+reference gate is an aborted packet with no service recovery needed.

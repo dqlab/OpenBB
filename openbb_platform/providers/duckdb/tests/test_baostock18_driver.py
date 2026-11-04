@@ -111,3 +111,20 @@ def test_post_switch_abort_withdraws_current_visibility(tmp_path):
     driver.withdraw()
     assert read(target, basis="unadjusted") == []
     assert (tmp_path / "withdrawal.json").is_file()
+
+
+def test_candidate_precheck_refuses_missing_and_directory_locators(tmp_path):
+    """Unknown or directory provenance cannot pass as verified regular files."""
+    from openbb_duckdb.baostock18.driver import precheck_input_references
+
+    manifest = make_candidate(tmp_path / "candidate.duckdb")
+    write_json(tmp_path / "manifest.json", manifest)
+    config = {"manifest": str(tmp_path / "manifest.json"), "admission_root": str(tmp_path),
+              "output": str(tmp_path / "run"), "max_verify_seconds": 30}
+    result = precheck_input_references(config)
+    assert result["status"] == "failed" and result["missing"] == 1
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw/capture.json.gz").mkdir()
+    result = precheck_input_references(config)
+    assert result["status"] == "failed" and result["directories"] == 1
+    assert result["target_catalog_connections"] == 0
