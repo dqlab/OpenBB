@@ -14,7 +14,7 @@ from openbb_duckdb.baostock18.backup import backup_items
 from openbb_duckdb.baostock18.contract import AdmissionError
 from openbb_duckdb.baostock18.manifest import prepare_manifest, sha256
 from openbb_duckdb.baostock18.production import create_backup, fingerprint, preflight, write_json
-from openbb_duckdb.baostock18.reference_backup import REDUCED_SCOPE, freeze_reference_inventory
+from openbb_duckdb.baostock18.reference_backup import REDUCED_SCOPE, bounded_sql, freeze_reference_inventory
 
 from .test_baostock18_admission import make_candidate
 from .test_baostock18_production import authorize, make_catalog
@@ -81,6 +81,17 @@ def test_freeze_inventory_compares_catalog_hash(reduced):
         with pytest.raises(AdmissionError, match="catalog hash mismatch"):
             freeze_reference_inventory(connection, contract, destination.parent / "bad-frozen.jsonl",
                                        fingerprint(approval.target), time.monotonic() + 60)
+
+
+def test_sql_deadline_interrupts_execute_before_any_fetch():
+    """A blocking aggregate cannot hide the deadline until its first result."""
+    import time
+
+    started = time.monotonic()
+    with (duckdb.connect() as connection,
+          pytest.raises(AdmissionError, match="SQL deadline exceeded"), bounded_sql(connection, started + 0.1)):
+        connection.execute("SELECT sum(i) FROM range(1000000000000) r(i)")
+    assert time.monotonic() - started < 10
 
 
 def test_reduced_receipt_and_real_restore(reduced):

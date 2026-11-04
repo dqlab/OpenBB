@@ -15,9 +15,12 @@ import os
 import re
 import sqlite3
 import stat
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
+import duckdb
 from openbb_duckdb.baostock18.backup import BLOCK_BYTES
 from openbb_duckdb.baostock18.contract import AdmissionError
 
@@ -51,6 +54,24 @@ def check_deadline(deadline):
     """One monotonic deadline covers enumeration, hashing, copying and restore."""
     if time.monotonic() >= deadline:
         raise AdmissionError("Backup and restore deadline exceeded; abort")
+
+
+@contextmanager
+def bounded_sql(connection, deadline):
+    """Interrupt owned DuckDB work even when execute has not returned a batch."""
+    check_deadline(deadline)
+    timer = threading.Timer(max(0, deadline - time.monotonic()), connection.interrupt)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield
+        check_deadline(deadline)
+    except duckdb.InterruptException as exc:
+        if time.monotonic() >= deadline:
+            raise AdmissionError("Backup and restore SQL deadline exceeded; abort") from exc
+        raise
+    finally:
+        timer.cancel()
 
 
 def stable_hash(path, deadline):
@@ -169,7 +190,7 @@ def enumerate_references(connection, contract, ledger, expected_fingerprint, dea
         if not root.is_absolute() or root.resolve(strict=True) != root:
             raise AdmissionError("Reference root must be canonical absolute directory")
         cursor = connection.execute(
-            f"SELECT DISTINCT {column},{digest_sql} FROM {schema}.{table} WHERE {column} IS NOT NULL"
+            f"SELECT {column},{digest_sql} FROM {schema}.{table} WHERE {column} IS NOT NULL"
         )
         count = 0
         while rows := cursor.fetchmany(512):
@@ -191,7 +212,7 @@ def enumerate_references(connection, contract, ledger, expected_fingerprint, dea
         if column.endswith("_json") or column in ("details", "payload"):
             s, t, col = map(_identifier, (schema, table, column))
             cursor = connection.execute(
-                f"SELECT DISTINCT CAST({col} AS VARCHAR) FROM {s}.{t} WHERE regexp_matches(CAST({col} AS VARCHAR), ?)",
+                f"SELECT CAST({col} AS VARCHAR) FROM {s}.{t} WHERE regexp_matches(CAST({col} AS VARCHAR), ?)",
                 [r'"(?:[^" ]*_)?(?:path|storage_key|raw_key|silver_key|manifest_key|payload_key)"\s*:'],
             )
             count = 0
@@ -222,7 +243,7 @@ def freeze_reference_inventory(connection, contract, destination, fingerprint, d
     The inventory and scratch database must be new operator evidence paths.
     """
     destination = Path(destination)
-    with sqlite3.connect(destination.with_suffix(".sqlite")) as ledger:
+    with sqlite3.connect(destination.with_suffix(".sqlite")) as ledger, bounded_sql(connection, deadline):
         ledger.execute("CREATE TABLE expected(path TEXT PRIMARY KEY, size INTEGER, sha256 TEXT, seen INTEGER)")
         projections = enumerate_references(connection, contract, ledger, fingerprint, deadline, freeze=True)
         with destination.open("x") as stream:
@@ -243,7 +264,7 @@ def verify_references(connection, contract, manifest, destination, fingerprint, 
               "coverage": "all persistent file references in reviewed catalog contract",
               "contents_copied": False}
     try:
-        with sqlite3.connect(database) as ledger:
+        with sqlite3.connect(database) as ledger, bounded_sql(connection, deadline):
             ledger.execute("CREATE TABLE expected(path TEXT PRIMARY KEY, size INTEGER, sha256 TEXT, seen INTEGER)")
             previous = ""
             with Path(manifest).open() as stream:

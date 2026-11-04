@@ -28,6 +28,7 @@ from openbb_duckdb.baostock18.manifest import encoded, sha256
 from openbb_duckdb.baostock18.reference_backup import (
     REDUCED_SCOPE,
     SCOPES,
+    bounded_sql,
     check_deadline,
     copy_checked,
     stable_hash,
@@ -434,7 +435,8 @@ def restore_catalog(backup, destination, baseline, expected_hash, deadline, *, s
     copied = copy_checked(backup, restored, deadline)
     if copied["sha256"] != expected_hash:
         raise AdmissionError("Restore catalog hash mismatch")
-    with duckdb.connect(str(restored), read_only=True, config=READ_CONFIG) as connection:
+    with (duckdb.connect(str(restored), read_only=True, config=READ_CONFIG) as connection,
+          bounded_sql(connection, deadline)):
         if inventory(connection) != sorted(baseline["tables"]):
             raise AdmissionError("Restore inventory mismatch")
         counts = {t: connection.execute(f'SELECT count(*) FROM a_share."{t}"').fetchone()[0]

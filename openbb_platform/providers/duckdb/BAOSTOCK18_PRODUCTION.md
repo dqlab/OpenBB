@@ -118,7 +118,9 @@ byte hashes for unpinned references. Backup then independently rehashes all of
 them; logical IDs are never substituted for file hashes.
 
 Each reference is opened with O_NOFOLLOW and hashed in bounded blocks, with
-size/mtime/device/inode stability checks. SQLite bounds the deduplication memory.
+size/mtime/device/inode stability checks. Catalog projections stream without
+DISTINCT/aggregation; SQLite bounds the deduplication memory. An owned DuckDB
+interrupt timer also enforces the deadline while execute is awaiting results.
 `reference-verification.jsonl` and its summary retain count/bytes/missing/mismatch
 and projection coverage. Metadata copies are limited to 64 MiB per file and
 256 MiB total. A failed directory is retained without a success receipt.
