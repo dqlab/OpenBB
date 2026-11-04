@@ -23,7 +23,8 @@ false`, and bind its absolute `target_path`, `[st_dev, st_ino]` `target_identity
 distinct `source_path`/`source_physical_path`/`source_identity`, and exact
 `baseline_tables` pairs of schema/table names. Missing files, hard links, changed
 identities or table inventories, and access-window policies are rejected before
-a writable connection opens. The baseline tables are left intact; only the
+a writable connection opens. Batch scratch tables are confined to the temporary
+catalog, including when a baseline table is named `main.batch`. The baseline tables are left intact; only the
 checksummed admission migration and its own rows are written. Generate this
 receipt only after verifying a new consistent clone. It is an explicit rehearsal
 opt-in, not a production permission or a backup certificate. Default calls still

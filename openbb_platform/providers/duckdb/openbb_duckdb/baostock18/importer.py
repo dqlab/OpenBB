@@ -68,7 +68,7 @@ def _write_batch(target, source, table, snapshot_id, number, fault_hook):
         "WHERE l.value_id BETWEEN ? AND ?", [min(ids), max(ids)],
     ).fetch_arrow_table()
     target.register("incoming_lineage", lineage)
-    target.execute("DROP TABLE IF EXISTS batch")
+    target.execute("DROP TABLE IF EXISTS temp.main.batch")
     target.execute(
         "CREATE TEMP TABLE batch AS SELECT *," + classify_sql() + " AS disposition FROM "
         "(SELECT *," + validation_sql() + " AS numeric_contract FROM incoming)"

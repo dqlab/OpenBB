@@ -245,6 +245,28 @@ def test_rehearsal_receipt_cannot_initialize_missing_clone_or_bypass_policy(tmp_
     assert not target.exists()
 
 
+def test_rehearsal_scratch_does_not_drop_existing_main_batch(tmp_path):
+    """A foreign table sharing the scratch name must survive every batch."""
+    manifest = make_candidate(tmp_path / "input.duckdb")
+    target = tmp_path / "rehearsal.duckdb"
+    with duckdb.connect(str(target)) as c:
+        c.execute("CREATE TABLE main.batch AS SELECT 42 AS sentinel")
+    stat = target.stat()
+    receipt = tmp_path / "clone.json"
+    receipt.write_text(json.dumps({
+        "format": "baostock18-rehearsal-clone-v1",
+        "purpose": "migration rehearsal only; NOT a production backup",
+        "production_admitted": False, "target_path": str(target),
+        "source_path": str(tmp_path / "production.duckdb"),
+        "target_identity": [stat.st_dev, stat.st_ino],
+        "baseline_tables": [["main", "batch"]],
+    }))
+    imported = import_candidate(manifest, target, rehearsal_receipt=receipt)
+    assert imported["rows"] == 1
+    assert query(target, "SELECT * FROM main.batch") == [(42,)]
+    assert import_candidate(manifest, target, rehearsal_receipt=receipt)["new_batches"] == 0
+
+
 def test_numeric_precision_missing_lineage_and_limits(tmp_path):
     """Do not round excess scale or silently discard missing provenance."""
     input_path = tmp_path / "input.duckdb"
