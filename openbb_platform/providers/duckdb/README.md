@@ -228,3 +228,8 @@ forward/backward reads require the corresponding saved OHLC columns. Missing
 prices remain null only for source-marked suspensions. Existing U.S. split-only
 and split-and-dividend modes retain their contracts. BaoStock adjustment factors
 are not inferred cash dividends or split events.
+
+## BaoStock18 offline admission
+
+See [BAOSTOCK18.md](BAOSTOCK18.md) for the separate, versioned narrow-basis
+offline importer and read-only reader. It does not change legacy A-share views.
