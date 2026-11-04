@@ -91,7 +91,12 @@ restore reconciliation while services are still running.
 `--backup-scope` defaults to `full`. To explicitly choose the smaller recovery
 set, pass `--backup-scope catalog_with_reference_verification`,
 `--reference-manifest <inventory.jsonl>`, `--reference-contract <contract.json>`
-and `--max-backup-seconds 5400` (a smaller positive cap is permitted). Passing
+and `--max-backup-seconds 14400` (a smaller positive cap is permitted). The named
+`MAX_REDUCED_SCOPE_BACKUP_SECONDS` limit allows four hours: the measured reference
+inventory is about 596 GB across 2.54 million files, and hashing at about
+4.4 GB/min takes roughly two hours, with margin for verification and restore.
+Zero, negative, nonnumeric and larger caps are refused. This limit applies only
+to the explicit reduced scope; full-scope behavior is unchanged. Passing
 reference options without the explicit scope is an error. This scope copies the
 catalog and small explicitly listed metadata; referenced payloads stay in place.
 It does not supply independent recovery of bronze/silver archives.

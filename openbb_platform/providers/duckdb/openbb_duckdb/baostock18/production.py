@@ -43,6 +43,9 @@ A_SHARE_TABLES = (
 )
 FINGERPRINT_KEYS = {"size", "mtime_ns", "device", "inode", "header_sha256"}
 READ_CONFIG = {"enable_external_access": False, "threads": 2, "memory_limit": "2GB"}
+# Measured reference inventory: ~596 GB across 2.54 million files. At ~4.4 GB/min,
+# hashing alone takes about two hours; allow four hours for verification/restore.
+MAX_REDUCED_SCOPE_BACKUP_SECONDS = 14_400
 
 
 def load_json(path):
@@ -366,8 +369,12 @@ def create_backup(admission, destination, checkpoint_receipt, dependencies=(), *
         raise AdmissionError("Reference verification requires explicit --backup-scope " + REDUCED_SCOPE)
     if backup_scope == REDUCED_SCOPE and (
             reference_manifest is None or reference_contract is None or dependency_manifest is not None
-            or not isinstance(max_seconds, (int, float)) or not 0 < max_seconds <= 5400):
-        raise AdmissionError("Reduced scope requires reference inventory/contract and <=5400 second cap")
+            or not isinstance(max_seconds, (int, float))
+            or not 0 < max_seconds <= MAX_REDUCED_SCOPE_BACKUP_SECONDS):
+        raise AdmissionError(
+            "Reduced scope requires reference inventory/contract and "
+            f"0 < cap <= {MAX_REDUCED_SCOPE_BACKUP_SECONDS} seconds"
+        )
     started = time.monotonic()
     destination = Path(destination)
     if not destination.is_absolute() or destination.exists() or path.parent in destination.parents:

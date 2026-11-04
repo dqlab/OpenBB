@@ -112,7 +112,8 @@ def test_reduced_receipt_and_real_restore(reduced):
     assert preflight(replace(approval, backup_receipt=str(destination / "receipt.json")))["preflight"] == "passed"
 
 
-def test_reduced_real_cli(reduced, monkeypatch):
+@pytest.mark.parametrize("cap", ["60", "14400"])
+def test_reduced_real_cli(reduced, monkeypatch, cap):
     """The actual parser exposes opt-in and persists the same verified receipt."""
     approval, destination, checkpoint, kwargs, _ = reduced
     output = destination.parent / "cli-receipt.json"
@@ -125,10 +126,54 @@ def test_reduced_real_cli(reduced, monkeypatch):
         "--checkpoint-receipt", str(checkpoint), "--destination", str(destination),
         "--backup-scope", REDUCED_SCOPE, "--reference-manifest", str(kwargs["reference_manifest"]),
         "--reference-contract", str(kwargs["reference_contract"]),
-        "--max-backup-seconds", "60", "--output", str(output),
+        "--max-backup-seconds", cap, "--output", str(output),
     ])
     main()
     assert json.loads(output.read_text())["scope"] == REDUCED_SCOPE
+
+
+@pytest.mark.parametrize("cap", [14401, 0, -1, "14400", None, float("nan"), float("inf")])
+def test_reduced_invalid_budget_refused_before_backup(reduced, cap):
+    """Invalid caps fail before output creation and leave the catalog unchanged."""
+    approval, destination, checkpoint, kwargs, _ = reduced
+    before = fingerprint(approval.target), sha256(Path(approval.target))
+    with pytest.raises(AdmissionError, match="0 < cap <= 14400 seconds"):
+        create_backup(approval, destination, checkpoint, **{**kwargs, "max_seconds": cap})
+    assert not destination.exists()
+    assert (fingerprint(approval.target), sha256(Path(approval.target))) == before
+
+
+@pytest.mark.parametrize("cap", ["14401", "0", "-1", "not-a-number"])
+def test_reduced_invalid_cli_budget(reduced, cap):
+    """The real CLI refuses out-of-range and nonnumeric caps with exit code 2."""
+    import subprocess
+
+    approval, destination, checkpoint, kwargs, _ = reduced
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-m", "openbb_duckdb.baostock18", "production-backup",
+         "--production-target", approval.target,
+         "--expected-catalog-fingerprint", approval.expected_catalog_fingerprint,
+         "--window-started-at", approval.window_started_at, "--baseline", approval.baseline,
+         "--approved-manifest-hash", approval.approved_manifest_hash,
+         "--approved-batch-size", str(approval.approved_batch_size),
+         "--checkpoint-receipt", str(checkpoint), "--destination", str(destination),
+         "--backup-scope", REDUCED_SCOPE, "--reference-manifest", str(kwargs["reference_manifest"]),
+         "--reference-contract", str(kwargs["reference_contract"]),
+         "--max-backup-seconds", cap, "--output", str(destination.parent / "refused.json")],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 2
+    assert not destination.exists()
+    assert not (destination.parent / "refused.json").exists()
+
+
+@pytest.mark.parametrize("cap", [None, 0, -1, 14401])
+def test_full_scope_retains_existing_budget_behavior(reduced, cap):
+    """The reduced-scope cap must not constrain explicit full catalog copies."""
+    approval, destination, checkpoint, _, _ = reduced
+    receipt = create_backup(approval, destination, checkpoint, backup_scope="full", max_seconds=cap)
+    assert receipt["scope"] == "full"
+    assert preflight(replace(approval, backup_receipt=str(destination / "receipt.json")))["preflight"] == "passed"
 
 
 def test_real_restore_baseline_failure(reduced):
