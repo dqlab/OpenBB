@@ -41,6 +41,7 @@ from openbb_duckdb.baostock18.reference_backup import (
     check_deadline,
     directory_files,
     freeze_reference_inventory,
+    json_roots,
     stable_hash,
 )
 from openbb_duckdb.baostock18.store import transaction, utcnow
@@ -217,10 +218,11 @@ class Driver:
         self.root = Path(config["output"])
         if not self.root.is_absolute() or self.root.resolve() != self.root or self.root.exists():
             raise AdmissionError("Driver output must be a new canonical absolute directory")
-        for key in ("manifest", "baseline", "reference_root", "admission_root", "json_root"):
+        for key in ("manifest", "baseline", "reference_root", "admission_root"):
             p = Path(config[key])
             if not p.is_absolute() or p.resolve(strict=True) != p:
                 raise AdmissionError(f"Explicit canonical {key} required")
+        json_roots(config["json_root"])
         timestamp(config["window_started_at"])
         self.cap = config["max_backup_seconds"]
         if not isinstance(self.cap, (int, float)) or not 0 < self.cap <= 14400:
@@ -242,10 +244,15 @@ class Driver:
         if command != "read":
             argv += ["--output", str(self.root / (label + ".json"))]
         started = time.monotonic()
+        usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
         # Stream stdout/stderr to durable evidence without retaining large results in memory.
         with (self.root / (label + ".stdout")).open("x") as out, (self.root / (label + ".stderr")).open("x") as err:
             process = subprocess.run(argv, stdout=out, stderr=err, check=False)
-        record = {"argv": argv, "returncode": process.returncode, "seconds": time.monotonic() - started}
+        usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+        record = {"argv": argv, "returncode": process.returncode, "seconds": time.monotonic() - started,
+                  "children_peak_rss_kib": usage.ru_maxrss,
+                  "read_blocks": usage.ru_inblock - usage_before.ru_inblock,
+                  "write_blocks": usage.ru_oublock - usage_before.ru_oublock}
         write_json(self.root / (label + "-command.json"), record)
         self.commands.append(record)
         print(json.dumps({"stage": label, **record}), flush=True)
@@ -537,6 +544,10 @@ class Driver:
                 seconds=time.monotonic() - self.started,
                 commands=self.commands,
                 peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                children_peak_rss_kib=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss,
+                io_blocks={kind: {"read": usage.ru_inblock, "write": usage.ru_oublock}
+                           for kind, usage in (("self", resource.getrusage(resource.RUSAGE_SELF)),
+                                               ("children", resource.getrusage(resource.RUSAGE_CHILDREN)))},
             )
             write_json(self.root / "receipt.json", result)
         return result

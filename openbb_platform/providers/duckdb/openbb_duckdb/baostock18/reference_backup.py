@@ -33,6 +33,47 @@ PROVENANCE_COLUMNS = {"business_key", "source_key", "provider_key", "original_pa
 JSON_PATH_KEYS = {"path", "storage_key", "raw_key", "silver_key", "manifest_key", "payload_key", "evidence_key"}
 
 
+def json_roots(value):
+    """Require an explicit ordered list of distinct canonical directory roots."""
+    if not isinstance(value, list) or not value:
+        raise AdmissionError("json_root requires an explicit nonempty root list")
+    roots = []
+    for item in value:
+        if not isinstance(item, str) or not item:
+            raise AdmissionError("Invalid json_root directory")
+        root = Path(item)
+        try:
+            if not root.is_absolute() or root.resolve(strict=True) != root or not root.is_dir() or root in roots:
+                raise AdmissionError("json_root requires distinct canonical absolute directories")
+        except OSError as exc:
+            raise AdmissionError("Missing or unreadable json_root directory") from exc
+        roots.append(root)
+    return roots
+
+
+def resolve_json_reference(value, roots):
+    """Try reviewed roots in order; only absence permits trying the next root."""
+    if (not isinstance(value, str) or not value or "://" in value
+            or any(x in value for x in "*?[") or ".." in Path(value).parts):
+        raise AdmissionError("Cannot enumerate nonliteral/escaped JSON reference")
+    for root in roots:
+        source = Path(value) if Path(value).is_absolute() else root / value
+        if not source.is_relative_to(root):
+            continue
+        try:
+            if source.resolve() != source:
+                raise AdmissionError(f"JSON reference is noncanonical or escapes its reviewed root: {source}")
+            info = source.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise AdmissionError(f"JSON reference unreadable: {source}") from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise AdmissionError(f"JSON reference requires a canonical regular file: {source}")
+        return source, root
+    raise AdmissionError(f"JSON reference missing or outside reviewed root list: {value}")
+
+
 def json_references(value):
     """Discover nested file references; hashes are byte hashes only, never IDs."""
     if isinstance(value, dict):
@@ -189,7 +230,8 @@ def _identifier(value):
     return '"' + value + '"'
 
 
-def enumerate_references(connection, contract, ledger, expected_fingerprint, deadline, *, freeze=False):
+def enumerate_references(connection, contract, ledger, expected_fingerprint, deadline, *,
+                         freeze=False, hash_metrics=None):
     """Execute reviewed column projections; compare full schema and view coverage.
 
     A rule has schema/table/path_column/hash_column/root. A hash_column may be
@@ -215,6 +257,7 @@ def enumerate_references(connection, contract, ledger, expected_fingerprint, dea
             raise AdmissionError("Cannot enumerate references: unsupported external view")
     covered = set()
     rule_counts = []
+    roots = json_roots(contract["json_root"]) if "json_root" in contract else []
 
     def mark(value, digest, root):
         if not value or not isinstance(value, str) or "://" in value or any(x in value for x in "*?["):
@@ -226,7 +269,14 @@ def enumerate_references(connection, contract, ledger, expected_fingerprint, dea
             raise AdmissionError("Reference has invalid expected SHA256")
         existing = ledger.execute("SELECT sha256 FROM expected WHERE path=?", [str(source)]).fetchone()
         if freeze and existing is None:
+            hashing_started = time.monotonic()
             size, actual_hash = stable_hash(source, deadline)
+            if hash_metrics is not None:
+                kind = "parquet" if source.suffix.lower() == ".parquet" else "other"
+                metric = hash_metrics.setdefault(kind, {"files": 0, "bytes": 0, "hash_seconds": 0.0})
+                metric["files"] += 1
+                metric["bytes"] += size
+                metric["hash_seconds"] += time.monotonic() - hashing_started
             if digest is not None and actual_hash != digest:
                 raise AdmissionError(f"Reference catalog hash mismatch: {source}")
             ledger.execute("INSERT INTO expected VALUES (?,?,?,1)", [str(source), size, actual_hash])
@@ -289,23 +339,33 @@ def enumerate_references(connection, contract, ledger, expected_fingerprint, dea
                 [r'"(?:[^" ]*_)?(?:path|storage_key|raw_key|silver_key|manifest_key|payload_key)"\s*:'],
             )
             count = 0
+            root_hits = {str(root): 0 for root in roots}
             while rows := cursor.fetchmany(512):
                 for (value,) in rows:
                     check_deadline(deadline)
                     references = list(json_references(json.loads(value)))
                     if references:
-                        root = Path(contract.get("json_root", ""))
-                        if not root.is_absolute() or root.resolve(strict=True) != root:
-                            raise AdmissionError("Cannot enumerate JSON references without canonical json_root")
+                        if not roots:
+                            raise AdmissionError("Cannot enumerate JSON references without explicit json_root list")
                         for filename, digest in references:
-                            mark(filename, digest, root)
+                            source, root = resolve_json_reference(filename, roots)
+                            mark(str(source), digest, root)
+                            root_hits[str(root)] += 1
                             count += 1
             if count:
-                rule_counts.append({"schema": schema, "table": table, "json_column": column, "references": count})
+                rule_counts.append({"schema": schema, "table": table, "json_column": column,
+                                    "references": count, "json_root_hits": root_hits})
     if ledger.execute("SELECT count(*) FROM expected WHERE seen=0").fetchone()[0]:
         raise AdmissionError("Reference inventory contains unbound/unenumerated files")
     ledger.commit()
     return rule_counts
+
+
+def json_root_distribution(contract, projections):
+    """Retain every approved root, including zero hits, in freeze/backup receipts."""
+    return [{"root": str(root), "references": sum(p.get("json_root_hits", {}).get(str(root), 0)
+                                                  for p in projections)}
+            for root in json_roots(contract["json_root"])] if "json_root" in contract else []
 
 
 def freeze_reference_inventory(connection, contract, destination, fingerprint, deadline):
@@ -316,9 +376,11 @@ def freeze_reference_inventory(connection, contract, destination, fingerprint, d
     The inventory and scratch database must be new operator evidence paths.
     """
     destination = Path(destination)
+    hash_metrics = {}
     with sqlite3.connect(destination.with_suffix(".sqlite")) as ledger, bounded_sql(connection, deadline):
         ledger.execute("CREATE TABLE expected(path TEXT PRIMARY KEY, size INTEGER, sha256 TEXT, seen INTEGER)")
-        projections = enumerate_references(connection, contract, ledger, fingerprint, deadline, freeze=True)
+        projections = enumerate_references(connection, contract, ledger, fingerprint, deadline,
+                                             freeze=True, hash_metrics=hash_metrics)
         with destination.open("x") as stream:
             for path, size, digest in ledger.execute("SELECT path,size,sha256 FROM expected ORDER BY path"):
                 check_deadline(deadline)
@@ -326,7 +388,8 @@ def freeze_reference_inventory(connection, contract, destination, fingerprint, d
             stream.flush()
             os.fsync(stream.fileno())
         count, size = ledger.execute("SELECT count(*),coalesce(sum(size),0) FROM expected").fetchone()
-    return {"count": count, "bytes": size, "projections": projections}
+    return {"count": count, "bytes": size, "projections": projections,
+            "json_roots": json_root_distribution(contract, projections), "file_hashing": hash_metrics}
 
 
 def verify_references(connection, contract, manifest, destination, fingerprint, deadline):
@@ -364,6 +427,7 @@ def verify_references(connection, contract, manifest, destination, fingerprint, 
                     ledger.execute("INSERT INTO expected VALUES (?,?,?,0)", [path, size, digest])
                     previous = path
             result["projections"] = enumerate_references(connection, contract, ledger, fingerprint, deadline)
+            result["json_roots"] = json_root_distribution(contract, result["projections"])
             result["directories"] = sum(p["references"] for p in result["projections"]
                                         if p.get("kind") == "capture_directory")
             with (destination / "reference-verification.jsonl").open("x") as output:

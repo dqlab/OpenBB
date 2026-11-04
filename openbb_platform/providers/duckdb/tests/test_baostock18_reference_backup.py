@@ -21,6 +21,123 @@ from .test_baostock18_production import authorize, make_catalog
 
 
 @pytest.fixture
+def multiroot(tmp_path):
+    """Independent data/output roots with nested relative and absolute JSON refs."""
+    from openbb_duckdb.baostock18.driver import reference_contract
+
+    roots = [tmp_path / "data", tmp_path / "output", tmp_path / "unused"]
+    for root in roots:
+        root.mkdir()
+    paths = [roots[0] / "raw", roots[1] / "candidate"]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    with duckdb.connect() as c:
+        c.execute("CREATE TABLE refs(details_json VARCHAR)")
+        c.execute("INSERT INTO refs VALUES (?)", [json.dumps({"nested": [
+            {"raw_key": "raw", "raw_sha256": sha256(paths[0])},
+            {"path": "candidate", "sha256": sha256(paths[1])},
+            {"path": str(paths[1]), "sha256": sha256(paths[1])},
+        ]})])
+        contract = reference_contract(c, {}, reference_root=str(roots[0]), admission_root=str(roots[1]),
+                                      json_root=[str(root) for root in roots])
+        yield c, contract, roots, paths
+
+
+def test_json_root_list_freeze_and_backup_hit_distribution(multiroot, tmp_path):
+    """Freeze and independent backup verification retain actual roots and zero hits."""
+    import time
+
+    from openbb_duckdb.baostock18.reference_backup import verify_references
+
+    c, contract, roots, _ = multiroot
+    inventory = tmp_path / "frozen.jsonl"
+    frozen = freeze_reference_inventory(c, contract, inventory, {}, time.monotonic() + 30)
+    expected = [{"root": str(root), "references": count} for root, count in zip(roots, [1, 2, 0])]
+    assert frozen["count"] == 2 and frozen["json_roots"] == expected
+    destination = tmp_path / "backup"
+    destination.mkdir()
+    verified = verify_references(c, contract, inventory, destination, {}, time.monotonic() + 30)
+    assert verified["status"] == "passed" and verified["json_roots"] == expected
+    assert verified["missing"] == verified["mismatch"] == 0
+
+
+@pytest.mark.parametrize("bad", ["single", "empty", "relative", "missing", "file", "symlink", "duplicate", "null"])
+def test_invalid_json_root_list_refused(multiroot, tmp_path, bad):
+    """No implicit root, alias, nonexistent root or non-directory may be approved."""
+    import time
+
+    c, contract, roots, paths = multiroot
+    link = tmp_path / "alias"
+    link.symlink_to(roots[0], target_is_directory=True)
+    contract["json_root"] = {
+        "single": str(roots[0]), "empty": [], "relative": ["data"], "missing": [str(tmp_path / "missing")],
+        "file": [str(paths[0])], "symlink": [str(link)], "duplicate": [str(roots[0])] * 2, "null": [None],
+    }[bad]
+    with pytest.raises(AdmissionError, match="json_root"):
+        freeze_reference_inventory(c, contract, tmp_path / "refused.jsonl", {}, time.monotonic() + 30)
+
+
+@pytest.mark.parametrize("bad", ["outside", "traversal", "missing", "directory", "symlink", "fifo", "hash"])
+def test_multiroot_json_failure_still_aborts(multiroot, tmp_path, bad):
+    """Root lists cannot bypass the file, containment, missing or hash gates."""
+    import os
+    import time
+
+    c, contract, roots, paths = multiroot
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside")
+    value = {"path": str(paths[0]), "sha256": sha256(paths[0])}
+    if bad == "outside":
+        value = {"path": str(outside)}
+    elif bad == "traversal":
+        value = {"path": "../outside"}
+    elif bad == "missing":
+        value = {"path": "absent-in-all-roots"}
+    elif bad == "directory":
+        value = {"path": str(roots[0])}
+    elif bad == "symlink":
+        (roots[0] / "alias").symlink_to(outside)
+        value = {"path": "alias"}
+    elif bad == "fifo":
+        os.mkfifo(roots[0] / "fifo")
+        value = {"path": "fifo"}
+    else:
+        value["sha256"] = "0" * 64
+    c.execute("UPDATE refs SET details_json=?", [json.dumps(value)])
+    with pytest.raises(AdmissionError):
+        freeze_reference_inventory(c, contract, tmp_path / "refused.jsonl", {}, time.monotonic() + 30)
+    assert not (tmp_path / "refused.jsonl").exists()
+
+
+def test_multiroot_first_existing_file_cannot_fall_through_hash_failure(multiroot, tmp_path):
+    """List order selects the first real file; a matching later hash is no bypass."""
+    import time
+
+    c, contract, roots, paths = multiroot
+    (roots[0] / "candidate").write_bytes(b"wrong first payload")
+    c.execute("UPDATE refs SET details_json=?", [json.dumps({"path": "candidate", "sha256": sha256(paths[1])})])
+    with pytest.raises(AdmissionError, match="catalog hash mismatch"):
+        freeze_reference_inventory(c, contract, tmp_path / "refused.jsonl", {}, time.monotonic() + 30)
+
+
+def test_multiroot_disappeared_frozen_reference_aborts_backup(multiroot, tmp_path):
+    """A frozen inventory cannot stand in for a JSON file that is now missing."""
+    import time
+
+    from openbb_duckdb.baostock18.reference_backup import verify_references
+
+    c, contract, _, paths = multiroot
+    inventory = tmp_path / "frozen.jsonl"
+    freeze_reference_inventory(c, contract, inventory, {}, time.monotonic() + 30)
+    paths[1].unlink()
+    destination = tmp_path / "backup"
+    destination.mkdir()
+    with pytest.raises(AdmissionError, match="missing or outside"):
+        verify_references(c, contract, inventory, destination, {}, time.monotonic() + 30)
+    assert not (destination / "receipt.json").exists()
+
+
+@pytest.fixture
 def reduced(tmp_path):
     """Create frozen catalog projections and reference bytes in an isolated tree."""
     manifest = make_candidate(tmp_path / "candidate.duckdb")
@@ -207,7 +324,7 @@ def test_reduced_production_import_staged_restore_verify_and_visibility(reduced)
             "WHERE NOT t.internal ORDER BY 1,2,3"
         ).fetchall()
     contract = json.loads(kwargs["reference_contract"].read_text())
-    contract.update(columns=columns, catalog_fingerprint=fingerprint(approval.target), json_root=str(root))
+    contract.update(columns=columns, catalog_fingerprint=fingerprint(approval.target), json_root=[str(root)])
     contract["rules"].append({"schema": "baostock18_admission", "table": "row_lineage",
                               "path_column": "source_path", "hash_column": None, "root": str(root)})
     contract_path = root / "staged-contract.json"

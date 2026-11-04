@@ -33,7 +33,9 @@ def main():
         raise ValueError("Full saved production DDL required")
     target = root / "catalog" / "dq_quant_invest_data.duckdb"
     target.parent.mkdir()
-    raw = root / "raw"
+    reference_root = root / "data"
+    reference_root.mkdir()
+    raw = reference_root / "raw"
     raw.mkdir()
     capture = raw / "capture.json.gz"
     capture.write_bytes(b"local synthetic immutable capture")
@@ -92,6 +94,8 @@ def main():
             "INSERT INTO a_share.reference_snapshot(snapshot_id,raw_key,raw_sha256) VALUES ('reference',?,?)",
             [str(capture), sha256(capture)],
         )
+        c.execute("UPDATE a_share.bar_snapshot SET quality_json=?",
+                  [json.dumps({"raw_key": "raw/capture.json.gz", "raw_sha256": sha256(capture)})])
         baseline = {
             "format": "baostock18-production-baseline-v1",
             "tables": inventory(c),
@@ -103,22 +107,22 @@ def main():
     # Reuse the repository's established synthetic input factory, never a writer bypass.
     from openbb_platform.providers.duckdb.tests.test_baostock18_admission import make_candidate
 
-    candidate = root / "candidate.duckdb"
+    candidate = admission_root / "candidate.duckdb"
     make_candidate(candidate, rows=50001, quarantined=15838)
     # Production captures are relative directory locators, distinct from legacy raw files.
     with duckdb.connect(str(candidate)) as c:
         c.execute("UPDATE capture_inventory SET relative=?", [relative])
     manifest = prepare_manifest(candidate, end_date="2300-01-01")
-    write_json(root / "manifest.json", manifest)
+    write_json(admission_root / "manifest.json", manifest)
     write_json(root / "baseline.json", baseline)
     config = {
         "target": str(target),
         "output": str(root / "execution"),
-        "manifest": str(root / "manifest.json"),
+        "manifest": str(admission_root / "manifest.json"),
         "baseline": str(root / "baseline.json"),
-        "reference_root": str(root),
+        "reference_root": str(reference_root),
         "admission_root": str(admission_root),
-        "json_root": str(root),
+        "json_root": [str(reference_root), str(admission_root)],
         "window_started_at": utcnow().isoformat(),
         "approved_manifest_hash": hashlib.sha256(encoded(manifest).encode()).hexdigest(),
         "approved_batch_size": 50000,
@@ -130,7 +134,7 @@ def main():
         "expected_quarantine": 15838,
         "expected_batches": 2,
         "reader_limit": 3,
-        "metadata": [str(root / "baseline.json"), str(root / "manifest.json")],
+        "metadata": [str(root / "baseline.json"), str(admission_root / "manifest.json")],
     }
     write_json(root / "driver-config.json", config)
     write_json(

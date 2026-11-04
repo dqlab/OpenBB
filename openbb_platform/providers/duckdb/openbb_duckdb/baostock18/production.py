@@ -483,7 +483,9 @@ def _copy_catalog_with_verification(admission, path, destination, dependencies,
     if any(p.stat().st_size > 64 * 1024 * 1024 for p in metadata) or sum(
             p.stat().st_size for p in metadata) > 256 * 1024 * 1024:
         raise AdmissionError("Reduced metadata exceeds small-file budget")
+    copy_started = time.monotonic()
     files = [copy_checked(path, destination / "catalog.backup", deadline)]
+    catalog_copy_seconds = time.monotonic() - copy_started
     for i, source in enumerate(metadata):
         copied = copy_checked(source, destination / f"metadata-{i:04d}.backup", deadline)
         if source in input_hashes and input_hashes[source] != copied["sha256"]:
@@ -498,6 +500,7 @@ def _copy_catalog_with_verification(admission, path, destination, dependencies,
     evidence = [destination / "metadata-0000.backup", destination / "metadata-0001.backup",
                 destination / "reference-verification.jsonl"]
     return {"reference_verification": verification, "uncopied_reference_bytes": verification["bytes"],
+            "catalog_copy_seconds": catalog_copy_seconds, "catalog_copy_bytes": files[0]["size"],
             "restore_admission_state": restore_state,
             "unrelated_archive_contents_copied": False,
             "catalog_sha256_before": files[0]["sha256"], "catalog_sha256_after": after,

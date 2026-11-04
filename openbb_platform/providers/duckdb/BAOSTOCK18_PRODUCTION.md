@@ -117,7 +117,7 @@ missing references and hash mismatches all abort. This contract never silently
 certifies unsupported reference formats.
 
 Nested JSON file references are traversed recursively and require an explicit
-canonical `json_root`. `freeze_reference_inventory` can build the inventory from
+canonical directory list `json_root`. `freeze_reference_inventory` can build the inventory from
 these same projections, comparing available catalog byte hashes and measuring
 byte hashes for unpinned references. Backup then independently rehashes all of
 them; logical IDs are never substituted for file hashes.
@@ -372,7 +372,7 @@ rows; these are measured/asserted by the runner, rather than production totals.
 one implementation for an isolated production-shaped copy and the production
 catalog. There is no alternate production import script. The JSON packet must
 supply canonical absolute `target`, new `output`, `manifest`, approved `baseline`,
-`reference_root`, `admission_root`, `json_root`, `window_started_at`,
+`reference_root`, `admission_root`, `json_root` (an explicit ordered root list), `window_started_at`,
 `approved_manifest_hash`, `approved_batch_size`, `max_backup_seconds` (at most
 14400), `max_freeze_seconds`, `max_verify_seconds`, `expected_rows`,
 `expected_clean_rows`, `expected_quarantine`, `expected_batches`, `reader_limit`,
@@ -452,3 +452,20 @@ same rehearsed wheel only there, runs the driver's read-only input-reference
 mode, and records before/after identities for every preexisting container. This
 mode never starts/stops a service or connects to the target catalog; a failed
 reference gate is an aborted packet with no service recovery needed.
+
+JSON file references use only the explicit nonempty `json_root` list. Every root
+must be a distinct canonical absolute directory. The production mapping is
+`["/home/zdqclawbot/work/app/dq-quant-invest-data/data",
+"/home/zdqclawbot/work/app/openbb/output"]`. Relative references are tried in list
+order; absolute references must lie within a listed root. Only a missing candidate
+allows trying the next root. Noncanonical paths, symlinks, special files, directories,
+hash mismatches and references absent from all listed roots abort. Hash and frozen
+inventory requirements are unchanged. Each JSON projection records hits by actual
+root; freeze and backup reference receipts list every root and its hit count,
+including zero hits. The local fixture uses separate data/output directories and
+exercises both roots through the same driver and installed wheel.
+
+Driver receipts record Linux resource counters for the driver and its CLI children:
+peak RSS in KiB and filesystem input/output blocks (512 bytes per block on Linux).
+Child peaks are cumulative maxima across completed commands, not summed process RSS.
+Reduced backup receipts separately measure catalog copy and restore-check seconds.

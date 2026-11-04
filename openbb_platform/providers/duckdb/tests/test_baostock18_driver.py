@@ -24,7 +24,7 @@ def test_in_memory_contract_matches_persisted_schema(tmp_path):
     observed = fingerprint(target)
     with duckdb.connect(str(target), read_only=True) as c:
         contract = reference_contract(c, observed, reference_root=str(tmp_path),
-                                      admission_root=str(tmp_path), json_root=str(tmp_path))
+                                      admission_root=str(tmp_path), json_root=[str(tmp_path)])
         assert contract["columns"] and all(type(row) is list for row in contract["columns"])
         result = freeze_reference_inventory(c, contract, tmp_path / "references.jsonl", observed, time.monotonic() + 30)
     assert result["count"] == 0
@@ -195,7 +195,7 @@ def test_staged_directory_freeze_refuses_changed_capture(tmp_path, change):
         c.execute("CREATE TABLE baostock18_admission.row_lineage(source_path VARCHAR)")
         c.execute("INSERT INTO baostock18_admission.row_lineage VALUES ('raw/capture.json.gz')")
         contract = reference_contract(c, {}, reference_root=str(tmp_path), admission_root=str(tmp_path),
-                                      json_root=str(tmp_path), capture_inventory=frozen)
+                                      json_root=[str(tmp_path)], capture_inventory=frozen)
         result = freeze_reference_inventory(c, contract, tmp_path / "good.jsonl", {}, time.monotonic() + 30)
         assert result["count"] == 1 and result["bytes"] == 4
         if change == "bytes":
