@@ -236,14 +236,24 @@ the legacy `a_share` route. Restore only services recorded running before the
 window, in this order; do not use `compose up` or start previously exited services:
 
 ```bash
-"$DOCKER" start dq-quant-invest-data-nas-data-api-1
+restore_if_previously_running() {
+  local container=$1
+  if "$DOCKER" exec "$MAINT" "$BB_PY" -c '
+import json,sys
+rows=json.load(open(sys.argv[1]))
+sys.exit(0 if any(x["Name"].lstrip("/")==sys.argv[2] and x["State"]["Running"] for x in rows) else 1)
+' "$WINDOW/services-before.json" "$container"; then
+    "$DOCKER" start "$container"
+  fi
+}
+restore_if_previously_running dq-quant-invest-data-nas-data-api-1
 "$DOCKER" inspect dq-quant-invest-data-nas-data-api-1 > "$HOST_WINDOW/data-api-restored.json"
 # Check its read-only endpoint/health and bounded legacy query before continuing.
-"$DOCKER" start dq-quant-invest-data-nas-api-1
+restore_if_previously_running dq-quant-invest-data-nas-api-1
 "$DOCKER" inspect dq-quant-invest-data-nas-api-1 > "$HOST_WINDOW/api-restored.json"
-"$DOCKER" start dq-quant-invest-data-nas-daily-stocks-1
-"$DOCKER" start dq-quant-invest-data-nas-stock-backfill-1
-"$DOCKER" start dq-quant-invest-data-nas-financedatabase-names-1
+restore_if_previously_running dq-quant-invest-data-nas-daily-stocks-1
+restore_if_previously_running dq-quant-invest-data-nas-stock-backfill-1
+restore_if_previously_running dq-quant-invest-data-nas-financedatabase-names-1
 "$DOCKER" inspect dq-quant-invest-data-nas-api-1 \
   dq-quant-invest-data-nas-data-api-1 dq-quant-invest-data-nas-daily-stocks-1 \
   dq-quant-invest-data-nas-stock-backfill-1 dq-quant-invest-data-nas-financedatabase-names-1 \
