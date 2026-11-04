@@ -380,6 +380,95 @@ and optional small `metadata` files. Fingerprint/checkpoint/contract paths are
 namespaced under the explicitly supplied output directory and created fresh.
 The freeze and backup bounds are separate and both recorded in the packet.
 
+`visibility` is explicitly `immediate` or `deferred`; omission means `immediate`
+and retains the complete existing chain below. Unknown/null values fail closed.
+The production CLI/`ProductionAdmission` accept the same field, defaulting to
+`immediate`. `production-import` always stages; it never changes a pointer.
+
+With `"visibility": "deferred"` the driver completes migration/import and exact
+receipt reconciliation, checks the unpublished reader, performs the final
+CHECKPOINT, saves `staged-checkpoint.json`, `staged-fingerprint.json`,
+`deferred-config.json`, and `receipt.json`, then exits **successfully** with
+`status=IMPORT_COMPLETE_VISIBILITY_DEFERRED`. All three publication tables
+(admission/event/pointer) have zero rows. It does **not** run the after-import
+reference freeze, backup, verify, or visibility transaction. For the approved
+BaoStock18 packet the expected counts remain clean **18,440,145**, quarantine
+**15,838**, conditional **0**, total **18,455,983**, batches **185**, batch size
+**100,000**. These are packet expectations, not claims about an offline fixture.
+The receipt and stdout print the next verification argv. The service-window
+wrapper recognizes this explicit successful state, retains it as `driver_state`,
+and follows its existing recovery sequence; it does not report a deferred run
+as published.
+
+The deferred command sequence, using the same installed wheel and reviewed packet,
+is (these are operator instructions, not automatic production actions):
+
+```bash
+# In the separately authorized/drained import window; config contains visibility=deferred.
+python -m openbb_duckdb.baostock18.driver --config /absolute/deferred-run.json
+# Or use the existing scripts/baostock18/window.py with driver.visibility=deferred.
+# Allow the existing service recovery to finish before the following read-only work.
+python -m openbb_duckdb.baostock18 visibility-verify \
+  --config /absolute/import-output/deferred-config.json \
+  --deferred-receipt /absolute/import-output/receipt.json \
+  --output /absolute/verification-output
+# Only after verification-output/receipt.json has status=PASS, execute its exact argv:
+python -c 'import json,subprocess,sys; subprocess.run(json.load(open(sys.argv[1]))["argv"],check=True)' \
+  /absolute/verification-output/approve-command.json
+```
+
+`visibility-verify` is read-only, including preparation: it reuses the completed
+staging CHECKPOINT, rejects any changed target fingerprint, runs the existing
+staged reference/backup/restore/preflight/reconciliation gates, and checks the
+unpublished reader. Its immutable PASS receipt binds target, catalog fingerprint,
+manifest, batch size, baseline hash, exact counts, backup receipt hash, and
+reference verification. A failed run retains a FAIL receipt and grants no
+publication. Bounds and backup scope retain their existing meanings and caps;
+deferral does not relax them. Use a new output directory for a verification retry.
+
+The generated approval argv is equivalent to:
+
+```bash
+python -m openbb_duckdb.baostock18 visibility-approve \
+  --production-target /absolute/catalog/dq_quant_invest_data.duckdb \
+  --expected-catalog-fingerprint /absolute/verification-output/after-import-fingerprint.json \
+  --window-started-at '<same timezone-aware window start>' \
+  --baseline /absolute/approved-baseline.json \
+  --approved-manifest-hash '<approved canonical manifest SHA256>' \
+  --approved-batch-size 100000 --visibility deferred \
+  --backup-receipt /absolute/verification-output/after-import-backup/receipt.json \
+  --verification-receipt /absolute/verification-output/receipt.json \
+  --expected-clean-rows 18440145 --expected-quarantine 15838 --expected-batches 185 \
+  --output /absolute/verification-output/approval.json
+```
+
+Approval holds the existing publisher then market mutexes, refuses WAL and native
+DuckDB lock conflicts, rechecks fingerprint, baseline, backup payloads and reference
+ledger, and independently reconciles snapshot/lineage/quality/admission counts.
+All scans precede `BEGIN`; the transaction inserts only the admission, one event,
+and the pointer. `transaction_seconds` measures that transaction. Deferred
+`production-visible` refuses publication and directs operators to this command.
+The CLI never starts/stops services. Concurrent readers/writers can make native
+DuckDB refuse writer open; coordinate catalog availability separately.
+
+Repeat the **same approval command, including its output path**, for idempotent
+replay. It validates the immutable approval receipt and post-commit fingerprint,
+all original receipt bindings, actual counts, baseline, and current event; returns
+`changed=false` read-only; and changes neither the receipt nor any catalog row.
+Any intervening catalog write invalidates the fingerprint, even an unrelated one.
+Do not delete approval evidence or silently rebind a PASS receipt to a newer
+catalog. A crash between commit and approval receipt persistence fails closed and
+requires operator reconciliation; it cannot create a second event implicitly.
+The as-of boundary is the approval event's actual `known_at`, never import or
+verification time. Earlier reads remain empty; quarantine is never consumable.
+
+For an offline saved-DDL acceptance run, add `--visibility deferred` to
+`scripts/baostock18/rehearsal.py`. It creates all saved tables/views/indexes,
+runs deferred -> read-only verify PASS -> approve -> identical replay, checks
+reader/as-of results, and saves `DEFERRED_CHAIN_RECEIPT.json` with measured counts,
+receipt hashes and approval duration. The standard fixture has 50,001 clean and
+15,838 quarantine rows in **2** batches; its counts are explicitly synthetic.
+
 The driver performs CHECKPOINT under publisher then market locks; fingerprint;
 reference freeze; the actual `production-backup` CLI with the explicit reduced
 scope and cap; restore-check receipt checks; preflight; migration/import; exact

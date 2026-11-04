@@ -8,6 +8,7 @@ from pathlib import Path
 from openbb_duckdb.baostock18 import import_candidate, prepare_manifest, read_bars, set_visible
 from openbb_duckdb.baostock18.contract import AdmissionError
 from openbb_duckdb.baostock18.production import (
+    VISIBILITY_MODES,
     ProductionAdmission,
     capture_fingerprint,
     create_backup,
@@ -53,15 +54,22 @@ def main():
     fingerprint.add_argument("--production-target", required=True)
     fingerprint.add_argument("--window-started-at", required=True)
     fingerprint.add_argument("--output", required=True)
-    for name in ("backup", "preflight", "import", "verify", "visible", "replay"):
-        command = commands.add_parser("production-" + name, help="Explicit production " + name)
+    verify = commands.add_parser("visibility-verify", help="Read-only deferred reference/backup verification")
+    verify.add_argument("--config", required=True)
+    verify.add_argument("--deferred-receipt", required=True)
+    verify.add_argument("--output", required=True, help="New absolute verification directory")
+    for name in ("backup", "preflight", "import", "verify", "visible", "replay", "visibility-approve"):
+        command = commands.add_parser(name if name == "visibility-approve" else "production-" + name,
+                                      help="Explicit production " + name)
         command.add_argument("--production-target", required=True)
         command.add_argument("--expected-catalog-fingerprint", required=True, help="Fresh fingerprint JSON file")
         command.add_argument("--window-started-at", required=True)
         command.add_argument("--baseline", required=True, help="Approved inventory and a_share eight-table counts")
         command.add_argument("--approved-manifest-hash", required=True, help="SHA256 of canonical manifest JSON")
         command.add_argument("--approved-batch-size", required=True, type=int)
-        command.add_argument("--output", required=True, help="New receipt file (exclusive creation)")
+        command.add_argument("--visibility", choices=VISIBILITY_MODES, default="immediate")
+        command.add_argument("--output", required=True,
+                             help="Receipt path; visibility-approve reuses this same path for idempotent replay")
         if name == "backup":
             command.add_argument("--backup-scope", choices=SCOPES, default="full")
             command.add_argument("--reference-manifest", help="Frozen sorted JSONL path/size/SHA256 inventory")
@@ -84,8 +92,13 @@ def main():
             command.add_argument("--snapshot-id")
             command.add_argument("--basis", required=True)
             command.add_argument("--expected-clean-rows", type=int)
+        if name == "visibility-approve":
+            command.add_argument("--verification-receipt", required=True)
+            command.add_argument("--expected-clean-rows", required=True, type=int)
+            command.add_argument("--expected-quarantine", required=True, type=int)
+            command.add_argument("--expected-batches", required=True, type=int)
     args = parser.parse_args()
-    if args.command.startswith("production-"):
+    if args.command.startswith(("production-", "visibility-")):
         try:
             result = production_command(args)
         except (AdmissionError, OSError) as exc:
@@ -115,7 +128,11 @@ def main():
 
 def production_command(args):
     """Dispatch production commands with all approvals explicit, writing new receipts."""
-    if Path(args.output).exists():
+    if args.command == "visibility-verify":
+        from openbb_duckdb.baostock18.visibility import verify_deferred
+
+        return verify_deferred(load_json(args.config), args.deferred_receipt, args.output)
+    if Path(args.output).exists() and args.command != "visibility-approve":
         raise AdmissionError("Output receipt already exists")
     if args.command == "production-fingerprint":
         result = capture_fingerprint(args.production_target, args.window_started_at)
@@ -125,7 +142,16 @@ def production_command(args):
             window_started_at=args.window_started_at, baseline=args.baseline,
             approved_manifest_hash=args.approved_manifest_hash, approved_batch_size=args.approved_batch_size,
             backup_receipt=getattr(args, "backup_receipt", None),
+            visibility=args.visibility,
         )
+        if args.command == "visibility-approve":
+            from openbb_duckdb.baostock18.visibility import approve_visibility
+
+            return approve_visibility(
+                admission, args.verification_receipt, expected_clean_rows=args.expected_clean_rows,
+                expected_quarantine=args.expected_quarantine, expected_batches=args.expected_batches,
+                output=args.output,
+            )
         if args.command == "production-backup":
             result = create_backup(
                 admission, args.destination, args.checkpoint_receipt, args.dependency,
@@ -142,6 +168,10 @@ def production_command(args):
             result = import_candidate(load_json(args.manifest), args.production_target,
                                       batch_size=args.approved_batch_size, production=admission)
             result.update(mode="production", target=args.production_target)
+            if args.visibility == "deferred":
+                from openbb_duckdb.baostock18.visibility import DEFERRED
+
+                result.update(visibility="deferred", status=DEFERRED)
         elif args.command == "production-verify":
             result = verify_production(admission)
         elif args.command == "production-replay":

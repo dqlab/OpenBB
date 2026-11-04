@@ -3,17 +3,20 @@
 No remote access, service changes, or production catalog connections.
 """
 
-# ruff: noqa: S608, S603, T201
+# This executable is an assertion-based offline acceptance runner.
+# ruff: noqa: S608, S603, S101, T201
 import argparse
 import hashlib
 import json
 import subprocess
 import sys
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import duckdb
 from openbb_duckdb.baostock18.manifest import encoded, prepare_manifest, sha256
-from openbb_duckdb.baostock18.production import A_SHARE_TABLES, inventory, write_json
+from openbb_duckdb.baostock18.production import A_SHARE_TABLES, fingerprint, inventory, load_json, write_json
+from openbb_duckdb.baostock18.reader import read_bars
 from openbb_duckdb.baostock18.store import utcnow
 
 
@@ -26,6 +29,7 @@ def main():
     parser.add_argument("--max-freeze-seconds", type=float, required=True)
     parser.add_argument("--max-verify-seconds", type=float, required=True)
     parser.add_argument("--backup-scope", default="catalog_with_reference_verification")
+    parser.add_argument("--visibility", choices=("immediate", "deferred"), default="immediate")
     args = parser.parse_args()
     root = Path(args.output)
     root.mkdir(mode=0o700)
@@ -118,6 +122,7 @@ def main():
     write_json(root / "baseline.json", baseline)
     config = {
         "target": str(target),
+        "visibility": args.visibility,
         "output": str(root / "execution"),
         "manifest": str(admission_root / "manifest.json"),
         "baseline": str(root / "baseline.json"),
@@ -154,6 +159,59 @@ def main():
         [sys.executable, "-B", "-m", "openbb_duckdb.baostock18.driver", "--config", str(root / "driver-config.json")],
         check=True,
     )
+    if args.visibility == "deferred":
+        finish_deferred(root, config)
+
+
+def finish_deferred(root, config):
+    """Measure the real CLI chain on this local fixture and preserve every receipt."""
+    from openbb_duckdb.baostock18.contract import SCHEMA
+    from openbb_duckdb.baostock18.visibility import DEFERRED
+
+    target = Path(config["target"])
+    staged = load_json(root / "execution/receipt.json")
+    assert staged["status"] == DEFERRED
+    before_verify = fingerprint(target), sha256(target)
+    subprocess.run(staged["next_commands"]["verify"], check=True)
+    assert (fingerprint(target), sha256(target)) == before_verify
+    verified_root = root / "execution/verification"
+    verified = load_json(verified_root / "receipt.json")
+    assert verified["status"] == "PASS"
+    argv = load_json(verified_root / "approve-command.json")["argv"]
+    for label in ("approve", "replay"):
+        with (root / (label + ".stdout")).open("x") as out, (root / (label + ".stderr")).open("x") as err:
+            subprocess.run(argv, check=True, stdout=out, stderr=err)
+        if label == "approve":
+            after_approve = fingerprint(target), sha256(target)
+    assert (fingerprint(target), sha256(target)) == after_approve
+    replay = load_json(root / "replay.stdout")
+    assert replay["changed"] is False
+    approval = load_json(verified_root / "approval.json")
+    with duckdb.connect(str(target), read_only=True) as c:
+        visible = c.execute(f"SELECT count(*) FROM {SCHEMA}.consumable").fetchone()[0]
+        quarantine = c.execute(
+            f"SELECT count(*) FROM {SCHEMA}.literal_version WHERE disposition='quarantine'"
+        ).fetchone()[0]
+        events = c.execute(f"SELECT count(*) FROM {SCHEMA}.visibility_event").fetchone()[0]
+        sample = c.execute(f"SELECT symbol,date FROM {SCHEMA}.consumable LIMIT 1").fetchone()
+    assert visible == config["expected_clean_rows"] and quarantine == config["expected_quarantine"] and events == 1
+    at = datetime.fromisoformat(approval["known_at"])
+    reader_args = dict(symbols=[sample[0]], start_date=date.fromisoformat(str(sample[1])),
+                       end_date=date.fromisoformat(str(sample[1])), basis="unadjusted", limit=3)
+    counts = {name: len(read_bars(target, **reader_args, as_of=when))
+              for name, when in (("before", at - timedelta(microseconds=1)), ("at", at), ("current", None))}
+    assert counts == {"before": 0, "at": 1, "current": 1}
+    write_json(root / "DEFERRED_CHAIN_RECEIPT.json", {
+        "status": "passed", "synthetic_fixture": True, "fixture": load_json(root / "fixture.json"),
+        "driver_state": staged["status"], "imported": staged["imported"],
+        "deferred_pointer_counts": staged["visibility_counts"], "verification": verified["status"],
+        "verify_catalog_unchanged": True, "reference_verification": verified["reference_verification"],
+        "approval": approval, "approve_command": argv, "replay_changed": replay["changed"],
+        "visibility_events": events, "visible_rows": visible, "quarantined_rows": quarantine,
+        "reader_counts": counts, "production_catalog_connections": 0, "service_operations": 0,
+        "receipts": [{"path": str(p), "sha256": sha256(p)} for p in (
+            root / "execution/receipt.json", verified_root / "receipt.json", verified_root / "approval.json")],
+    })
 
 
 if __name__ == "__main__":

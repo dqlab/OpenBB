@@ -22,6 +22,15 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def driver_complete(config, receipt):
+    """Require the configured successful state before starting service recovery."""
+    if config.get("visibility", "immediate") == "deferred":
+        return (receipt.get("status") == "IMPORT_COMPLETE_VISIBILITY_DEFERRED"
+                and receipt.get("visibility_counts") == {
+                    "basis_admission": 0, "visibility_event": 0, "dataset_pointer": 0})
+    return config.get("visibility", "immediate") == "immediate" and receipt.get("status") == "passed"
+
+
 class Window:
     """Record every external action and always restore the initial running set."""
 
@@ -441,9 +450,12 @@ print(json.dumps(result))
             r = self.launch_driver()
             driver = self.fetch(config["output"] + "/receipt.json")
             self.save("driver-receipt.json", driver)
-            if r["returncode"] or driver["status"] != "passed":
+            if r["returncode"] or not driver_complete(config, driver):
                 raise RuntimeError("Shared production driver aborted: " + str(driver.get("error")))
             result["status"] = "passed"
+            if config.get("visibility", "immediate") == "deferred":
+                result["driver_state"] = driver["status"]
+                result["next_commands"] = driver["next_commands"]
         except BaseException as exc:
             result["error"] = repr(exc)
         finally:

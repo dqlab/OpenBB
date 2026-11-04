@@ -24,6 +24,7 @@ from openbb_duckdb.baostock18.manifest import encoded, source_connection
 from openbb_duckdb.baostock18.production import (
     A_SHARE_TABLES,
     READ_CONFIG,
+    VISIBILITY_MODES,
     fingerprint,
     inventory,
     load_json,
@@ -235,6 +236,9 @@ class Driver:
 
     def __init__(self, config):
         self.config = config
+        self.visibility = config.get("visibility", "immediate")
+        if self.visibility not in VISIBILITY_MODES:
+            raise AdmissionError("visibility must be immediate or deferred")
         self.target = production_path(config["target"])
         self.root = Path(config["output"])
         if not self.root.is_absolute() or self.root.resolve() != self.root or self.root.exists():
@@ -307,9 +311,13 @@ class Driver:
                 write_json(self.root / (label + "-checkpoint.json"), value)
         write_json(self.root / (label + "-checkpoint-metrics.json"), {"seconds": time.monotonic() - started})
 
-    def prepare(self, label, *, staged=False):
+    def prepare(self, label, *, staged=False, checkpoint_receipt=None):
         """Freeze references and run the same bounded backup/restore CLI."""
-        self.checkpoint(label)
+        if checkpoint_receipt is None:
+            self.checkpoint(label)
+        else:
+            # Deferred verification is read-only, including its preparation.
+            write_json(self.root / (label + "-checkpoint.json"), load_json(checkpoint_receipt))
         fp = self.root / (label + "-fingerprint.json")
         self.cli(
             "production-fingerprint",
@@ -332,6 +340,8 @@ class Driver:
             self.config["approved_manifest_hash"],
             "--approved-batch-size",
             str(self.config["approved_batch_size"]),
+            "--visibility",
+            self.visibility,
         ]
         started = time.monotonic()
         with market_lock(self.target):
@@ -513,6 +523,30 @@ class Driver:
                 raise AdmissionError("Import reconciliation differs from approved counts")
             sample = self.inspect("unpublished", published=False)
             self.reader("reader-unpublished", sample, published=False)
+            if self.visibility == "deferred":
+                # End the service window here. Reference freeze/backup/verify of
+                # the imported catalog belongs to the separate verification run.
+                self.checkpoint("staged")
+                observed = self.cli(
+                    "production-fingerprint", "staged-fingerprint", "--production-target", self.target,
+                    "--window-started-at", self.config["window_started_at"],
+                )
+                write_json(self.root / "deferred-config.json", self.config)
+                from openbb_duckdb.baostock18.visibility import DEFERRED
+
+                result.update(
+                    status=DEFERRED, visibility=self.visibility, imported=imported,
+                    catalog_fingerprint=observed["fingerprint"],
+                    visibility_counts=load_json(self.root / "unpublished.json")["visibility_counts"],
+                    next_commands={
+                        "verify": [sys.executable, "-m", "openbb_duckdb.baostock18", "visibility-verify",
+                                   "--config", str(self.root / "deferred-config.json"),
+                                   "--deferred-receipt", str(self.root / "receipt.json"),
+                                   "--output", str(self.root / "verification")],
+                        "approve": f"Run argv from {self.root / 'verification' / 'approve-command.json'} after PASS",
+                    },
+                )
+                return result
             common = self.prepare("after-import", staged=True)
             self.cli("production-preflight", "preflight-after-import", common=common)
             verified = self.cli("production-verify", "verify", common=common)
@@ -599,7 +633,7 @@ def main():
             parser.exit(2, "Candidate references refused before opening a production window\n")
         return
     result = Driver(config).run()
-    print(json.dumps({"status": result["status"], "seconds": result["seconds"]}), flush=True)
+    print(json.dumps({k: result[k] for k in ("status", "seconds", "next_commands") if k in result}), flush=True)
 
 
 if __name__ == "__main__":

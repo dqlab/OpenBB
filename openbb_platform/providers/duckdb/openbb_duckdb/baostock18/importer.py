@@ -218,6 +218,8 @@ def set_visible(target, snapshot_id: str | None, *, basis: str,
     require_basis(basis)
     if production is not None:
         production.check_target(target)
+        if snapshot_id is not None and production.visibility == "deferred":
+            raise AdmissionError("Deferred publication requires visibility-approve with a PASS reference receipt")
         if snapshot_id is not None and snapshot_id != production.approved_manifest_hash:
             raise AdmissionError("Visibility snapshot differs from approved manifest hash")
     with _writer(target, rehearsal_receipt, production, verify_ready=snapshot_id is not None) as connection, \

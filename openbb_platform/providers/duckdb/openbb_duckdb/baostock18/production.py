@@ -45,6 +45,7 @@ A_SHARE_TABLES = (
 )
 FINGERPRINT_KEYS = {"size", "mtime_ns", "device", "inode", "header_sha256"}
 READ_CONFIG = {"enable_external_access": False, "threads": 2, "memory_limit": "2GB"}
+VISIBILITY_MODES = ("immediate", "deferred")
 # Measured reference inventory: ~596 GB across 2.54 million files. At ~4.4 GB/min,
 # hashing alone takes about two hours; allow four hours for verification/restore.
 MAX_REDUCED_SCOPE_BACKUP_SECONDS = 14_400
@@ -192,6 +193,7 @@ class ProductionAdmission:
     approved_manifest_hash: str
     approved_batch_size: int
     backup_receipt: str | None = None
+    visibility: str = "immediate"
 
     def check_target(self, target):
         """Check the raw caller path before any resolve could hide relative input."""
@@ -200,6 +202,8 @@ class ProductionAdmission:
 
     def approvals(self):
         """Validate explicit approval fields before opening even a read-only catalog."""
+        if self.visibility not in VISIBILITY_MODES:
+            raise AdmissionError("visibility must be immediate or deferred")
         path = production_path(self.target)
         if (not isinstance(self.approved_manifest_hash, str)
                 or not re.fullmatch(r"[0-9a-f]{64}", self.approved_manifest_hash)
