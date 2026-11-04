@@ -14,6 +14,25 @@ an existing file read-only and refuses catalogs containing other datasets. There
 is no default database path. Use a dedicated local scratch file; this command is
 not the approved production migration/publisher entrypoint.
 
+The Python functions `import_candidate` and `set_visible` accept an explicit
+`rehearsal_receipt` for a production-shape **copy**. The CLI has no such option.
+The JSON receipt must be adjacent to an existing `rehearsal.duckdb`, use format
+`baostock18-rehearsal-clone-v1`, declare purpose
+`migration rehearsal only; NOT a production backup` and `production_admitted:
+false`, and bind its absolute `target_path`, `[st_dev, st_ino]` `target_identity`,
+distinct `source_path`/`source_physical_path`/`source_identity`, and exact
+`baseline_tables` pairs of schema/table names. Missing files, hard links, changed
+identities or table inventories, and access-window policies are rejected before
+a writable connection opens. The baseline tables are left intact; only the
+checksummed admission migration and its own rows are written. Generate this
+receipt only after verifying a new consistent clone. It is an explicit rehearsal
+opt-in, not a production permission or a backup certificate. Default calls still
+reject every catalog containing other datasets.
+
+For a large materialized candidate, sorting `row_lineage` by `value_id` allows
+each batch's parameterized value-id bounds to prune unrelated row groups while
+preserving all lineage matches.
+
 All tables live in `baostock18_admission`. A snapshot identity hashes a canonical
 manifest binding the source contract, transform, selection, the candidate file
 and **every local Parquet dependency**. Extra evidence files can bind raw hash

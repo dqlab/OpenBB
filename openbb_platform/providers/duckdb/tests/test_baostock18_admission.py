@@ -179,6 +179,72 @@ def test_hash_mismatch_and_foreign_catalog_refused(tmp_path):
     assert not (tmp_path / "never_created.duckdb").exists()
 
 
+def test_explicit_rehearsal_receipt_preserves_foreign_data(tmp_path):
+    """A receipt-bound clone can migrate, resume and expose only rehearsal data."""
+    manifest = make_candidate(tmp_path / "input.duckdb")
+    target = tmp_path / "rehearsal.duckdb"
+    with duckdb.connect(str(target)) as c:
+        c.execute("CREATE SCHEMA a_share")
+        c.execute("CREATE TABLE a_share.bar_revision AS SELECT 42 AS sentinel")
+    stat = target.stat()
+    receipt = tmp_path / "clone.json"
+    binding = {
+        "format": "baostock18-rehearsal-clone-v1",
+        "purpose": "migration rehearsal only; NOT a production backup",
+        "production_admitted": False, "target_path": str(target),
+        "source_path": str(tmp_path / "production.duckdb"),
+        "target_identity": [stat.st_dev, stat.st_ino],
+        "baseline_tables": [["a_share", "bar_revision"]],
+    }
+    receipt.write_text(json.dumps(binding))
+    first = import_candidate(manifest, target, rehearsal_receipt=receipt)
+    assert import_candidate(manifest, target, rehearsal_receipt=receipt)["new_batches"] == 0
+    set_visible(target, first["snapshot_id"], basis="unadjusted",
+                expected_clean_rows=1, rehearsal_receipt=receipt)
+    assert len(read(target, basis="unadjusted")) == 1
+    assert query(target, "SELECT * FROM a_share.bar_revision") == [(42,)]
+    with pytest.raises(AdmissionError, match="other datasets"):
+        import_candidate(manifest, target)
+    for key, value, error in [
+        ("source_path", str(target), "authorize"),
+        ("source_identity", binding["target_identity"], "identity"),
+        ("target_identity", [0, 0], "identity"),
+        ("baseline_tables", [["a_share", "other_table"]], "inventory"),
+        ("production_admitted", True, "Invalid"),
+    ]:
+        receipt.write_text(json.dumps({**binding, key: value}))
+        with pytest.raises(AdmissionError, match=error):
+            import_candidate(manifest, target, rehearsal_receipt=receipt)
+    assert query(target, "SELECT * FROM a_share.bar_revision") == [(42,)]
+    receipt.write_text(json.dumps(binding))
+    with duckdb.connect(str(target)) as c:
+        c.execute("DROP SCHEMA baostock18_admission CASCADE")
+        c.execute("DROP TABLE a_share.bar_revision")
+    with pytest.raises(AdmissionError, match="inventory"):
+        import_candidate(manifest, target, rehearsal_receipt=receipt)
+    assert query(target, "SELECT schema_name FROM duckdb_tables() WHERE NOT internal") == []
+
+
+def test_rehearsal_receipt_cannot_initialize_missing_clone_or_bypass_policy(tmp_path):
+    """Fail before opening a writer when the clone is missing or has a policy."""
+    manifest = make_candidate(tmp_path / "input.duckdb")
+    target = tmp_path / "rehearsal.duckdb"
+    receipt = tmp_path / "clone.json"
+    receipt.write_text(json.dumps({
+        "format": "baostock18-rehearsal-clone-v1",
+        "purpose": "migration rehearsal only; NOT a production backup",
+        "production_admitted": False, "target_path": str(target),
+        "source_path": str(tmp_path / "production.duckdb"),
+    }))
+    with pytest.raises(AdmissionError, match="authorize"):
+        import_candidate(manifest, target, rehearsal_receipt=receipt)
+    assert not target.exists()
+    target.with_name(target.name + ".access-windows").mkdir()
+    with pytest.raises(AdmissionError, match="policy"):
+        import_candidate(manifest, target, rehearsal_receipt=receipt)
+    assert not target.exists()
+
+
 def test_numeric_precision_missing_lineage_and_limits(tmp_path):
     """Do not round excess scale or silently discard missing provenance."""
     input_path = tmp_path / "input.duckdb"

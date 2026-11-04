@@ -53,6 +53,10 @@ def _receipt(connection, snapshot_id, new_batches):
 
 def _write_batch(target, source, table, snapshot_id, number, fault_hook):
     started = time.monotonic()
+    ids = table.column("value_id").to_pylist()
+    n = table.num_rows
+    if len(set(ids)) != n:
+        raise AdmissionError("Duplicate candidate value_id")
     target.register("incoming", table)
     source.register("selected_ids", table.select(["value_id"]))
     # A second cursor streams input while this cursor retrieves matching lineage.
@@ -60,7 +64,8 @@ def _write_batch(target, source, table, snapshot_id, number, fault_hook):
         "SELECT l.*, i.relative AS source_path, i.historical_status, i.terminal_status, "
         "i.authority_received_ns, to_json(l) AS lineage_json, to_json(i) AS capture_json "
         "FROM row_lineage l JOIN selected_ids b USING(value_id) "
-        "JOIN capture_inventory i USING(capture_id)"
+        "JOIN capture_inventory i USING(capture_id) "
+        "WHERE l.value_id BETWEEN ? AND ?", [min(ids), max(ids)],
     ).fetch_arrow_table()
     target.register("incoming_lineage", lineage)
     target.execute("DROP TABLE IF EXISTS batch")
@@ -69,10 +74,6 @@ def _write_batch(target, source, table, snapshot_id, number, fault_hook):
         "(SELECT *," + validation_sql() + " AS numeric_contract FROM incoming)"
     )
     counts = dict(target.execute("SELECT disposition,count(*) FROM batch GROUP BY 1").fetchall())
-    n = table.num_rows
-    ids = table.column("value_id").to_pylist()
-    if len(set(ids)) != n:
-        raise AdmissionError("Duplicate candidate value_id")
     digest = hashlib.sha256("\n".join(ids).encode()).hexdigest()
     # Even rejected literals retain their source evidence. A missing inventory
     # join must fail rather than silently lose provenance or counts.
@@ -127,7 +128,8 @@ def _write_batch(target, source, table, snapshot_id, number, fault_hook):
     source.unregister("selected_ids")
 
 
-def import_candidate(manifest: dict, target, *, batch_size=50_000, fault_hook=None) -> dict:
+def import_candidate(manifest: dict, target, *, batch_size=50_000, fault_hook=None,
+                     rehearsal_receipt=None) -> dict:
     """Stage all selected literals, lineage, quality and narrow bars atomically per batch.
 
     No visibility pointer is changed here. A crash leaves committed batches
@@ -151,7 +153,7 @@ def import_candidate(manifest: dict, target, *, batch_size=50_000, fault_hook=No
         expected = source.execute(
             "SELECT count(*) FROM literal18_variants WHERE " + selection, params,
         ).fetchone()[0]
-        with offline_writer(target) as connection:
+        with offline_writer(target, rehearsal_receipt=rehearsal_receipt) as connection:
             existing = connection.execute(
                 f"SELECT expected_rows,state FROM {SCHEMA}.snapshot WHERE snapshot_id=?", [snapshot_id],
             ).fetchone()
@@ -199,14 +201,14 @@ def import_candidate(manifest: dict, target, *, batch_size=50_000, fault_hook=No
 
 
 def set_visible(target, snapshot_id: str | None, *, basis: str,
-                expected_clean_rows: int | None = None) -> dict:
+                expected_clean_rows: int | None = None, rehearsal_receipt=None) -> dict:
     """Approve/retract an OFFLINE pointer in one short transaction, keeping history.
 
     A full snapshot replaces the previous scope for this basis; there is no
     fallback to older dates/symbols. None records an explicit soft withdrawal.
     """
     require_basis(basis)
-    with offline_writer(target) as connection, transaction(connection):
+    with offline_writer(target, rehearsal_receipt=rehearsal_receipt) as connection, transaction(connection):
         current = connection.execute(
             f"SELECT snapshot_id,event_id FROM {SCHEMA}.dataset_pointer WHERE adjustment_basis=?", [basis],
         ).fetchone()
