@@ -193,7 +193,7 @@ def test_window_requires_configured_completion_state(config, state, pointer, suc
         "basis_admission": 0, "visibility_event": 0, "dataset_pointer": pointer}}) is success
 
 
-@pytest.mark.parametrize("bad", ["missing", "failed", "fingerprint", "manifest", "references", "counts", "batch-size"])
+@pytest.mark.parametrize("bad", ["missing", "failed", "identity", "manifest", "references", "counts", "batch-size"])
 def test_approve_refuses_invalid_verification(verified_packet, tmp_path, bad):
     """No successful import can substitute for a matching PASS reference receipt."""
     root = verified_packet
@@ -201,8 +201,8 @@ def test_approve_refuses_invalid_verification(verified_packet, tmp_path, bad):
     receipt = load_json(root / "verify-run/receipt.json")
     if bad == "failed":
         receipt["status"] = "FAIL"
-    elif bad == "fingerprint":
-        receipt["catalog_fingerprint"]["inode"] += 1
+    elif bad == "identity":
+        receipt["content_identity"]["tables"]["literal_version"]["rows"] += 1
     elif bad == "manifest":
         receipt["snapshot_id"] = "0" * 64
     elif bad == "references":
@@ -293,12 +293,14 @@ def test_deferred_verify_approve_asof_and_exact_replay(tmp_path, monkeypatch):
     assert not replay["changed"] and replay["event_id"] == event["event_id"]
     assert (fingerprint(target), sha256(target), sha256(output)) == before
     assert query(target, f"SELECT count(*) FROM {SCHEMA}.visibility_event") == [(1,)]
-    # An unrelated catalog write invalidates the saved post-approval fingerprint.
+    # Unrelated writes and normal CHECKPOINT must preserve idempotent replay.
     with duckdb.connect(str(target)) as c:
         c.execute("UPDATE a_share.attempt SET sentinel=43")
-    with pytest.raises(AdmissionError, match="fingerprint"):
-        approve_visibility(admission, tmp_path / "verify-run/receipt.json", expected_clean_rows=2,
-                           expected_quarantine=3, expected_batches=1, output=output)
+    with duckdb.connect(str(target)) as c:
+        c.execute("CHECKPOINT")
+    replay = approve_visibility(admission, tmp_path / "verify-run/receipt.json", expected_clean_rows=2,
+                                expected_quarantine=3, expected_batches=1, output=output)
+    assert replay["changed"] is False
 
 
 def test_approve_transaction_rolls_back_all_visibility_state(verified_packet, tmp_path):
@@ -337,3 +339,71 @@ def test_deferred_import_interrupt_rolls_back_then_resumes(tmp_path):
     imported = import_candidate(manifest, target, production=admission)
     assert imported["new_batches"] == 1 and imported["rows"] == 50_004 and imported["batches"] == 2
     assert read(target, basis="unadjusted") == []
+
+
+def test_approve_after_restart_checkpoint_and_unrelated_writes(tmp_path):
+    """Native connection restarts, layout changes and foreign counts do not bind approval."""
+    config = packet(tmp_path)
+    Driver(config).run()
+    verify_deferred(config, tmp_path / "import-run/receipt.json", tmp_path / "verify-run")
+    target = Path(config["target"])
+    before = fingerprint(target)
+    with duckdb.connect(str(target)) as c:
+        c.execute("INSERT INTO a_share.attempt VALUES (999)")
+        c.execute("CREATE TABLE unrelated_production AS SELECT 123 AS value")
+        c.execute("CHECKPOINT")
+    assert fingerprint(target) != before
+    command = load_json(tmp_path / "verify-run/approve-command.json")["argv"]
+    process = subprocess.run(command, capture_output=True, text=True, check=False)  # noqa: S603
+    assert process.returncode == 0, process.stderr
+    assert len(read(target, basis="unadjusted")) == 2
+
+
+@pytest.mark.parametrize("change", [
+    "UPDATE baostock18_admission.literal_version SET raw18_json='{\"changed\":true}'",
+    "UPDATE baostock18_admission.row_lineage SET source_body_sha256=repeat('d',64)",
+    "UPDATE baostock18_admission.bar_version SET amount=amount+1",
+    "UPDATE baostock18_admission.quality SET detail_json='{\"changed\":true}'",
+    "UPDATE baostock18_admission.batch_receipt SET elapsed_seconds=elapsed_seconds+1",
+    "UPDATE baostock18_admission.snapshot SET completed_at=completed_at+INTERVAL 1 SECOND",
+    "UPDATE baostock18_admission.snapshot SET state='staging'",
+    "INSERT INTO baostock18_admission.snapshot SELECT repeat('e',64),contract_id,repeat('e',64),manifest_json,"
+    "transform_version,known_at,source_available_at,availability_basis,state,expected_rows,completed_at "
+    "FROM baostock18_admission.snapshot",
+    "UPDATE baostock18_admission.batch_receipt SET lineage_rows=lineage_rows+1",
+    "INSERT INTO baostock18_admission.basis_admission SELECT snapshot_id,'unadjusted',now(),2 "
+    "FROM baostock18_admission.snapshot",
+])
+def test_admission_changes_abort_with_pointer_zero(tmp_path, change):
+    """Same-count cell changes and reconciliation/control changes are all refused."""
+    config = packet(tmp_path)
+    Driver(config).run()
+    verify_deferred(config, tmp_path / "import-run/receipt.json", tmp_path / "verify-run")
+    with duckdb.connect(config["target"]) as c:
+        c.execute(change)
+    with pytest.raises(AdmissionError):
+        approve_visibility(admission_from(tmp_path), tmp_path / "verify-run/receipt.json", expected_clean_rows=2,
+                           expected_quarantine=3, expected_batches=1, output=tmp_path / "approval.json")
+    assert read(config["target"], basis="unadjusted") == []
+    assert not (tmp_path / "approval.json").exists()
+
+
+def test_approve_refuses_wal_and_same_process_connection(verified_packet, tmp_path):
+    """Never recover WAL or share a native writer with another connection."""
+    admission = admission_from(verified_packet)
+    kwargs = dict(expected_clean_rows=2, expected_quarantine=3, expected_batches=1, output=tmp_path / "approval.json")
+    with duckdb.connect(admission.target) as writer, pytest.raises(duckdb.Error):
+        writer.execute("BEGIN")
+        writer.execute("UPDATE baostock18_admission.bar_version SET amount=amount+1")
+        approve_visibility(admission, verified_packet / "verify-run/receipt.json", **kwargs)
+    # Use a separate copy: production refuses rather than removing a WAL.
+    import shutil
+    target = tmp_path / "dq_quant_invest_data.duckdb"
+    shutil.copy2(admission.target, target)
+    target.with_suffix(".publisher.lock").touch()
+    target.with_suffix(".market.lock").touch()
+    wal = target.with_name(target.name + ".wal")
+    wal.write_bytes(b"synthetic WAL must be retained")
+    with pytest.raises(AdmissionError, match="WAL"):
+        approve_visibility(replace(admission, target=str(target)), verified_packet / "verify-run/receipt.json", **kwargs)
+    assert wal.read_bytes() == b"synthetic WAL must be retained"

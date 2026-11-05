@@ -417,14 +417,36 @@ python -c 'import json,subprocess,sys; subprocess.run(json.load(open(sys.argv[1]
   /absolute/verification-output/approve-command.json
 ```
 
-`visibility-verify` is read-only, including preparation: it reuses the completed
-staging CHECKPOINT, rejects any changed target fingerprint, runs the existing
-staged reference/backup/restore/preflight/reconciliation gates, and checks the
-unpublished reader. Its immutable PASS receipt binds target, catalog fingerprint,
-manifest, batch size, baseline hash, exact counts, backup receipt hash, and
-reference verification. A failed run retains a FAIL receipt and grants no
-publication. Bounds and backup scope retain their existing meanings and caps;
-deferral does not relax them. Use a new output directory for a verification retry.
+`visibility-verify` opens the catalog READ_ONLY and verifies **only this import's
+`capture_inventory` references**, plus every imported `row_lineage` locator and
+capture ID. It does not enumerate foreign tables or embedded references from
+other datasets. The original completed catalog-only backup/restore evidence is
+retained and bound by receipt SHA256; it is not recopied or rehashed in this phase.
+A shared `visibility_verify_seconds` deadline defaults to 1200 seconds and cannot
+exceed 1200. Failure retains a FAIL receipt and grants no publication.
+
+An optional verification config may add `capture_inventory_receipt` and
+`capture_inventory_sha256` to the original deferred config. These explicitly pin
+the earlier passed per-directory, per-file inventory. Every directory membership,
+regular-file type, canonical path and size is checked. Recorded hashes are checked
+against that pinned ledger; files without a recorded hash are actually hashed.
+A deterministic stratified sample is independently hashed: all files for small
+fixtures, otherwise at least 1000 or 0.5%, capped at 5000. Without a supplied ledger,
+all candidate member bytes are hashed because candidate locators lack byte hashes.
+This is recorded-hash verification with sampling; the receipt states the exact
+coverage and measured recomputation counts. Full-catalog reference auditing is a
+separate read-only operation and cannot authorize or block this admission.
+
+The PASS receipt binds snapshot ID, approved batch size, reconciled clean/total/
+quarantine/conditional/batch/lineage counts and deterministic SHA256 digests for
+**every cell of every admission table**, including zero publication state. Each
+table digest includes its columns/types/nullability and externally sorted fixed
+width row SHA256 values, streamed in bounded batches. Admission table definitions
+and views are also bound. Physical file size, mtime and header fingerprints are
+not content identity: checkpoint/restart and unrelated production writes do not
+invalidate deferred approval. The historical flag `--expected-catalog-fingerprint`
+now names `baostock18-admission-content-evidence-v1` evidence for this command only;
+import and ordinary production commands retain their existing physical gates.
 
 The generated approval argv is equivalent to:
 
@@ -442,25 +464,24 @@ python -m openbb_duckdb.baostock18 visibility-approve \
   --output /absolute/verification-output/approval.json
 ```
 
-Approval holds the existing publisher then market mutexes, refuses WAL and native
-DuckDB lock conflicts, rechecks fingerprint, baseline, backup payloads and reference
-ledger, and independently reconciles snapshot/lineage/quality/admission counts.
-All scans precede `BEGIN`; the transaction inserts only the admission, one event,
-and the pointer. `transaction_seconds` measures that transaction. Deferred
-`production-visible` refuses publication and directs operators to this command.
-The CLI never starts/stops services. Concurrent readers/writers can make native
-DuckDB refuse writer open; coordinate catalog availability separately.
+Approval holds the existing publisher then market mutexes, refuses WAL, native
+lock conflicts and existing same-process writer connections, validates PASS receipt
+bindings, and recomputes the entire admission identity under its exclusive native
+writer connection before `BEGIN`. An admission cell, count, snapshot or pointer
+change aborts. Unrelated tables are not checked. The transaction inserts the
+admission, one event and pointer and hashes those three small control tables before
+commit; `transaction_seconds` measures that transaction. Deferred
+`production-visible` directs operators to this command. The CLI does not manage
+services. Native read connections may also prevent opening the approval writer.
 
 Repeat the **same approval command, including its output path**, for idempotent
-replay. It validates the immutable approval receipt and post-commit fingerprint,
-all original receipt bindings, actual counts, baseline, and current event; returns
-`changed=false` read-only; and changes neither the receipt nor any catalog row.
-Any intervening catalog write invalidates the fingerprint, even an unrelated one.
-Do not delete approval evidence or silently rebind a PASS receipt to a newer
-catalog. A crash between commit and approval receipt persistence fails closed and
-requires operator reconciliation; it cannot create a second event implicitly.
-The as-of boundary is the approval event's actual `known_at`, never import or
-verification time. Earlier reads remain empty; quarantine is never consumable.
+read-only replay. Replay checks all original receipt bindings and complete
+post-approval admission content. Checkpoint and unrelated writes remain compatible;
+changed admission or controls fail. Do not delete approval evidence or rebind a
+PASS receipt. A crash between commit and receipt persistence requires explicit
+operator reconciliation and cannot create a second event implicitly. The as-of
+boundary is the event's actual `known_at`; earlier reads remain empty and
+quarantine remains excluded.
 
 For an offline saved-DDL acceptance run, add `--visibility deferred` to
 `scripts/baostock18/rehearsal.py`. It creates all saved tables/views/indexes,

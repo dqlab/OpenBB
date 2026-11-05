@@ -11,25 +11,25 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import duckdb
+from openbb_duckdb.baostock18.admission_references import COVERAGE, verify_admission_references
+from openbb_duckdb.baostock18.content_identity import (
+    content_identity,
+    require_identity,
+    require_unpublished,
+)
 from openbb_duckdb.baostock18.contract import SCHEMA, AdmissionError
 from openbb_duckdb.baostock18.manifest import sha256
 from openbb_duckdb.baostock18.production import (
-    A_SHARE_TABLES,
     READ_CONFIG,
     ProductionAdmission,
-    check_basis,
-    fingerprint,
-    inventory,
     load_json,
     market_lock,
     no_wal,
     production_path,
-    reconcile_snapshot,
-    timestamp,
     write_json,
 )
-from openbb_duckdb.baostock18.reference_backup import CATALOG_ONLY, REDUCED_SCOPE
-from openbb_duckdb.baostock18.store import _check_owned, migrate, transaction, utcnow
+from openbb_duckdb.baostock18.reference_backup import CATALOG_ONLY, HASH, bounded_sql
+from openbb_duckdb.baostock18.store import transaction, utcnow
 
 DEFERRED = "IMPORT_COMPLETE_VISIBILITY_DEFERRED"
 VERIFIED_FORMAT = "baostock18-visibility-verification-v1"
@@ -51,69 +51,93 @@ def check_counts(actual, expected):
 
 
 def verify_deferred(config, deferred_receipt, output):
-    """Resume only verification/backup gates, with no catalog writer or pointer change."""
-    from openbb_duckdb.baostock18.driver import Driver, precheck_input_references
+    """Verify only imported capture references and bind admission content READ_ONLY.
 
+    Physical catalog fingerprints remain import/backup evidence. They are never
+    used as content identity for deferred verification, approval or replay.
+    """
     deferred = load_json(deferred_receipt)
+    original = {k: v for k, v in config.items() if k not in {
+        "capture_inventory_receipt", "capture_inventory_sha256", "visibility_verify_seconds"}}
     if (config.get("visibility") != "deferred" or deferred.get("status") != DEFERRED
             or config.get("backup_scope") != CATALOG_ONLY or deferred.get("backup_scope") != CATALOG_ONLY
-            or deferred.get("config") != config):
+            or deferred.get("config") != original):
         raise AdmissionError("Matching deferred driver receipt/config required")
     target = production_path(config["target"])
-    if fingerprint(target) != deferred.get("catalog_fingerprint"):
-        raise AdmissionError("Deferred catalog fingerprint mismatch; obtain a reviewed fresh packet")
+    output = Path(output)
+    if not output.is_absolute():
+        raise AdmissionError("New absolute verification directory required")
+    output.mkdir(exist_ok=False)
+    started = time.monotonic()
+    cap = config.get("visibility_verify_seconds", 1200)
+    if type(cap) not in (int, float) or not 0 < cap <= 1200:
+        raise AdmissionError("Admission visibility verification cap must be <=1200 seconds")
     expected = expected_counts(config["expected_clean_rows"], config["expected_quarantine"], config["expected_batches"])
-    if config["expected_rows"] != expected["rows"]:
-        raise AdmissionError("Configured total differs from clean/quarantine counts")
-    driver = Driver(dict(config, output=str(output)))
-    result = {"format": VERIFIED_FORMAT, "status": "FAIL", "target": str(target),
-              "snapshot_id": config["approved_manifest_hash"], "expected_counts": expected,
-              "approved_batch_size": config["approved_batch_size"],
-              "catalog_fingerprint": deferred["catalog_fingerprint"],
-              "baseline_sha256": sha256(Path(config["baseline"])),
-              "deferred_receipt": str(deferred_receipt), "deferred_receipt_sha256": sha256(Path(deferred_receipt))}
+    result = dict(format=VERIFIED_FORMAT, status="FAIL", target=str(target),
+                  snapshot_id=config["approved_manifest_hash"], expected_counts=expected,
+                  approved_batch_size=config["approved_batch_size"],
+                  baseline_sha256=sha256(Path(config["baseline"])),
+                  deferred_receipt=str(deferred_receipt), deferred_receipt_sha256=sha256(Path(deferred_receipt)))
     try:
-        driver.capture_inventory = precheck_input_references(
-            driver.config, destination=driver.root / "capture-directories.jsonl")
-        write_json(driver.root / "candidate-reference-precheck.json", driver.capture_inventory)
-        if driver.capture_inventory["status"] != "passed":
-            raise AdmissionError("Deferred capture verification failed")
-        # The original packet must select catalog_only. This read-only phase
-        # explicitly upgrades to exhaustive byte verification, never recorded sampling.
-        driver.scope = REDUCED_SCOPE
-        driver.cap = config.get("max_visibility_verify_seconds", 43200)
-        if not isinstance(driver.cap, (int, float)) or not 0 < driver.cap <= 43200:
-            raise AdmissionError("Visibility verification cap must be positive and <=43200")
-        common = driver.prepare("after-import", staged=True,
-                                checkpoint_receipt=Path(config["output"]) / "staged-checkpoint.json")
-        driver.cli("production-preflight", "preflight", common=common)
-        verified = driver.cli("production-verify", "verify", common=common)
-        check_counts(verified, expected)
-        if verified["catalog_fingerprint"] != result["catalog_fingerprint"]:
-            raise AdmissionError("Verification catalog fingerprint mismatch")
-        sample = driver.inspect("unpublished", published=False)
-        driver.reader("reader-unpublished", sample, published=False)
-        backup_path = driver.root / "after-import-backup" / "receipt.json"
-        backup = load_json(backup_path)
-        if fingerprint(target) != result["catalog_fingerprint"]:
-            raise AdmissionError("Catalog changed during deferred verification")
-        result.update(status="PASS", verified=verified, backup_receipt=str(backup_path),
-                      backup_receipt_sha256=sha256(backup_path), reference_verification=backup["reference_verification"])
-        argv = [sys.executable, "-m", "openbb_duckdb.baostock18", "visibility-approve", *common,
-                "--verification-receipt", str(driver.root / "receipt.json"),
+        if config["expected_rows"] != expected["rows"]:
+            raise AdmissionError("Configured total differs from clean/quarantine counts")
+        backup = Path(config["output"]) / "before-import-backup/receipt.json"
+        proof = load_json(backup)
+        if (proof.get("format") != "baostock18-production-backup-v1"
+                or proof.get("scope") != CATALOG_ONLY or proof.get("target") != str(target)
+                or proof.get("approved_manifest_hash") != config["approved_manifest_hash"]
+                or proof.get("approved_batch_size") != config["approved_batch_size"]
+                or proof.get("baseline_sha256") != result["baseline_sha256"]
+                or proof.get("restore_check", {}).get("status") != "passed"
+                or not isinstance(proof.get("catalog_sha256_before"), str)
+                or not HASH.fullmatch(proof["catalog_sha256_before"])
+                or proof.get("restore_check", {}).get("read_only") is not True
+                or proof.get("restore_check", {}).get("admission_physical_tables") != 0
+                or proof.get("restore_check") != deferred.get("restore_check")
+                or proof.get("catalog_sha256_before") != proof.get("catalog_sha256_after")
+                or proof.get("catalog_sha256_before") != proof.get("restore_check", {}).get("sha256")):
+            raise AdmissionError("Completed catalog-only backup and restore receipt required")
+        with publisher_lock(target), market_lock(target):
+            no_wal(target)
+            with (duckdb.connect(str(target), read_only=True, config=READ_CONFIG) as c,
+                  bounded_sql(c, started + cap), transaction(c)):
+                identity = content_identity(c, config["approved_manifest_hash"], config["approved_batch_size"])
+                require_unpublished(identity)
+                check_counts(identity["measured"], expected)
+                imported = deferred.get("imported", {})
+                if (identity["measured"]["lineage_rows"] != imported.get("lineage_rows")
+                        or imported.get("snapshot_id") != config["approved_manifest_hash"]):
+                    raise AdmissionError("Imported lineage/snapshot receipt mismatch")
+                reference = verify_admission_references(c, config, output, started + cap)
+            no_wal(target)
+        # Preserve the original backup; this small receipt binds existing evidence.
+        backup_path = output / "after-import-backup/receipt.json"
+        backup_path.parent.mkdir()
+        write_json(backup_path, dict(format="baostock18-deferred-backup-evidence-v1", scope=CATALOG_ONLY,
+                                    source_receipt=str(backup), source_receipt_sha256=sha256(backup)))
+        evidence = output / "after-import-fingerprint.json"
+        write_json(evidence, dict(format="baostock18-admission-content-evidence-v1", target=str(target),
+                                  content_identity=identity))
+        result.update(status="PASS", content_identity=identity, verified=identity["measured"],
+                      backup_receipt=str(backup_path), backup_receipt_sha256=sha256(backup_path),
+                      reference_verification=reference)
+        argv = [sys.executable, "-m", "openbb_duckdb.baostock18", "visibility-approve",
+                "--production-target", str(target), "--expected-catalog-fingerprint", str(evidence),
+                "--window-started-at", config["window_started_at"], "--baseline", config["baseline"],
+                "--approved-manifest-hash", config["approved_manifest_hash"],
+                "--approved-batch-size", str(config["approved_batch_size"]), "--visibility", "deferred",
+                "--backup-receipt", str(backup_path), "--verification-receipt", str(output / "receipt.json"),
                 "--expected-clean-rows", str(expected["clean_unadjusted"]),
-                "--expected-quarantine", str(expected["quarantine"]),
-                "--expected-batches", str(expected["batches"]),
-                "--output", str(driver.root / "approval.json")]
-        write_json(driver.root / "approve-command.json", {"argv": argv})
+                "--expected-quarantine", str(expected["quarantine"]), "--expected-batches", str(expected["batches"]),
+                "--output", str(output / "approval.json")]
+        write_json(output / "approve-command.json", {"argv": argv})
         result["next_command"] = argv
     except BaseException as exc:
         result.update(status="FAIL", error=repr(exc))
         raise
     finally:
-        result.update(seconds=time.monotonic() - driver.started, commands=driver.commands,
-                      completed_at=utcnow().isoformat(), read_only=True)
-        write_json(driver.root / "receipt.json", result)
+        result.update(seconds=time.monotonic() - started, completed_at=utcnow().isoformat(), read_only=True)
+        write_json(output / "receipt.json", result)
     return result
 
 
@@ -141,6 +165,16 @@ def publisher_lock(path):
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
+def _bound_file(path, digest):
+    """Malformed or missing receipt paths are failed gates, never omitted checks."""
+    if not isinstance(path, str) or not isinstance(digest, str) or not HASH.fullmatch(digest):
+        return False
+    try:
+        return sha256(Path(path)) == digest
+    except OSError as exc:
+        raise AdmissionError(f"Missing bound evidence: {path}") from exc
+
+
 def _verification(admission, receipt_path, expected):
     receipt = load_json(receipt_path)
     observed = load_json(admission.expected_catalog_fingerprint)
@@ -149,48 +183,38 @@ def _verification(admission, receipt_path, expected):
             or receipt.get("target") != admission.target
             or receipt.get("snapshot_id") != admission.approved_manifest_hash
             or receipt.get("approved_batch_size") != admission.approved_batch_size
-            or receipt.get("catalog_fingerprint") != observed.get("fingerprint")
-            or receipt.get("catalog_fingerprint") != backup.get("catalog_fingerprint")
+            or observed.get("format") != "baostock18-admission-content-evidence-v1"
+            or observed.get("target") != admission.target
+            or receipt.get("content_identity") != observed.get("content_identity")
             or receipt.get("baseline_sha256") != sha256(Path(admission.baseline))
             or receipt.get("expected_counts") != expected
             or receipt.get("backup_receipt") != admission.backup_receipt
             or receipt.get("backup_receipt_sha256") != sha256(Path(admission.backup_receipt))
-            or backup.get("scope") != REDUCED_SCOPE
-            or receipt.get("reference_verification") != backup.get("reference_verification")
+            or backup.get("format") != "baostock18-deferred-backup-evidence-v1"
+            or backup.get("scope") != CATALOG_ONLY
+            or not _bound_file(backup.get("source_receipt"), backup.get("source_receipt_sha256"))
             or receipt.get("verified", {}).get("verification") != "passed"):
-        raise AdmissionError("Reference verification receipt must be PASS and bind the same fingerprint/approval")
+        raise AdmissionError("Reference verification receipt must be PASS and bind the same content/approval")
     reference = receipt.get("reference_verification", {})
     if (reference.get("status") != "passed" or reference.get("missing") != 0 or reference.get("mismatch") != 0
-            or reference.get("changed") != 0
-            or reference.get("coverage") != "all persistent file references in reviewed catalog contract"
-            or reference.get("contents_copied") is not False):
+            or reference.get("changed") != 0 or reference.get("unresolved_lineage_rows") != 0
+            or reference.get("lineage_rows") != receipt["verified"].get("lineage_rows")
+            or reference.get("coverage") != COVERAGE or reference.get("contents_copied") is not False
+            or not _bound_file(reference.get("inventory"), reference.get("inventory_sha256"))
+            or not _bound_file(reference.get("measured_inventory"), reference.get("measured_inventory_sha256"))):
         raise AdmissionError("Reference verification receipt is not PASS")
     check_counts(receipt.get("verified", {}), expected)
-    return receipt, observed
-
-
-def _inspect(connection, admission, expected):
-    """Recheck the foreign baseline and admission even on an idempotent replay."""
-    baseline = load_json(admission.baseline)
-    if (baseline.get("format") != "baostock18-production-baseline-v1"
-            or inventory(connection) != sorted(baseline["tables"])
-            or {t: connection.execute(f'SELECT count(*) FROM a_share."{t}"').fetchone()[0]
-                for t in A_SHARE_TABLES} != baseline["a_share_counts"]):
-        raise AdmissionError("Approval baseline changed")
-    migrate(connection, _check_owned(connection, sorted(tuple(x) for x in baseline["tables"])), read_only=True)
-    check_basis(connection, True)
-    measured = reconcile_snapshot(connection, admission.approved_manifest_hash, admission.approved_batch_size)
-    check_counts(measured, expected)
-    return measured
+    require_unpublished(receipt["content_identity"])
+    return receipt
 
 
 def approve_visibility(admission: ProductionAdmission, verification_receipt, *, expected_clean_rows,
                        expected_quarantine, expected_batches, output, fault_hook=None):
-    """Recheck all gates before a short transaction; same receipt path replays read-only.
+    """Hash admission under an exclusive native DB lock, then publish in a short transaction.
 
-    The immutable approval receipt binds the post-commit fingerprint for retries.
-    A changed catalog (even after approval) cannot reuse it. If commit succeeds but
-    receipt persistence fails, fail closed and require operator reconciliation.
+    Native cross-process locking plus rejecting already open in-process handles
+    prevents another connection from changing admission between hashing and BEGIN.
+    Replay checks the complete post-approval content, independent of file layout.
     """
     expected = expected_counts(expected_clean_rows, expected_quarantine, expected_batches)
     if admission.visibility != "deferred":
@@ -201,42 +225,36 @@ def approve_visibility(admission: ProductionAdmission, verification_receipt, *, 
         raise AdmissionError("Approval output must be an absolute receipt path")
     with publisher_lock(path), market_lock(path):
         no_wal(path)
-        receipt, observed = _verification(admission, verification_receipt, expected)
+        receipt = _verification(admission, verification_receipt, expected)
         binding = dict(target=str(path), snapshot_id=admission.approved_manifest_hash,
-                       catalog_fingerprint_before=receipt["catalog_fingerprint"], expected_counts=expected,
+                       content_identity_before=receipt["content_identity"], expected_counts=expected,
                        verification_receipt=str(verification_receipt),
                        verification_receipt_sha256=sha256(Path(verification_receipt)),
                        fingerprint_receipt_sha256=sha256(Path(admission.expected_catalog_fingerprint)),
                        backup_receipt_sha256=sha256(Path(admission.backup_receipt)))
-        if output.exists():
-            previous = load_json(output)
-            if (previous.get("format") != APPROVED_FORMAT or previous.get("status") != "PASS"
-                    or any(previous.get(k) != v for k, v in binding.items())
-                    or fingerprint(path) != previous.get("catalog_fingerprint_after")):
-                raise AdmissionError("Approval replay receipt/fingerprint mismatch")
-            with duckdb.connect(str(path), read_only=True, config=READ_CONFIG) as c:
-                _inspect(c, admission, expected)
-                event = c.execute(
-                    f"SELECT p.snapshot_id,p.event_id,e.known_at FROM {SCHEMA}.dataset_pointer p "
-                    f"JOIN {SCHEMA}.visibility_event e USING(event_id) WHERE p.adjustment_basis='unadjusted'"
-                ).fetchone()
-            if (event != (admission.approved_manifest_hash, previous["event_id"], timestamp(previous["known_at"]))
-                    or fingerprint(path) != previous["catalog_fingerprint_after"]):
-                raise AdmissionError("Approval replay pointer/fingerprint mismatch")
-            return dict(previous, changed=False, read_only=True)
-        # All expensive admission/reference/backup/reconciliation checks precede BEGIN.
-        admission.inspect()
+        previous = load_json(output) if output.exists() else None
+        if previous is not None and (previous.get("format") != APPROVED_FORMAT or previous.get("status") != "PASS"
+                         or any(previous.get(k) != v for k, v in binding.items())):
+            raise AdmissionError("Approval replay receipt/content mismatch")
+        # READ_ONLY first refuses all other native writers without opening our own writer.
         with duckdb.connect(str(path), read_only=True, config=READ_CONFIG) as c:
-            measured = _inspect(c, admission, expected)
-            if any(c.execute(f"SELECT count(*) FROM {SCHEMA}.{t}").fetchone()[0]
-                   for t in ("basis_admission", "visibility_event", "dataset_pointer")):
-                raise AdmissionError("Deferred approval requires zero admission/events/pointers")
-        if fingerprint(path) != observed["fingerprint"]:
-            raise AdmissionError("Catalog changed before approval writer")
-        with duckdb.connect(str(path), config=READ_CONFIG) as c:
+            if previous is None:
+                # Only the short native writer below recomputes the full content.
+                require_unpublished(receipt["content_identity"])
+        if previous is not None:
+            with (duckdb.connect(str(path), read_only=True, config=READ_CONFIG) as c,
+                  bounded_sql(c, time.monotonic()+1200)):
+                actual = content_identity(c, admission.approved_manifest_hash, admission.approved_batch_size)
+                require_identity(actual, previous.get("content_identity_after"))
+            no_wal(path)
+            return dict(previous, changed=False, read_only=True)
+        # An existing same-process read-write handle would defeat the exclusive
+        # cross-process lock. Probe read-only above rejects such a handle too.
+        with duckdb.connect(str(path), config=READ_CONFIG) as c, bounded_sql(c, time.monotonic()+1200):
             c.execute("SET TimeZone='UTC'")
-            if fingerprint(path) != observed["fingerprint"]:
-                raise AdmissionError("Catalog changed while opening approval writer")
+            actual = content_identity(c, admission.approved_manifest_hash, admission.approved_batch_size)
+            require_identity(actual, receipt["content_identity"])
+            require_unpublished(actual)
             started = time.monotonic()
             with transaction(c):
                 now = utcnow()
@@ -248,10 +266,13 @@ def approve_visibility(admission: ProductionAdmission, verification_receipt, *, 
                           [admission.approved_manifest_hash])
                 if fault_hook:
                     fault_hook(c)
+                # Only three small control tables changed; hash them before COMMIT.
+                from openbb_duckdb.baostock18.content_identity import after_publication
+                after = after_publication(c, actual)
             transaction_seconds = time.monotonic() - started
         no_wal(path)
         result = dict(binding, format=APPROVED_FORMAT, status="PASS", changed=True,
-                      event_id=1, known_at=now.isoformat(), measured=measured,
-                      transaction_seconds=transaction_seconds, catalog_fingerprint_after=fingerprint(path))
+                      event_id=1, known_at=now.isoformat(), measured=actual["measured"],
+                      transaction_seconds=transaction_seconds, content_identity_after=after)
         write_json(output, result)
         return result
