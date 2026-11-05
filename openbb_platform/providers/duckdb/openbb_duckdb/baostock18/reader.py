@@ -13,7 +13,7 @@ from openbb_duckdb.baostock18.contract import SCHEMA, AdmissionError, require_ba
 
 @contextmanager
 def _existing_read_lock(path):
-    """Use an existing platform lock O_RDONLY, nonblocking; never create one."""
+    """Share an existing lock O_RDONLY; fail immediately on a writer, never create."""
     lock = path.with_suffix(".market.lock")
     if not lock.exists():
         yield
@@ -22,7 +22,7 @@ def _existing_read_lock(path):
 
     with lock.open("rb") as stream:
         try:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(stream.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise AdmissionError("Market catalog busy; reader did not wait or create a lock") from exc
         try:

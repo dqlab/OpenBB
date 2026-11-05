@@ -118,7 +118,21 @@ def timestamp(value):
 
 @contextmanager
 def market_lock(path):
-    """Hold the existing platform mutex O_RDONLY, nonblocking, through close."""
+    """Hold the existing exclusive writer mutex, nonblocking, through close."""
+    with _market_lock(path, fcntl.LOCK_EX):
+        yield
+
+
+@contextmanager
+def market_read_lock(path):
+    """Share the existing lock for read-only audits; never wait or create a file."""
+    with _market_lock(path, fcntl.LOCK_SH):
+        yield
+
+
+@contextmanager
+def _market_lock(path, mode):
+    """Validate the existing O_RDONLY lock and retain its identity through close."""
     lock = path.with_suffix(".market.lock")
     try:
         fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW)
@@ -129,7 +143,7 @@ def market_lock(path):
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise AdmissionError("market.lock must be a single regular file")
         try:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(stream.fileno(), mode | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise AdmissionError("market.lock busy; no other writer may hold it") from exc
         try:

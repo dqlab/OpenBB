@@ -112,9 +112,27 @@ Before first visibility or after withdrawal it returns an empty list.
 The reader opens `read_only=True`, disables external access, bounds date/symbols
 and limits rows to 100,000 (overflow raises, without silent truncation). It takes
 an existing market lock through an O_RDONLY descriptor and never creates one.
+The lock mode is `LOCK_SH|LOCK_NB`: readers and read-only audits can overlap;
+an exclusive writer causes immediate failure, without waiting or retrying.
+Production writers and publishers retain `LOCK_EX|LOCK_NB`.
 It refuses an access-window policy it cannot enforce. It does not read legacy
 wide bars or automatically approve any basis. This module is not registered as
 a new OpenBB router command; invoke the explicit API/CLI above.
+
+The independent full-catalog reference audit is reproducible from the installed
+provider, using a completed visibility task's existing evidence:
+
+```bash
+python -m openbb_duckdb.baostock18.full_audit \
+  --task /absolute/completed-visibility-task --output /absolute/new-audit-output
+```
+
+The audit requires an existing lock and takes `LOCK_SH|LOCK_NB` while its
+read-only DuckDB connection projects references. It releases both before hashing
+payloads. Readers can run throughout the audit. An EX writer makes the audit fail
+immediately; it never retries, creates a lock, or changes admission or visibility.
+Use a new output directory for each run. SIGINT/SIGTERM unwind the audit and save
+an `INTERRUPTED` report; previous evidence is retained.
 
 ## Validation
 
