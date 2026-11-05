@@ -1,0 +1,197 @@
+# BaoStock18 offline admission
+
+`openbb_duckdb.baostock18` stages a separate narrow price-basis dataset. It is
+a Python API and CLI, with no acquisition calls. The explicit production
+admission commands and maintenance-window sequence are documented in
+[BAOSTOCK18_PRODUCTION.md](BAOSTOCK18_PRODUCTION.md).
+Install `openbb-duckdb[baostock18]` to supply PyArrow for the importer. The reader
+needs DuckDB only (in addition to the provider's normal OpenBB dependencies).
+No provider registration, router, service or `a_share` table/view is changed.
+
+## Contract and migration
+
+`migrations/001_narrow_basis.sql` is applied transactionally with a recorded
+SHA256. A later run refuses a changed migration/version. A writer first inspects
+an existing file read-only and refuses catalogs containing other datasets. There
+is no default database path. Use a dedicated local scratch file; this command is
+not a production entrypoint. Production-named catalogs additionally require the
+separate explicit production authorization.
+
+The Python functions `import_candidate` and `set_visible` accept an explicit
+`rehearsal_receipt` for a production-shape **copy**. The CLI has no such option.
+The JSON receipt must be adjacent to an existing `rehearsal.duckdb`, use format
+`baostock18-rehearsal-clone-v1`, declare purpose
+`migration rehearsal only; NOT a production backup` and `production_admitted:
+false`, and bind its absolute `target_path`, `[st_dev, st_ino]` `target_identity`,
+distinct `source_path`/`source_physical_path`/`source_identity`, and exact
+`baseline_tables` pairs of schema/table names. Missing files, hard links, changed
+identities or table inventories, and access-window policies are rejected before
+a writable connection opens. Batch scratch tables are confined to the temporary
+catalog, including when a baseline table is named `main.batch`. The baseline tables are left intact; only the
+checksummed admission migration and its own rows are written. Generate this
+receipt only after verifying a new consistent clone. It is an explicit rehearsal
+opt-in, not a production permission or a backup certificate. Default calls still
+reject every catalog containing other datasets.
+
+For a large materialized candidate, sorting `row_lineage` by `value_id` allows
+each batch's parameterized value-id bounds to prune unrelated row groups while
+preserving all lineage matches.
+
+All tables live in `baostock18_admission`. A snapshot identity hashes a canonical
+manifest binding the source contract, transform, selection, the candidate file
+and **every local Parquet dependency**. Extra evidence files can bind raw hash
+ledgers and selection receipts. The manifest verifies those bytes, not the
+underlying raw archive entries named in a ledger. Raw reachability and payload
+re-audit remain separate admission checks.
+
+`literal_version` retains the exact eighteen strings (including empty strings),
+requested/actual flags, original quality flags and disposition, keyed by
+`(snapshot_id,value_id)`. This composite key also expresses snapshot membership;
+typed `bar_version` has a unique `(snapshot_id,symbol,date,adjustment_basis)` and
+foreign keys to literals. `row_lineage` retains every matching capture/page/row,
+source/body/receipt hashes, source path, source status, complete/partial state,
+terminal/historical status and complete capture JSON. `quality` records versioned
+rules. There are no invented job, reference, factor or historical availability
+records. `source_available_at` stays NULL; local import/visibility times do not
+make reconstructed captures PIT safe.
+
+Prices and ratios use DECIMAL(38,18), volume uses integer shares, amount is CNY,
+and the session timezone is Asia/Shanghai. Percent strings are multiplied by an
+exact decimal 0.01. Excess precision is quarantined instead of rounded. NULL and
+zero stay distinct. Empty core prices, flag mismatch, invalid identity, numeric
+or OHLC data, conflicts and inadmissible sources are quarantined. Source partial,
+warning or unknown/conflicting calendar states stay conditional. Neither cohort
+enters the clean consumption view. No missing dates/prices are filled.
+
+Both requested=actual=3 (`unadjusted`) and requested=actual=2
+(`forward_dynamic_snapshot`) can be staged as narrow typed records. Only clean
+unadjusted data can be explicitly admitted for consumption. The reader refuses
+missing base, forward/backward/ambiguous or unapproved basis, and any fixed
+2026-10-15 forward adjustment request. Dynamic captures are never combined to
+claim a fixed forward base.
+
+## Import and read
+
+```bash
+python -m openbb_duckdb.baostock18 manifest \
+  --candidate /absolute/candidate.duckdb --output /scratch/manifest.json \
+  --start-date 1990-12-19 --end-date 2026-10-15
+python -m openbb_duckdb.baostock18 import \
+  --manifest /scratch/manifest.json --target /scratch/offline.duckdb \
+  --batch-size 50000
+```
+
+The importer streams sorted literals in 50,000--100,000 row batches (a final
+batch may be smaller). Each transaction includes literals, all matching lineage,
+quality, typed bars and its receipt. Receipts save last value ID, digest,
+classification counts, lineage count, actual commit time and elapsed seconds.
+Interruption rolls back the entire current batch. Retrying the identical frozen
+manifest resumes after the last committed ID. Completed replay is a no-op.
+Any changed source needs a new manifest/snapshot. A snapshot becomes `ready`
+only after input, stored literals and receipt counts reconcile; importing never
+changes the visible pointer.
+
+After reviewing the local receipt, use its actual clean unadjusted count:
+
+```bash
+python -m openbb_duckdb.baostock18 visible --target /scratch/offline.duckdb \
+  --snapshot-id <manifest-sha256> --basis unadjusted --expected-clean-rows <count>
+python -m openbb_duckdb.baostock18 read --database /scratch/offline.duckdb \
+  --symbols SH.600000 --start-date 2026-10-13 --end-date 2026-10-15 \
+  --basis unadjusted --limit 100 --as-of 2026-11-04T04:00:00+00:00
+```
+
+Pointer changes are short transactions with append-only visibility events.
+Omitting `--snapshot-id` in `visible` records a withdrawal; prior as-of queries
+still resolve the former event. Each version replaces its complete selected
+scope, so removed dates/symbols do not silently fall back to older snapshots.
+`consumable` joins the current admitted pointer, ready snapshot and clean literals.
+`read_bars` uses the same filters, resolving the event at `as_of` when supplied.
+Before first visibility or after withdrawal it returns an empty list.
+
+The reader opens `read_only=True`, disables external access, bounds date/symbols
+and limits rows to 100,000 (overflow raises, without silent truncation). It takes
+an existing market lock through an O_RDONLY descriptor and never creates one.
+The lock mode is `LOCK_SH|LOCK_NB`: readers and read-only audits can overlap;
+an exclusive writer causes immediate failure, without waiting or retrying.
+Production writers and publishers retain `LOCK_EX|LOCK_NB`.
+It refuses an access-window policy it cannot enforce. It does not read legacy
+wide bars or automatically approve any basis. This module is not registered as
+a new OpenBB router command; invoke the explicit API/CLI above.
+
+The independent full-catalog reference audit is reproducible from the installed
+provider, using a completed visibility task's existing evidence:
+
+```bash
+python -m openbb_duckdb.baostock18.full_audit \
+  --task /absolute/completed-visibility-task --output /absolute/new-audit-output
+```
+
+The audit requires an existing lock and takes `LOCK_SH|LOCK_NB` while its
+read-only DuckDB connection projects references. It releases both before hashing
+payloads. Readers can run throughout the audit. An EX writer makes the audit fail
+immediately; it never retries, creates a lock, or changes admission or visibility.
+Use a new output directory for each run. SIGINT/SIGTERM unwind the audit and save
+an `INTERRUPTED` report; previous evidence is retained.
+
+## Validation
+
+```bash
+python -m pytest openbb_platform/providers/duckdb/tests
+python -m ruff check openbb_platform/providers/duckdb
+```
+
+Tests use synthetic local responses and exercise real DuckDB transactions,
+interrupt/resume, replay, 15,838 rejected versions, partial/warning lineage,
+exact decimal ratios, dependency hashes, as-of correction/date removal,
+withdrawal, basis rejection, reader bounds, checksummed migrations and refusal
+of a foreign catalog. Real candidate rehearsal receipts and old/new
+reconciliation belong in the application run directory, not this source tree.
+
+Production execution requires approved input/batch/baseline artifacts, independent
+raw/reference acceptance and a maintenance/backup window. Implementing or testing
+the production entrypoint on a local copy does not mean central admission occurred.
+
+## Deferred production visibility and catalog-only backup
+
+The shared driver requires `visibility="deferred"` together with explicit
+`backup_scope="catalog_only"`. Immediate visibility forbids this scope.
+`production-backup --backup-scope catalog_only --visibility deferred` copies
+exactly the checkpointed catalog, independently hashes the destination, restores
+it into a new directory, and opens the restored database read-only. The restore
+must match the approved eight `a_share` table counts and inventory, contain zero
+admission tables, and pass a bounded legacy query. No external reference is
+enumerated, hashed or copied in this scope. Its receipt explicitly declares
+`reference_verification="deferred_to_visibility_verify"`; it certifies the
+catalog copy only. Reference manifests, contracts and dependencies are refused.
+The catalog backup/restore deadline remains at most 14400 seconds.
+
+After batches reconcile, the driver checks that admission/events/pointers remain
+zero, checkpoints the staged catalog and returns
+`IMPORT_COMPLETE_VISIBILITY_DEFERRED`. The receipt includes the baseline
+`restore_check` and a fingerprint binding the imported, unpublished catalog.
+Service recovery may then proceed. The importer still validates the frozen
+candidate/Parquet bytes; deferring references does not weaken input identity.
+
+Run the receipt's `visibility-verify` command after recovery. It opens the target
+read-only, freezes capture directories, enumerates every catalog/JSON reference,
+recomputes every referenced file's SHA256, independently verifies the frozen
+inventory, and checks a new staged catalog backup/restore. Its reference scope is
+always `catalog_with_reference_verification`; recorded hashes with sampling
+cannot replace exhaustive byte reads. Streaming reference inventories have a
+4 GiB limit; other metadata keeps the 64 MiB/file and 256 MiB aggregate limits.
+`max_visibility_verify_seconds` bounds the exhaustive backup/restore phase
+(default/maximum 43200 seconds); `max_freeze_seconds` and `max_verify_seconds`
+retain their separate enumeration and SQL/capture bounds. Only explicit deferred
+exhaustive verification can use this extended backup deadline. A changed target
+fingerprint fails verification and cannot silently rebind to a different catalog.
+
+Only a `PASS` verification receipt bound to the same target, fingerprint,
+manifest, batch size, baseline and backup can authorize `visibility-approve`.
+The caller supplies measured clean/quarantine/batch counts (for the production
+packet: 18440145 / 15838 / 185); they must match stored reconciliation and the
+verification receipt. All expensive checks precede the short transaction that
+inserts admission, event and pointer atomically. Repeating the exact command with
+the same approval output is read-only and idempotent; changed fingerprints or
+counts fail closed. Verify current and as-of bounded reads at the recorded
+`known_at`; quarantine remains excluded.
