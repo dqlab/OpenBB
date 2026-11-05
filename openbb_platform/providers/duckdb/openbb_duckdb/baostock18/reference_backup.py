@@ -25,9 +25,10 @@ from openbb_duckdb.baostock18.backup import BLOCK_BYTES
 from openbb_duckdb.baostock18.contract import AdmissionError
 
 REDUCED_SCOPE = "catalog_with_reference_verification"
+CATALOG_ONLY = "catalog_only"
 RECORDED_SCOPE = "catalog_with_recorded_reference_verification"
 REFERENCE_SCOPES = (REDUCED_SCOPE, RECORDED_SCOPE)
-SCOPES = ("full", *REFERENCE_SCOPES)
+SCOPES = ("full", CATALOG_ONLY, *REFERENCE_SCOPES)
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
 PATH_COLUMN = re.compile(r"(?:^|_)(?:path|key|uri|url|location)$")

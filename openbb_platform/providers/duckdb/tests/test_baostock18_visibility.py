@@ -59,6 +59,8 @@ def packet(root, visibility="deferred"):
                   expected_batches=1, reader_limit=3)
     if visibility is not None:
         config["visibility"] = visibility
+    if visibility == "deferred":
+        config["backup_scope"] = "catalog_only"
     return config
 
 
@@ -111,6 +113,69 @@ def test_unknown_visibility_is_refused(tmp_path, bad):
     with pytest.raises(AdmissionError, match="visibility"):
         Driver(config)
     assert not Path(config["output"]).exists()
+
+
+@pytest.mark.parametrize("visibility,scope", [("deferred", "catalog_with_reference_verification"),
+                                             ("deferred", "catalog_with_recorded_reference_verification"),
+                                             ("immediate", "catalog_only")])
+def test_driver_refuses_incompatible_backup_scope(tmp_path, visibility, scope):
+    """Reject incompatible packets before any output directory or writer exists."""
+    config = packet(tmp_path, visibility)
+    config["backup_scope"] = scope
+    with pytest.raises(AdmissionError, match="catalog_only"):
+        Driver(config)
+    assert not Path(config["output"]).exists()
+
+
+def test_catalog_only_defers_all_reference_access(tmp_path, monkeypatch):
+    """Even missing capture directories cannot trigger reference IO in this phase."""
+    import openbb_duckdb.baostock18.driver as module
+
+    config = packet(tmp_path)
+    (tmp_path / "raw/capture.json.gz/page-000.body").rename(tmp_path / "retained.body")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("catalog_only must defer reference enumeration/hashing")
+
+    monkeypatch.setattr(module, "precheck_input_references", forbidden)
+    monkeypatch.setattr(module, "reference_contract", forbidden)
+    monkeypatch.setattr(module, "freeze_reference_inventory", forbidden)
+    result = Driver(config).run()
+    assert result["status"] == DEFERRED
+    backup = load_json(tmp_path / "import-run/before-import-backup/receipt.json")
+    assert backup["reference_verification"] == "deferred_to_visibility_verify"
+    restore = backup["restore_check"]
+    assert restore["read_only"] and restore["admission_physical_tables"] == 0
+    assert restore["a_share_counts"] == load_json(config["baseline"])["a_share_counts"]
+    assert restore["bounded_query_rows"] == 1
+    assert not (tmp_path / "import-run/before-import-references.jsonl").exists()
+    target = Path(config["target"])
+    before = fingerprint(target), sha256(target)
+    monkeypatch.undo()
+    # Restoring reachability alone cannot invent bytes that were never verified.
+    (tmp_path / "raw/capture.json.gz").rename(tmp_path / "retained-capture")
+    with pytest.raises(AdmissionError, match="capture verification"):
+        verify_deferred(config, tmp_path / "import-run/receipt.json", tmp_path / "verify-run")
+    assert load_json(tmp_path / "verify-run/receipt.json")["status"] == "FAIL"
+    assert (fingerprint(target), sha256(target)) == before
+    assert read(target, basis="unadjusted") == []
+
+
+def test_approve_refuses_recorded_reference_sampling(verified_packet, tmp_path):
+    """A real PASS receipt downgraded to recorded sampling cannot authorize a writer."""
+    admission = admission_from(verified_packet)
+    backup = load_json(admission.backup_receipt)
+    backup["scope"] = "catalog_with_recorded_reference_verification"
+    backup_path = tmp_path / "recorded-backup.json"
+    write_json(backup_path, backup)
+    verified = load_json(verified_packet / "verify-run/receipt.json")
+    verified.update(backup_receipt=str(backup_path), backup_receipt_sha256=sha256(backup_path))
+    verified_path = tmp_path / "verification.json"
+    write_json(verified_path, verified)
+    with pytest.raises(AdmissionError, match="PASS"):
+        approve_visibility(replace(admission, backup_receipt=str(backup_path)), verified_path,
+                           expected_clean_rows=2, expected_quarantine=3, expected_batches=1,
+                           output=tmp_path / "approval.json")
 
 
 @pytest.mark.parametrize("config,state,pointer,success", [

@@ -133,3 +133,47 @@ reconciliation belong in the application run directory, not this source tree.
 Production execution requires approved input/batch/baseline artifacts, independent
 raw/reference acceptance and a maintenance/backup window. Implementing or testing
 the production entrypoint on a local copy does not mean central admission occurred.
+
+## Deferred production visibility and catalog-only backup
+
+The shared driver requires `visibility="deferred"` together with explicit
+`backup_scope="catalog_only"`. Immediate visibility forbids this scope.
+`production-backup --backup-scope catalog_only --visibility deferred` copies
+exactly the checkpointed catalog, independently hashes the destination, restores
+it into a new directory, and opens the restored database read-only. The restore
+must match the approved eight `a_share` table counts and inventory, contain zero
+admission tables, and pass a bounded legacy query. No external reference is
+enumerated, hashed or copied in this scope. Its receipt explicitly declares
+`reference_verification="deferred_to_visibility_verify"`; it certifies the
+catalog copy only. Reference manifests, contracts and dependencies are refused.
+The catalog backup/restore deadline remains at most 14400 seconds.
+
+After batches reconcile, the driver checks that admission/events/pointers remain
+zero, checkpoints the staged catalog and returns
+`IMPORT_COMPLETE_VISIBILITY_DEFERRED`. The receipt includes the baseline
+`restore_check` and a fingerprint binding the imported, unpublished catalog.
+Service recovery may then proceed. The importer still validates the frozen
+candidate/Parquet bytes; deferring references does not weaken input identity.
+
+Run the receipt's `visibility-verify` command after recovery. It opens the target
+read-only, freezes capture directories, enumerates every catalog/JSON reference,
+recomputes every referenced file's SHA256, independently verifies the frozen
+inventory, and checks a new staged catalog backup/restore. Its reference scope is
+always `catalog_with_reference_verification`; recorded hashes with sampling
+cannot replace exhaustive byte reads. Streaming reference inventories have a
+4 GiB limit; other metadata keeps the 64 MiB/file and 256 MiB aggregate limits.
+`max_visibility_verify_seconds` bounds the exhaustive backup/restore phase
+(default/maximum 43200 seconds); `max_freeze_seconds` and `max_verify_seconds`
+retain their separate enumeration and SQL/capture bounds. Only explicit deferred
+exhaustive verification can use this extended backup deadline. A changed target
+fingerprint fails verification and cannot silently rebind to a different catalog.
+
+Only a `PASS` verification receipt bound to the same target, fingerprint,
+manifest, batch size, baseline and backup can authorize `visibility-approve`.
+The caller supplies measured clean/quarantine/batch counts (for the production
+packet: 18440145 / 15838 / 185); they must match stored reconciliation and the
+verification receipt. All expensive checks precede the short transaction that
+inserts admission, event and pointer atomically. Repeating the exact command with
+the same approval output is read-only and idempotent; changed fingerprints or
+counts fail closed. Verify current and as-of bounded reads at the recorded
+`known_at`; quarantine remains excluded.

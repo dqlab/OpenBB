@@ -26,6 +26,7 @@ from openbb_duckdb.baostock18.backup import backup_items, copy_manifest
 from openbb_duckdb.baostock18.contract import SCHEMA, TRANSFORM, AdmissionError
 from openbb_duckdb.baostock18.manifest import encoded, sha256
 from openbb_duckdb.baostock18.reference_backup import (
+    CATALOG_ONLY,
     RECORDED_SCOPE,
     REDUCED_SCOPE,
     REFERENCE_SCOPES,
@@ -267,6 +268,19 @@ class ProductionAdmission:
         scope = receipt.get("scope", "full")
         if scope not in SCOPES or ("scope" not in receipt and "reference_verification" in receipt):
             raise AdmissionError("Unknown backup receipt scope")
+        if scope == CATALOG_ONLY:
+            restore = receipt.get("restore_check", {})
+            if (self.visibility != "deferred"
+                    or receipt.get("reference_verification") != "deferred_to_visibility_verify"
+                    or receipt.get("restore_admission_state") != "baseline"
+                    or receipt.get("wal") != {"before": "absent", "after": "absent"}
+                    or restore.get("status") != "passed" or restore.get("read_only") is not True
+                    or restore.get("admission_physical_tables") != 0
+                    or restore.get("a_share_counts") != load_json(self.baseline)["a_share_counts"]
+                    or restore.get("sha256") != receipt.get("catalog_sha256_before")
+                    or receipt.get("catalog_sha256_before") != receipt.get("catalog_sha256_after")
+                    or type(restore.get("bounded_query_rows")) is not int):
+                raise AdmissionError("catalog_only requires deferred visibility and baseline restore_check")
         if (receipt.get("format") != "baostock18-production-backup-v1"
                 or receipt.get("target") != self.target
                 or receipt.get("catalog_fingerprint") != observed["fingerprint"]
@@ -344,7 +358,9 @@ class ProductionAdmission:
                 or sha256(manifest_path) != receipt.get("manifest_sha256")):
             raise AdmissionError("Backup manifest hash mismatch")
         catalog = []
+        payload_count = 0
         for item in backup_items(manifest_path):
+            payload_count += 1
             backup = Path(item["backup"])
             if (not backup.is_absolute() or not backup.is_file() or backup.is_symlink()
                     or backup.resolve() != backup
@@ -355,7 +371,9 @@ class ProductionAdmission:
                 catalog.append(item)
         if len(catalog) != 1 or catalog[0]["size"] != observed["fingerprint"]["size"]:
             raise AdmissionError("Backup manifest must contain exactly this catalog")
-        if scope in REFERENCE_SCOPES and catalog[0]["sha256"] != receipt["catalog_sha256_before"]:
+        if scope == CATALOG_ONLY and payload_count != 1:
+            raise AdmissionError("catalog_only manifest must contain only the catalog")
+        if scope in (*REFERENCE_SCOPES, CATALOG_ONLY) and catalog[0]["sha256"] != receipt["catalog_sha256_before"]:
             raise AdmissionError("Reduced backup catalog hash binding mismatch")
         # Compare full catalog bytes, not just the cheap header fingerprint.
         if catalog[0]["sha256"] != sha256(Path(self.target)):
@@ -383,19 +401,28 @@ def create_backup(admission, destination, checkpoint_receipt, dependencies=(), *
     path = production_path(admission.target)
     if backup_scope not in SCOPES:
         raise AdmissionError("Unknown backup scope")
+    if backup_scope == CATALOG_ONLY and (
+            admission.visibility != "deferred" or restore_admission_state != "baseline"
+            or dependencies or dependency_manifest is not None
+            or reference_manifest is not None or reference_contract is not None
+            or not isinstance(max_seconds, (int, float)) or not 0 < max_seconds <= 14400):
+        raise AdmissionError(
+            "catalog_only requires deferred visibility, baseline restore, no references/dependencies and cap <=14400")
     if restore_admission_state not in ("baseline", "staged_unpublished"):
         raise AdmissionError("Unknown restore admission state")
     if backup_scope == "full" and restore_admission_state != "baseline":
         raise AdmissionError("Explicit reduced scope required for staged restore verification")
     if backup_scope == "full" and (reference_manifest is not None or reference_contract is not None):
         raise AdmissionError("Reference verification requires explicit --backup-scope " + REDUCED_SCOPE)
+    scope_cap = (43200 if admission.visibility == "deferred" and backup_scope == REDUCED_SCOPE
+                 else MAX_REDUCED_SCOPE_BACKUP_SECONDS)
     if backup_scope in REFERENCE_SCOPES and (
             reference_manifest is None or reference_contract is None or dependency_manifest is not None
             or not isinstance(max_seconds, (int, float))
-            or not 0 < max_seconds <= MAX_REDUCED_SCOPE_BACKUP_SECONDS):
+            or not 0 < max_seconds <= scope_cap):
         raise AdmissionError(
             "Reduced scope requires reference inventory/contract and "
-            f"0 < cap <= {MAX_REDUCED_SCOPE_BACKUP_SECONDS} seconds"
+            f"0 < cap <= {scope_cap} seconds"
         )
     started = time.monotonic()
     destination = Path(destination)
@@ -414,7 +441,11 @@ def create_backup(admission, destination, checkpoint_receipt, dependencies=(), *
                 or not timestamp(admission.window_started_at) <= timestamp(checkpoint.get("completed_at"))
                 <= timestamp(observed["observed_at"])):
             raise AdmissionError("Completed CHECKPOINT receipt required before backup")
-        if backup_scope in REFERENCE_SCOPES:
+        if backup_scope == CATALOG_ONLY:
+            reduced = _copy_catalog_only(admission, path, destination, started + max_seconds)
+            manifest_path = destination / "manifest.json"
+            transfer = None
+        elif backup_scope in REFERENCE_SCOPES:
             reduced = _copy_catalog_with_verification(
                 admission, path, destination, dependencies, reference_manifest,
                 reference_contract, observed["fingerprint"], started + max_seconds,
@@ -445,7 +476,7 @@ def create_backup(admission, destination, checkpoint_receipt, dependencies=(), *
                    "baseline_sha256": sha256(Path(admission.baseline)),
                    "manifest": str(manifest_path), "manifest_sha256": sha256(manifest_path),
                    "completed_at": utcnow().isoformat()}
-        if backup_scope in REFERENCE_SCOPES:
+        if backup_scope in (*REFERENCE_SCOPES, CATALOG_ONLY):
             no_wal(path)
             receipt.update(reduced, seconds=time.monotonic() - started,
                            wal={"before": "absent", "after": "absent"})
@@ -454,6 +485,23 @@ def create_backup(admission, destination, checkpoint_receipt, dependencies=(), *
             receipt["transfer"] = transfer
         write_json(destination / "receipt.json", receipt)
         return receipt
+
+
+def _copy_catalog_only(admission, path, destination, deadline):
+    """Copy exactly one catalog, independently hash and restore it; defer all references."""
+    destination.mkdir(parents=True, exist_ok=False)
+    started = time.monotonic()
+    copied = copy_checked(path, destination / "catalog.backup", deadline)
+    seconds = time.monotonic() - started
+    write_json(destination / "manifest.json", {"format": "baostock18-backup-files-v1", "files": [copied]})
+    restore = restore_catalog(destination / "catalog.backup", destination / "restore_check",
+                              load_json(admission.baseline), copied["sha256"], deadline)
+    after = stable_hash(path, deadline)[1]
+    if after != copied["sha256"]:
+        raise AdmissionError("Catalog changed after catalog_only restore")
+    return dict(reference_verification="deferred_to_visibility_verify", restore_admission_state="baseline",
+                catalog_copy_bytes=copied["size"], catalog_copy_seconds=seconds,
+                catalog_sha256_before=copied["sha256"], catalog_sha256_after=after, restore_check=restore)
 
 
 def restore_catalog(backup, destination, baseline, expected_hash, deadline, *, staged=None):
@@ -502,7 +550,7 @@ def _copy_catalog_with_verification(admission, path, destination, dependencies,
     metadata = [Path(reference_contract), Path(reference_manifest), *(Path(p) for p in dependencies)]
     if len(set(metadata)) != len(metadata) or path in metadata:
         raise AdmissionError("Duplicate catalog/metadata source")
-    small_metadata = [p for p in metadata if scope != RECORDED_SCOPE or p != Path(reference_manifest)]
+    small_metadata = [p for p in metadata if p != Path(reference_manifest)]
     if (Path(reference_manifest).stat().st_size > 4 * 1024**3
             or any(p.stat().st_size > 64 * 1024 * 1024 for p in small_metadata)
             or sum(p.stat().st_size for p in small_metadata) > 256 * 1024 * 1024):

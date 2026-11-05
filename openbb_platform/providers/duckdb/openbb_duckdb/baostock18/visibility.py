@@ -28,7 +28,7 @@ from openbb_duckdb.baostock18.production import (
     timestamp,
     write_json,
 )
-from openbb_duckdb.baostock18.reference_backup import REFERENCE_SCOPES
+from openbb_duckdb.baostock18.reference_backup import CATALOG_ONLY, REDUCED_SCOPE
 from openbb_duckdb.baostock18.store import _check_owned, migrate, transaction, utcnow
 
 DEFERRED = "IMPORT_COMPLETE_VISIBILITY_DEFERRED"
@@ -52,10 +52,11 @@ def check_counts(actual, expected):
 
 def verify_deferred(config, deferred_receipt, output):
     """Resume only verification/backup gates, with no catalog writer or pointer change."""
-    from openbb_duckdb.baostock18.driver import Driver
+    from openbb_duckdb.baostock18.driver import Driver, precheck_input_references
 
     deferred = load_json(deferred_receipt)
     if (config.get("visibility") != "deferred" or deferred.get("status") != DEFERRED
+            or config.get("backup_scope") != CATALOG_ONLY or deferred.get("backup_scope") != CATALOG_ONLY
             or deferred.get("config") != config):
         raise AdmissionError("Matching deferred driver receipt/config required")
     target = production_path(config["target"])
@@ -72,7 +73,17 @@ def verify_deferred(config, deferred_receipt, output):
               "baseline_sha256": sha256(Path(config["baseline"])),
               "deferred_receipt": str(deferred_receipt), "deferred_receipt_sha256": sha256(Path(deferred_receipt))}
     try:
-        driver.capture_inventory = deferred["capture_reference_verification"]
+        driver.capture_inventory = precheck_input_references(
+            driver.config, destination=driver.root / "capture-directories.jsonl")
+        write_json(driver.root / "candidate-reference-precheck.json", driver.capture_inventory)
+        if driver.capture_inventory["status"] != "passed":
+            raise AdmissionError("Deferred capture verification failed")
+        # The original packet must select catalog_only. This read-only phase
+        # explicitly upgrades to exhaustive byte verification, never recorded sampling.
+        driver.scope = REDUCED_SCOPE
+        driver.cap = config.get("max_visibility_verify_seconds", 43200)
+        if not isinstance(driver.cap, (int, float)) or not 0 < driver.cap <= 43200:
+            raise AdmissionError("Visibility verification cap must be positive and <=43200")
         common = driver.prepare("after-import", staged=True,
                                 checkpoint_receipt=Path(config["output"]) / "staged-checkpoint.json")
         driver.cli("production-preflight", "preflight", common=common)
@@ -144,12 +155,15 @@ def _verification(admission, receipt_path, expected):
             or receipt.get("expected_counts") != expected
             or receipt.get("backup_receipt") != admission.backup_receipt
             or receipt.get("backup_receipt_sha256") != sha256(Path(admission.backup_receipt))
-            or backup.get("scope") not in REFERENCE_SCOPES
+            or backup.get("scope") != REDUCED_SCOPE
             or receipt.get("reference_verification") != backup.get("reference_verification")
             or receipt.get("verified", {}).get("verification") != "passed"):
         raise AdmissionError("Reference verification receipt must be PASS and bind the same fingerprint/approval")
     reference = receipt.get("reference_verification", {})
-    if reference.get("status") != "passed" or reference.get("missing") != 0 or reference.get("mismatch") != 0:
+    if (reference.get("status") != "passed" or reference.get("missing") != 0 or reference.get("mismatch") != 0
+            or reference.get("changed") != 0
+            or reference.get("coverage") != "all persistent file references in reviewed catalog contract"
+            or reference.get("contents_copied") is not False):
         raise AdmissionError("Reference verification receipt is not PASS")
     check_counts(receipt.get("verified", {}), expected)
     return receipt, observed

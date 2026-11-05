@@ -35,6 +35,7 @@ from openbb_duckdb.baostock18.production import (
     write_json,
 )
 from openbb_duckdb.baostock18.reference_backup import (
+    CATALOG_ONLY,
     PATH_COLUMN,
     PROVENANCE_COLUMNS,
     RECORDED_SCOPE,
@@ -250,8 +251,10 @@ class Driver:
         json_roots(config["json_root"])
         timestamp(config["window_started_at"])
         self.scope = config.get("backup_scope", REDUCED_SCOPE)
-        if self.scope not in REFERENCE_SCOPES:
+        if self.scope not in (*REFERENCE_SCOPES, CATALOG_ONLY):
             raise AdmissionError("Unknown driver backup scope")
+        if (self.visibility == "deferred") != (self.scope == CATALOG_ONLY):
+            raise AdmissionError("visibility deferred requires backup_scope catalog_only; immediate forbids it")
         self.cap = config["max_backup_seconds"]
         if not isinstance(self.cap, (int, float)) or not 0 < self.cap <= 14400:
             raise AdmissionError("Driver backup cap must be positive and <=14400")
@@ -343,6 +346,18 @@ class Driver:
             "--visibility",
             self.visibility,
         ]
+        if self.scope == CATALOG_ONLY:
+            result = self.cli(
+                "production-backup", label + "-backup",
+                "--checkpoint-receipt", self.root / (label + "-checkpoint.json"),
+                "--destination", self.root / (label + "-backup"),
+                "--backup-scope", CATALOG_ONLY, "--max-backup-seconds", self.cap,
+                common=common,
+            )
+            if (result["restore_check"]["status"] != "passed"
+                    or result["reference_verification"] != "deferred_to_visibility_verify"):
+                raise AdmissionError("catalog_only backup/restore reconciliation failed")
+            return common + ["--backup-receipt", str(self.root / (label + "-backup/receipt.json"))]
         started = time.monotonic()
         with market_lock(self.target):
             no_wal(self.target)
@@ -502,11 +517,13 @@ class Driver:
             "resolved_admission_root": str(Path(self.config["admission_root"]).resolve(strict=True)),
         }
         try:
-            candidate = precheck_input_references(self.config, destination=self.root / "capture-directories.jsonl")
+            candidate = (dict(status="deferred_to_visibility_verify", target_catalog_connections=0)
+                         if self.scope == CATALOG_ONLY else
+                         precheck_input_references(self.config, destination=self.root / "capture-directories.jsonl"))
             self.capture_inventory = candidate
             result["capture_reference_verification"] = candidate
             write_json(self.root / "candidate-reference-precheck.json", candidate)
-            if candidate["status"] != "passed":
+            if candidate["status"] not in ("passed", "deferred_to_visibility_verify"):
                 raise AdmissionError("Candidate capture directory verification failed")
             common = self.prepare("before-import")
             self.cli("production-preflight", "preflight", common=common)
@@ -537,6 +554,9 @@ class Driver:
                 result.update(
                     status=DEFERRED, visibility=self.visibility, imported=imported,
                     catalog_fingerprint=observed["fingerprint"],
+                    backup_scope=self.scope,
+                    reference_verification="deferred_to_visibility_verify",
+                    restore_check=load_json(self.root / "before-import-backup/receipt.json")["restore_check"],
                     visibility_counts=load_json(self.root / "unpublished.json")["visibility_counts"],
                     next_commands={
                         "verify": [sys.executable, "-m", "openbb_duckdb.baostock18", "visibility-verify",
