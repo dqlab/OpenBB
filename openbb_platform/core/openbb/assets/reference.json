@@ -10,6 +10,707 @@
             "openbb_obbject_extension": []
         }
     },
-    "paths": {},
-    "routers": {}
+    "paths": {
+        "/akshare/etf_option_contracts": {
+            "deprecated": {
+                "flag": null,
+                "message": null
+            },
+            "description": "Fetch the SSE/SZSE ETF option universe with explicit source provenance.",
+            "examples": "",
+            "parameters": {
+                "standard": [],
+                "akshare": [
+                    {
+                        "name": "exchange",
+                        "type": "Literal['SSE', 'SZSE']",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "choices": [],
+                        "multiple_items_allowed": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "source",
+                        "type": "Literal['official', 'sina'] | None",
+                        "description": "None",
+                        "default": "official",
+                        "optional": true,
+                        "choices": [],
+                        "multiple_items_allowed": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "underlyings",
+                        "type": "str | None | list[str | None]",
+                        "description": "Comma-separated ETF codes. Multiple items allowed.",
+                        "default": null,
+                        "optional": true,
+                        "choices": [],
+                        "multiple_items_allowed": true,
+                        "json_schema_extra": {}
+                    }
+                ]
+            },
+            "returns": {
+                "OBBject": [
+                    {
+                        "name": "results",
+                        "type": "AkshareEtfOptionContracts",
+                        "description": "Serializable results."
+                    },
+                    {
+                        "name": "provider",
+                        "type": "Optional[Literal['akshare']]",
+                        "description": "Provider name."
+                    },
+                    {
+                        "name": "warnings",
+                        "type": "Optional[list[Warning_]]",
+                        "description": "list of warnings."
+                    },
+                    {
+                        "name": "chart",
+                        "type": "Optional[Chart]",
+                        "description": "Chart object."
+                    },
+                    {
+                        "name": "extra",
+                        "type": "dict[str, Any]",
+                        "description": "Extra info."
+                    }
+                ]
+            },
+            "data": {
+                "standard": [],
+                "akshare": [
+                    {
+                        "name": "symbol",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "exchange",
+                        "type": "Literal['SSE', 'SZSE']",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "underlying",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "option_type",
+                        "type": "Literal['call', 'put']",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "strike",
+                        "type": "float",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "expiration",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "contract_unit",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "contract_trade_code",
+                        "type": "str | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "metadata_source",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "source_date",
+                        "type": "str | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "source_row",
+                        "type": "dict[str, Any] | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    }
+                ]
+            },
+            "model": "AkshareEtfOptionContracts",
+            "openapi_extra": {
+                "model": "AkshareEtfOptionContracts"
+            }
+        },
+        "/akshare/etf_option_quotes": {
+            "deprecated": {
+                "flag": null,
+                "message": null
+            },
+            "description": "Bounded Sina bid/ask and five-level quote batch, including error rows.",
+            "examples": "",
+            "parameters": {
+                "standard": [],
+                "akshare": [
+                    {
+                        "name": "symbols",
+                        "type": "str | list[str]",
+                        "description": "None Multiple items allowed.",
+                        "default": null,
+                        "optional": false,
+                        "choices": [],
+                        "multiple_items_allowed": true,
+                        "json_schema_extra": {}
+                    }
+                ]
+            },
+            "returns": {
+                "OBBject": [
+                    {
+                        "name": "results",
+                        "type": "AkshareEtfOptionQuotes",
+                        "description": "Serializable results."
+                    },
+                    {
+                        "name": "provider",
+                        "type": "Optional[Literal['akshare']]",
+                        "description": "Provider name."
+                    },
+                    {
+                        "name": "warnings",
+                        "type": "Optional[list[Warning_]]",
+                        "description": "list of warnings."
+                    },
+                    {
+                        "name": "chart",
+                        "type": "Optional[Chart]",
+                        "description": "Chart object."
+                    },
+                    {
+                        "name": "extra",
+                        "type": "dict[str, Any]",
+                        "description": "Extra info."
+                    }
+                ]
+            },
+            "data": {
+                "standard": [],
+                "akshare": [
+                    {
+                        "name": "symbol",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "quote_error",
+                        "type": "str | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "source_time",
+                        "type": "str | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "bid",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "ask",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "bid_size",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "ask_size",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "last",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "open_interest",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "volume",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "turnover",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "underlying",
+                        "type": "str | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "strike",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "contract_name",
+                        "type": "str | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "source_status",
+                        "type": "str | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "raw_fields",
+                        "type": "dict[str, Any] | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    }
+                ]
+            },
+            "model": "AkshareEtfOptionQuotes",
+            "openapi_extra": {
+                "model": "AkshareEtfOptionQuotes"
+            }
+        },
+        "/akshare/cffex_option_expiries": {
+            "deprecated": {
+                "flag": null,
+                "message": null
+            },
+            "description": "Discover all Sina-displayed maturities for an explicit IO, HO or MO product.",
+            "examples": "",
+            "parameters": {
+                "standard": [],
+                "akshare": [
+                    {
+                        "name": "product",
+                        "type": "Literal['IO', 'HO', 'MO']",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "choices": [],
+                        "multiple_items_allowed": false,
+                        "json_schema_extra": {}
+                    }
+                ]
+            },
+            "returns": {
+                "OBBject": [
+                    {
+                        "name": "results",
+                        "type": "AkshareCffexOptionExpiries",
+                        "description": "Serializable results."
+                    },
+                    {
+                        "name": "provider",
+                        "type": "Optional[Literal['akshare']]",
+                        "description": "Provider name."
+                    },
+                    {
+                        "name": "warnings",
+                        "type": "Optional[list[Warning_]]",
+                        "description": "list of warnings."
+                    },
+                    {
+                        "name": "chart",
+                        "type": "Optional[Chart]",
+                        "description": "Chart object."
+                    },
+                    {
+                        "name": "extra",
+                        "type": "dict[str, Any]",
+                        "description": "Extra info."
+                    }
+                ]
+            },
+            "data": {
+                "standard": [],
+                "akshare": [
+                    {
+                        "name": "product",
+                        "type": "Literal['IO', 'HO', 'MO']",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "expiry_symbol",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "universe_scope",
+                        "type": "Literal['sina_displayed_expiries']",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "source_sha256",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "fetched_at",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    }
+                ]
+            },
+            "model": "AkshareCffexOptionExpiries",
+            "openapi_extra": {
+                "model": "AkshareCffexOptionExpiries"
+            }
+        },
+        "/akshare/cffex_option_quotes": {
+            "deprecated": {
+                "flag": null,
+                "message": null
+            },
+            "description": "Fetch native bid/ask and sizes for one maturity; event clocks remain unknown.",
+            "examples": "",
+            "parameters": {
+                "standard": [],
+                "akshare": [
+                    {
+                        "name": "expiry_symbol",
+                        "type": "str",
+                        "description": "Exact native maturity such as io2610, ho2610 or mo2610.",
+                        "default": null,
+                        "optional": false,
+                        "choices": [],
+                        "multiple_items_allowed": false,
+                        "json_schema_extra": {}
+                    }
+                ]
+            },
+            "returns": {
+                "OBBject": [
+                    {
+                        "name": "results",
+                        "type": "AkshareCffexOptionQuotes",
+                        "description": "Serializable results."
+                    },
+                    {
+                        "name": "provider",
+                        "type": "Optional[Literal['akshare']]",
+                        "description": "Provider name."
+                    },
+                    {
+                        "name": "warnings",
+                        "type": "Optional[list[Warning_]]",
+                        "description": "list of warnings."
+                    },
+                    {
+                        "name": "chart",
+                        "type": "Optional[Chart]",
+                        "description": "Chart object."
+                    },
+                    {
+                        "name": "extra",
+                        "type": "dict[str, Any]",
+                        "description": "Extra info."
+                    }
+                ]
+            },
+            "data": {
+                "standard": [],
+                "akshare": [
+                    {
+                        "name": "symbol",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "product",
+                        "type": "Literal['IO', 'HO', 'MO']",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "expiry_symbol",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "exchange",
+                        "type": "Literal['CFFEX']",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "underlying_symbol",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "underlying_source_symbol",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "option_type",
+                        "type": "Literal['call', 'put']",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "strike",
+                        "type": "float",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "expiration",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "contract_unit",
+                        "type": "None | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "source_time",
+                        "type": "None | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "bid",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "ask",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "bid_size",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "ask_size",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "last",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "open_interest",
+                        "type": "float | None",
+                        "description": "None",
+                        "default": null,
+                        "optional": true,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "source_info",
+                        "type": "dict[str, Any]",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "raw_fields",
+                        "type": "dict[str, Any]",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "quote_diagnostics",
+                        "type": "list[str]",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "source_sha256",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    },
+                    {
+                        "name": "fetched_at",
+                        "type": "str",
+                        "description": "None",
+                        "default": null,
+                        "optional": false,
+                        "json_schema_extra": {}
+                    }
+                ]
+            },
+            "model": "AkshareCffexOptionQuotes",
+            "openapi_extra": {
+                "model": "AkshareCffexOptionQuotes"
+            }
+        }
+    },
+    "routers": {
+        "/akshare": {
+            "description": "Complete AKShare datasets, preserving source column names and units."
+        }
+    }
 }

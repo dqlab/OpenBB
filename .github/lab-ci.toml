@@ -112,7 +112,13 @@ suites = ["openbb_platform/providers/ctp/tests"]
 # Registry inventory and suite ownership, not per-fetcher dynamic coverage.
 # Every declared suite must pass in the current CI attempt.
 [provider_tests.akshare]
-models = ["FuturesHistorical"]
+models = [
+  "FuturesHistorical",
+  "AkshareEtfOptionContracts",
+  "AkshareEtfOptionQuotes",
+  "AkshareCffexOptionExpiries",
+  "AkshareCffexOptionQuotes",
+]
 families = ["openbb_akshare.models.native:NATIVE_FETCHERS"]
 suites = ["openbb_platform/providers/akshare/tests"]
 
@@ -162,6 +168,10 @@ commands = [
     "futures_zh_minute_sina",
     "stock_zh_index_daily",
     "tool_trade_date_hist_sina",
+    "etf_option_contracts",
+    "etf_option_quotes",
+    "cffex_option_expiries",
+    "cffex_option_quotes",
 ]
 suites = ["openbb_platform/providers/akshare/tests"]
 prefix = "/akshare"
