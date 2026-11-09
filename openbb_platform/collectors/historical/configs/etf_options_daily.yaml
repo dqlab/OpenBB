@@ -1,0 +1,29 @@
+version: 1
+root: ../state/etf_options
+calendar_file: etf-options-calendar.json
+exchanges:
+  SSE:
+    source: sina
+    underlyings: ["510050", "510300", "510500", "588000", "588080"]
+  SZSE:
+    source: official
+    underlyings: ["159901", "159915", "159919", "159922"]
+limits:
+  provider: akshare
+  credentials_env: {}
+  timeout_seconds: 180.0
+  min_interval_seconds: 2.0
+  max_rows: 10000
+  max_response_bytes: 8000000
+  retries: 1
+  retry_delay_seconds: 3.0
+block_size: 50
+max_requests: 100
+max_run_seconds: 1500.0
+not_before: "15:10"
+quote_not_before: "14:57"
+source_id: etf_options
+delivery:
+  transport: local
+  collector_id: openbb-etf-options
+  destination_root: ../../../dq-quant-invest-data/data/bronze/market-data
