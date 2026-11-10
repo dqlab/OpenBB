@@ -18,10 +18,20 @@ def scrub_string(key):
     """Scrub a string from the response."""
 
     def before_record_response(response):
-        response["headers"][key] = response["headers"].update({key: "MOCK_VALUE"})
+        if key in response["headers"]:
+            response["headers"][key] = ["MOCK_VALUE"]
         return response
 
     return before_record_response
+
+
+def test_scrub_string_replaces_only_existing_header():
+    """Keep recorded header values valid and do not introduce missing headers."""
+    scrub = scrub_string("Etag")
+    response = {"headers": {"Etag": ["sensitive"], "Other": ["value"]}}
+    assert scrub(response)["headers"] == {"Etag": ["MOCK_VALUE"], "Other": ["value"]}
+    missing = {"headers": {"Other": ["value"]}}
+    assert scrub(missing)["headers"] == {"Other": ["value"]}
 
 
 @pytest.fixture(scope="module")

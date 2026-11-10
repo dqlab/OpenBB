@@ -50,7 +50,6 @@ interactions:
       - application/json
       Date:
       - Sun, 06 Oct 2024 18:59:51 GMT
-      Etag: null
       Expires:
       - Sun, 06 Oct 2024 18:59:51 GMT
       Pragma:
@@ -61,16 +60,10 @@ interactions:
       Vary:
       - Accept-Encoding
       - Accept-Encoding
-      Via: null
-      X-Amz-Cf-Id: null
-      X-Amz-Cf-Pop: null
-      X-Api-Umbrella-Request-Id: null
-      X-Cache: null
       X-Content-Type-Options:
       - nosniff
       X-Frame-Options:
       - SAMEORIGIN
-      X-Vcap-Request-Id: null
       X-Xss-Protection:
       - 1; mode=block
     status:
@@ -126,7 +119,6 @@ interactions:
       - application/json
       Date:
       - Sun, 06 Oct 2024 18:59:51 GMT
-      Etag: null
       Expires:
       - Sun, 06 Oct 2024 18:59:51 GMT
       Pragma:
@@ -137,16 +129,10 @@ interactions:
       Vary:
       - Accept-Encoding
       - Accept-Encoding
-      Via: null
-      X-Amz-Cf-Id: null
-      X-Amz-Cf-Pop: null
-      X-Api-Umbrella-Request-Id: null
-      X-Cache: null
       X-Content-Type-Options:
       - nosniff
       X-Frame-Options:
       - SAMEORIGIN
-      X-Vcap-Request-Id: null
       X-Xss-Protection:
       - 1; mode=block
     status:
@@ -197,7 +183,6 @@ interactions:
       - application/json
       Date:
       - Sun, 06 Oct 2024 18:59:51 GMT
-      Etag: null
       Expires:
       - Sun, 06 Oct 2024 18:59:51 GMT
       Pragma:
@@ -208,16 +193,10 @@ interactions:
       Vary:
       - Accept-Encoding
       - Accept-Encoding
-      Via: null
-      X-Amz-Cf-Id: null
-      X-Amz-Cf-Pop: null
-      X-Api-Umbrella-Request-Id: null
-      X-Cache: null
       X-Content-Type-Options:
       - nosniff
       X-Frame-Options:
       - SAMEORIGIN
-      X-Vcap-Request-Id: null
       X-Xss-Protection:
       - 1; mode=block
     status:

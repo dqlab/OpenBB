@@ -198,3 +198,24 @@ different local distributions resolve the same imported package consistently.
 Explicit tool versions live in `.github/requirements-lab-ci.txt`; resolved package
 versions and the selected inventory are uploaded with each run. Legacy CLI and
 desktop workflows are outside this Platform lab job.
+
+## Local provider fixture checks
+
+The development installer includes DuckDB, Stooq and DQ Quant Data; the latter
+retains its Python 3.11 through 3.13 requirement. The lab inventory installs these
+packages explicitly and remains the source of the lab CI test selection.
+
+EIA and CFTC fetcher tests replay saved HTTP cassettes without live credentials.
+Response header scrubbing replaces existing values with a list containing
+`MOCK_VALUE` and leaves absent headers absent. Invalid null header entries have
+been removed from the saved cassettes. Run each provider suite separately:
+
+```bash
+python -m pytest openbb_platform/providers/eia/tests
+python -m pytest openbb_platform/providers/cftc/tests
+python -m pytest openbb_platform/providers/ibkr/tests
+```
+
+The IBKR suite supplies an event loop before collection when the interpreter has
+none, including Python 3.14, and closes only the loop it created. Its tests use
+local mocks and do not require TWS or IB Gateway.

@@ -31,6 +31,8 @@ openbb-benzinga = { path = "./providers/benzinga", develop = true }
 openbb-bls = { path = "./providers/bls", develop = true }
 openbb-cftc = { path = "./providers/cftc", develop = true }
 openbb-congress-gov = { path = "./providers/congress_gov", develop = true }
+openbb-dq-quant-data = { path = "./providers/dq_quant_data", develop = true, python = ">=3.11,<3.14" }
+openbb-duckdb = { path = "./providers/duckdb", develop = true }
 openbb-econdb = { path = "./providers/econdb", develop = true }
 openbb-federal-reserve = { path = "./providers/federal_reserve", develop = true }
 openbb-fmp = { path = "./providers/fmp", develop = true }
@@ -41,6 +43,7 @@ openbb-intrinio = { path = "./providers/intrinio", develop = true }
 openbb-ibkr = { path = "./providers/ibkr", develop = true }
 openbb-oecd = { path = "./providers/oecd", develop = true }
 openbb-sec = { path = "./providers/sec", develop = true }
+openbb-stooq = { path = "./providers/stooq", develop = true }
 openbb-tiingo = { path = "./providers/tiingo", develop = true }
 openbb-tradingeconomics = { path = "./providers/tradingeconomics", develop = true }
 openbb-us-eia = { path = "./providers/eia", develop = true }
