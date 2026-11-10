@@ -15,6 +15,11 @@ values and rejects conflicts, so it cannot preserve this literal-source contract
 The offline candidate retains those distinctions and exposes provider-compatible
 views through the existing DuckDB historical reader.
 
+The campaign and daily modules retain acquisition and scheduling ownership.
+Postprocessing reuses `baostock_page_capture.read_capture` / `read_page`, delivery
+path/hash validation, and `baostock_daily.atomic_json` for checkpoints, including
+the existing directory durability barrier. It does not change their contracts.
+
 ## Contract
 
 The original eighteen columns remain strings, including empty strings:
@@ -169,7 +174,12 @@ python -m pytest openbb_platform/providers/duckdb/tests
 ```
 
 The acceptance tests require actual externally supplied sample artifacts; they
-skip when none is configured. They do not substitute synthetic source rows.
+skip when none is configured. The sample root must contain `sample_manifest.jsonl`,
+the immutable `raw/` capture copies and the predecessor CSVs under `evidence/`.
+The tests parse and materialize a fresh temporary candidate with the current
+checkout, then validate literal conservation, lineage, source admission, calendar
+uncertainty, existing provider queries and checkpoint resume hashes. They do not
+use a previously generated catalog or substitute synthetic source rows.
 Record the dataset's own independent per-capture counts, date/row hashes, fields,
 reference counts, quality findings, physical row readbacks, provider queries,
 performance, disk usage, dependency versions and final artifact checksums.

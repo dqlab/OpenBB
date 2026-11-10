@@ -15,6 +15,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from .baostock_daily import atomic_json
 from .baostock_page_capture import digest, encode, read_capture, read_page
 from .delivery import file_hash, local_path
 
@@ -47,13 +48,7 @@ def sha(path):
 
 def write_json(path, value):
     """Commit checkpoint only after dependent files have been committed."""
-    path = Path(path)
-    temp = path.with_suffix(path.suffix + ".part")
-    with temp.open("wb") as stream:
-        stream.write(encode(value))
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temp, path)
+    atomic_json(Path(path), value)
 
 
 def load_manifest(path):

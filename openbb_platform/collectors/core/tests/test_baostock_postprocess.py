@@ -9,7 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from openbb_collector_core.baostock_postprocess import FIELDS, load_manifest, parse_capture
+from openbb_collector_core.baostock_postprocess import (
+    FIELDS,
+    load_manifest,
+    materialize,
+    parse,
+    parse_capture,
+    sha,
+)
 
 
 @pytest.fixture(scope="module")
@@ -21,10 +28,22 @@ def evidence():
 
 
 @pytest.fixture(scope="module")
-def catalog(evidence):
+def candidate(evidence, tmp_path_factory):
+    """Exercise this checkout against immutable real inputs in a fresh directory."""
+    output = tmp_path_factory.mktemp("baostock18-candidate")
+    parse(evidence / "sample_manifest.jsonl", evidence / "raw", output)
+    summary = json.loads((output / "parse_summary.json").read_text())
+    assert summary["parse_complete"] is True
+    assert summary.get("failed_captures", 0) == 0
+    materialize(output, evidence / "evidence", buckets=4)
+    return output
+
+
+@pytest.fixture(scope="module")
+def catalog(candidate):
     import duckdb
 
-    with duckdb.connect(str(evidence / "sample/candidate.duckdb"), read_only=True) as con:
+    with duckdb.connect(str(candidate / "candidate.duckdb"), read_only=True) as con:
         yield con
 
 
@@ -120,7 +139,7 @@ def test_wrong_external_anchor_refused(evidence):
         parse_capture(evidence / "raw", invalid)
 
 
-def test_existing_openbb_fetcher_real_query(evidence):
+def test_existing_openbb_fetcher_real_query(candidate):
     from openbb_duckdb.models.equity_historical import DuckDBEquityHistoricalFetcher as fetcher
 
     for table, adjustment in [
@@ -132,7 +151,7 @@ def test_existing_openbb_fetcher_real_query(evidence):
                 "symbol": "sh.600000",
                 "start_date": "2026-10-13",
                 "end_date": "2026-10-15",
-                "database_path": str(evidence / "sample/candidate.duckdb"),
+                "database_path": str(candidate / "candidate.duckdb"),
                 "table": table,
                 "adjustment": adjustment,
             }
@@ -163,7 +182,7 @@ def test_captured_calendar_uncertainty_is_not_silently_cleared(catalog):
     )
 
 
-def test_failed_duplicate_does_not_veto_confirmed_partial_data(catalog, evidence):
+def test_failed_duplicate_does_not_veto_confirmed_partial_data(catalog, candidate):
     assert (
         catalog.execute(
             "SELECT count(*) FROM literal18_variants WHERE source_status_warning "
@@ -185,7 +204,7 @@ def test_failed_duplicate_does_not_veto_confirmed_partial_data(catalog, evidence
             "symbol": "sh.601600",
             "start_date": "2007-04-30",
             "end_date": "2007-04-30",
-            "database_path": str(evidence / "sample/candidate.duckdb"),
+            "database_path": str(candidate / "candidate.duckdb"),
             "table": "equity_unadjusted",
             "adjustment": "unadjusted",
             "limit": 10,
@@ -195,3 +214,13 @@ def test_failed_duplicate_does_not_veto_confirmed_partial_data(catalog, evidence
     assert len(result) == 1
     assert result[0].model_dump()["has_confirmed_partial"] is True
     assert result[0].model_dump()["source_status_warning"] is True
+
+
+def test_real_resume_preserves_committed_artifacts(evidence, candidate):
+    paths = [candidate / "candidate.duckdb", candidate / "parse_contract.json"]
+    for directory in ("parsed", "checkpoints", "variants", "lineage", "quality"):
+        paths.extend(sorted((candidate / directory).iterdir()))
+    before = {path: sha(path) for path in paths}
+    parse(evidence / "sample_manifest.jsonl", evidence / "raw", candidate)
+    materialize(candidate, evidence / "evidence", buckets=4)
+    assert {path: sha(path) for path in paths} == before
