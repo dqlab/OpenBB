@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openbb-ctp"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+dependencies = ["openbb-core>=1.6.13,<2"]
+
+[project.optional-dependencies]
+native = ["openctp-ctp==6.7.11.0"]
+
+[project.entry-points.openbb_provider_extension]
+ctp = "openbb_ctp:ctp_provider"
+
+[project.entry-points.openbb_tick_source]
+ctp = "openbb_ctp.native:NativeSession"

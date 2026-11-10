@@ -2,47 +2,55 @@ name: 🚉 Unit test Platform
 
 on:
   pull_request:
-    branches:
-      - develop
+    branches: [develop]
     paths:
       - 'openbb_platform/**'
+      - '.github/scripts/**'
+      - '.github/lab-ci.toml'
+      - '.github/requirements-lab-ci.txt'
+      - '.github/workflows/test-unit-platform.yml'
+      - 'scripts/**'
+      - 'pytest.ini'
+  workflow_dispatch:
 
 concurrency:
-    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-    cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   unit_tests:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    strategy:
-        fail-fast: false
-
-        matrix:
-          python_version:
-            ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    name: Internal lab (Python 3.12.13)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
-      - name: Install Python ${{ matrix.python_version }}
-        uses: actions/setup-python@v6
-        with:
-            python-version: ${{ matrix.python_version }}
-            allow-prereleases: true
-            cache: "pip"
-
-      - name: Cache pip packages
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ matrix.python_version }}-${{ hashFiles('openbb_platform/poetry.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Run tests
+          python-version: '3.12.13'
+          cache: pip
+          cache-dependency-path: |
+            .github/requirements-lab-ci.txt
+            .github/lab-ci.toml
+            openbb_platform/**/pyproject.toml
+      - name: Install sandbox and native locale tools
         run: |
-          pip install nox
-          nox -f .github/scripts/noxfile.py -s unit_test_platform --python ${{ matrix.python_version }}
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y apparmor bubblewrap locales
+          sudo apparmor_parser --replace .github/scripts/lab-bwrap.apparmor
+      - name: Create isolated lab venv
+        run: |
+          python -m venv "$RUNNER_TEMP/openbb-lab-ci-venv"
+          echo "$RUNNER_TEMP/openbb-lab-ci-venv/bin" >> "$GITHUB_PATH"
+      - name: Install internal lab packages and verify dependencies
+        run: python .github/scripts/lab_ci.py install
+      - name: Run offline lab suites with loopback available
+        run: python .github/scripts/run_lab_offline.py --apparmor-profile openbb-lab-ci-bwrap
+      - name: Upload inventory, resolved versions and test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lab-ci-results
+          path: lab-ci-results/

@@ -11,8 +11,16 @@ from typing import (
 
 from openbb_core.app.provider_interface import ProviderInterface
 from openbb_core.app.router import CommandMap
+from providers.tests.utils.lab_coverage import declaration
 
 from .integration_tests_generator import find_extensions
+from .lab_inventory import (
+    installed_cases,
+    installed_extension,
+    installed_providers,
+    route_owners,
+    unavailable_model_route,
+)
 
 
 def get_integration_tests(
@@ -29,6 +37,8 @@ def get_integration_tests(
         raise ValueError(f"test_type '{test_type}' not valid")
 
     for extension in find_extensions(filter_charting_ext):
+        if not installed_extension(extension):
+            continue
         integration_folder = os.path.join(extension, "integration")
         if not os.path.exists(integration_folder):
             continue
@@ -70,6 +80,7 @@ def check_missing_providers(
     missing_providers: list[str] = []
     providers = list(command_params.keys())
     providers.remove("openbb")
+    providers = [provider for provider in providers if declaration(provider) is None]
     if not providers:
         return []
 
@@ -103,9 +114,14 @@ def check_wrong_params(
     """Check if there are any wrong params passed to a command."""
     wrong_params = []
     if not processing:
-        for i, test_params in enumerate(function_params):
-            if "provider" in test_params and i != 0:
+        for test_params in function_params:
+            if "provider" in test_params:
                 provider = test_params["provider"]
+                if provider not in command_params:
+                    wrong_params.append(
+                        f"Provider {provider} does not support function {function}"
+                    )
+                    continue
                 if provider in command_params:
                     for param in test_params:
                         if (
@@ -246,7 +262,10 @@ def check_integration_tests(
                     # Another decorator is below the parametrize decorator
                     function_params = functions[function].pytestmark[2].args[1]
                 missing_items = check_function(
-                    command_params, function_params, function, False
+                    command_params,
+                    installed_cases(function_params, installed_providers()),
+                    function,
+                    False,
                 )
                 all_missing_items.extend(missing_items)
                 used_functions.append(function)
@@ -261,9 +280,7 @@ def check_integration_tests(
             if route.replace("/", "_")[1:] == function.replace("test_", ""):
                 sig = inspect.signature(cm.map[route])
                 param_names = list(sig.parameters.keys()) + ["return"]
-                processing_command_params = [
-                    {k: "" for k in param_names}
-                ]
+                processing_command_params = [{k: "" for k in param_names}]
                 if (
                     not processing_command_params
                     or len(functions[function].pytestmark) < 2
@@ -309,8 +326,11 @@ def check_missing_integration_tests(test_type: Literal["api", "python"]) -> list
         if function.startswith("test_")
     ]
 
+    owned_routes = {path.strip("/").replace("/", "_") for path in route_owners()}
     for route in routes:
         if route not in tested_functions:
+            if route in owned_routes:
+                continue
             # TODO: See how to handle edge cases that are excluded from the schema
             # on purpose. This is currently on the econometrics router.
             if (
@@ -331,6 +351,12 @@ def check_outdated_integration_tests(test_type: Literal["api", "python"]) -> lis
     cm = CommandMap(coverage_sep=".")
     routes = [route[1:].replace("/", "_") for route in cm.map]
     outdated_integration_tests: list[str] = []
+    installed = {
+        provider: None
+        for info in ProviderInterface().map.values()
+        for provider in info
+        if provider != "openbb"
+    }
 
     if test_type == "api":
         functions = get_module_functions(get_integration_tests(test_type="api"))
@@ -347,7 +373,10 @@ def check_outdated_integration_tests(test_type: Literal["api", "python"]) -> lis
                     continue
             except IndexError:
                 continue
+            args = installed_cases(args, installed)
             if route not in routes and len(args) > 0:
+                if unavailable_model_route(route, ProviderInterface().map):
+                    continue
                 # If it doesn't have any args it is because it is not installed.
                 outdated_integration_tests.append(
                     f"Outdated {test_type} integration test for route {route}"

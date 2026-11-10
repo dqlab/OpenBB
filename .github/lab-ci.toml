@@ -1,0 +1,466 @@
+# One runtime for the internal lab. This is not an upstream-provider test matrix.
+python = "3.12.13"
+
+# Install these local distributions together so pip resolves internal version
+# requirements against this checkout, without pulling the openbb meta-package.
+packages = [
+  "openbb_platform/core",
+  "openbb_platform/collectors/core[ssh]",
+  "openbb_platform/collectors/historical[parquet,duckdb]",
+  "openbb_platform/collectors/live[parquet,duckdb]",
+  "openbb_platform/extensions/collection",
+  "openbb_platform/extensions/alpha",
+  "openbb_platform/extensions/research",
+  "openbb_platform/extensions/quantitative",
+  "openbb_platform/extensions/platform_api",
+  "openbb_platform/extensions/mcp_server",
+  "openbb_platform/obbject_extensions/charting",
+  "openbb_platform/extensions/technical",
+  "openbb_platform/extensions/econometrics",
+  "openbb_platform/providers/akshare",
+  "openbb_platform/providers/baostock",
+  "openbb_platform/providers/dq_quant_data",
+  "openbb_platform/providers/duckdb",
+  "openbb_platform/providers/stooq",
+  "openbb_platform/providers/ibkr",
+  "openbb_platform/providers/yfinance",
+  "openbb_platform/providers/alpha_reference",
+  "openbb_platform/providers/polars_ta",
+  "openbb_platform/providers/alphalens",
+  "openbb_platform/providers/qlib",
+  "openbb_platform/providers/bt",
+  # FMP is required by existing core registry/query fixtures and news models.
+  "openbb_platform/providers/fmp",
+  "openbb_platform/extensions/equity",
+  "openbb_platform/extensions/etf",
+  "openbb_platform/extensions/index",
+  "openbb_platform/extensions/derivatives",
+  "openbb_platform/extensions/news",
+  "openbb_platform/extensions/currency",
+  "openbb_platform/extensions/fixedincome",
+  "openbb_platform/extensions/economy",
+  "openbb_platform/extensions/commodity",
+  "openbb_platform/extensions/crypto",
+  "openbb_platform/extensions/regulators",
+]
+
+# Separate processes avoid repeated test module names, provider registry caches,
+# and collector fixture sys.modules changes contaminating other packages.
+tests = [
+  ".github/scripts/tests",
+  "openbb_platform/tests",
+  "openbb_platform/core/tests",
+  "openbb_platform/extensions/tests",
+  "openbb_platform/extensions/alpha/tests",
+  "openbb_platform/extensions/collection/tests",
+  "openbb_platform/extensions/quantitative/tests",
+  "openbb_platform/extensions/platform_api/tests",
+  "openbb_platform/extensions/mcp_server/tests",
+  "openbb_platform/obbject_extensions/charting/tests",
+  "openbb_platform/extensions/technical/tests",
+  "openbb_platform/extensions/econometrics/tests",
+  "openbb_platform/collectors/core/tests",
+  "openbb_platform/collectors/historical/tests",
+  "openbb_platform/collectors/live/tests",
+  "openbb_platform/providers/akshare/tests",
+  "openbb_platform/providers/baostock/tests",
+  "openbb_platform/providers/dq_quant_data/tests",
+  "openbb_platform/providers/duckdb/tests",
+  "openbb_platform/providers/stooq/tests",
+  "openbb_platform/providers/ibkr/tests",
+  "openbb_platform/providers/yfinance/tests",
+  "openbb_platform/providers/fmp/tests",
+  "openbb_platform/providers/tests",
+  "scripts/cffex-cutover/test_daily.py",
+]
+
+# These legacy integration-marked cases use local mocks/synthetic data. Execute
+# exact selections after clean-asset checks and the real build, without live data.
+offline_integration_tests = [
+  "openbb_platform/tests/test_auto_build.py",
+  "openbb_platform/extensions/econometrics/integration/test_econometrics_python.py::test_econometrics_panel_random_effects",
+  "openbb_platform/extensions/econometrics/integration/test_econometrics_python.py::test_econometrics_panel_between",
+  "openbb_platform/extensions/econometrics/integration/test_econometrics_python.py::test_econometrics_panel_pooled",
+  "openbb_platform/extensions/econometrics/integration/test_econometrics_python.py::test_econometrics_panel_fixed",
+  "openbb_platform/extensions/econometrics/integration/test_econometrics_python.py::test_econometrics_panel_first_difference",
+  "openbb_platform/extensions/econometrics/integration/test_econometrics_python.py::test_econometrics_panel_fmac",
+  "openbb_platform/extensions/econometrics/integration/test_econometrics_python.py::test_econometrics_variance_inflation_factor",
+]
+
+# These packages have their real tests in extensions/alpha/tests.
+# They must be importable; optional-dependency skips must not mask failed installs.
+required_imports = [
+  "qlib", "bt", "polars_ta", "alphalens", "pyarrow", "duckdb", "paramiko",
+  "openbb_qlib", "openbb_bt", "openbb_research", "openbb_collection",
+]
+
+# PR6 is unmerged on develop. Both package trees must be present together; when
+# present they are installed and tested, with the native SDK required.
+[tick]
+packages = ["openbb_platform/providers/futu", "openbb_platform/providers/ctp[native]"]
+tests = ["openbb_platform/providers/futu/tests", "openbb_platform/providers/ctp/tests"]
+required_imports = ["openbb_futu", "openbb_ctp", "openctp_ctp.thostmduserapi"]
+
+[tick.provider_tests.futu]
+models = ["EquityQuote"]
+suites = ["openbb_platform/providers/futu/tests"]
+
+[tick.provider_tests.ctp]
+models = []
+suites = ["openbb_platform/providers/ctp/tests"]
+
+# Registry inventory and suite ownership, not per-fetcher dynamic coverage.
+# Every declared suite must pass in the current CI attempt.
+[provider_tests.akshare]
+models = [
+  "FuturesHistorical",
+  "AkshareEtfOptionContracts",
+  "AkshareEtfOptionQuotes",
+  "AkshareCffexOptionExpiries",
+  "AkshareCffexOptionQuotes",
+]
+families = ["openbb_akshare.models.native:NATIVE_FETCHERS"]
+suites = ["openbb_platform/providers/akshare/tests"]
+
+[provider_tests.baostock]
+models = ["EquityHistorical", "EquityInfo", "EquitySearch", "IndexHistorical", "IndexConstituents"]
+families = ["openbb_baostock.models.native:NATIVE_FETCHERS", "openbb_baostock.models.history_source:SOURCE_FETCHERS"]
+suites = ["openbb_platform/providers/baostock/tests"]
+
+[provider_tests.dq_quant_data]
+models = ["OptionsChains", "FuturesCurve", "EquityHistorical", "EtfHistorical", "IndexHistorical", "EquitySearch", "EquityInfo", "CalendarDividend", "CalendarSplits", "CompanyFilings", "FredSeries"]
+suites = ["openbb_platform/providers/dq_quant_data/tests"]
+
+[provider_tests.duckdb]
+models = ["CryptoHistorical", "CurrencyHistorical", "EquityHistorical", "EtfHistorical", "IndexHistorical", "OptionsChains", "FuturesHistorical", "FuturesCurve"]
+suites = ["openbb_platform/providers/duckdb/tests"]
+
+[provider_tests.stooq]
+models = ["CurrencyHistorical", "EquityHistorical", "EtfHistorical", "IndexHistorical"]
+suites = ["openbb_platform/providers/stooq/tests"]
+
+[provider_tests.ibkr]
+models = ["MarketQuote", "MarketHistorical", "EquityQuote", "EquityHistorical"]
+suites = ["openbb_platform/providers/ibkr/tests"]
+
+[provider_tests.alpha_reference]
+models = ["AlphaCompute"]
+suites = ["openbb_platform/extensions/alpha/tests"]
+
+[provider_tests.polars_ta]
+models = ["AlphaCompute"]
+suites = ["openbb_platform/extensions/alpha/tests"]
+
+[provider_tests.alphalens]
+models = ["AlphaEvaluate"]
+suites = ["openbb_platform/extensions/alpha/tests"]
+
+# Explicit exposed command inventory with actual offline suite ownership.
+
+[router_tests.akshare]
+commands = [
+    "bond_zh_us_rate",
+    "cffex_daily",
+    "cffex_rank_table",
+    "futures_hist_daily_cffex",
+    "futures_main_sina",
+    "futures_zh_daily_sina",
+    "futures_zh_minute_sina",
+    "stock_zh_index_daily",
+    "tool_trade_date_hist_sina",
+    "etf_option_contracts",
+    "etf_option_quotes",
+    "cffex_option_expiries",
+    "cffex_option_quotes",
+]
+suites = ["openbb_platform/providers/akshare/tests"]
+prefix = "/akshare"
+
+[router_tests.baostock]
+commands = [
+    "adjust_factor",
+    "all_stock",
+    "ame_stocks",
+    "balance_data",
+    "cash_flow_data",
+    "cpi_data",
+    "daily_adjust_factor",
+    "daily_history_k_astock",
+    "daily_history_k_etf",
+    "deposit_rate_data",
+    "dividend_data",
+    "dupont_data",
+    "forecast_report",
+    "gem_stocks",
+    "growth_data",
+    "history_k_data_plus",
+    "hs300_stocks",
+    "loan_rate_data",
+    "money_supply_data_month",
+    "money_supply_data_year",
+    "operation_data",
+    "performance_express_report",
+    "pmi_data",
+    "ppi_data",
+    "profit_data",
+    "required_reserve_ratio_data",
+    "shhk_stocks",
+    "st_stocks",
+    "starst_stocks",
+    "stock_area",
+    "stock_basic",
+    "stock_concept",
+    "stock_industry",
+    "stocks_in_risk",
+    "suspended_stocks",
+    "sz50_stocks",
+    "szhk_stocks",
+    "terminated_stocks",
+    "trade_dates",
+    "zz500_stocks",
+]
+suites = ["openbb_platform/providers/baostock/tests"]
+prefix = "/baostock"
+
+[router_tests.alpha]
+commands = [
+    "capabilities",
+    "catalog",
+    "compute",
+    "evaluate",
+    "labels",
+    "register",
+]
+suites = ["openbb_platform/extensions/alpha/tests"]
+prefix = "/alpha"
+
+[router_tests.research]
+commands = [
+    "bt_backtest",
+    "qlib_train",
+    "report",
+    "result",
+    "run",
+    "runs",
+]
+suites = ["openbb_platform/extensions/alpha/tests"]
+prefix = "/research"
+
+[router_tests.collection]
+commands = [
+    "live/export",
+    "live/once",
+    "live/plan",
+    "live/status",
+    "live/validate_config",
+    "once",
+    "plan",
+    "query",
+    "status",
+    "validate_config",
+]
+suites = ["openbb_platform/extensions/collection/tests"]
+prefix = "/collection"
+
+[router_tests.ibkr]
+commands = [
+    "account_summary",
+    "account_values",
+    "bond_quote",
+    "cfd_quote",
+    "commodity_quote",
+    "completed_orders",
+    "configure",
+    "contract_details",
+    "contract_search",
+    "crypto_quote",
+    "fund_quote",
+    "fx_quote",
+    "historical",
+    "is_connected",
+    "leverage_analysis",
+    "margin_summary",
+    "market_historical",
+    "market_quote",
+    "open_orders",
+    "option_chain",
+    "option_decision_signals",
+    "option_screener",
+    "position_detail",
+    "positions",
+    "quote",
+    "riskfolio_allocation",
+    "riskfolio_allocation_treemap",
+    "riskfolio_asset_risk_return",
+    "riskfolio_asset_risk_return_scatter",
+    "riskfolio_correlation",
+    "riskfolio_cumulative_returns",
+    "riskfolio_cumulative_returns_table",
+    "riskfolio_drawdown",
+    "riskfolio_drawdown_table",
+    "riskfolio_equity_curve",
+    "riskfolio_holdings",
+    "riskfolio_leverage_target",
+    "riskfolio_metrics",
+    "riskfolio_optimized_weights",
+    "riskfolio_returns_distribution",
+    "riskfolio_returns_distribution_table",
+    "riskfolio_risk_contribution",
+    "riskfolio_risk_contribution_scatter",
+    "riskfolio_tail_risk_contribution",
+    "riskfolio_tail_risk_contribution_bar",
+    "trades",
+]
+suites = ["openbb_platform/providers/ibkr/tests"]
+prefix = "/ibkr"
+
+[router_tests.dq_data]
+commands = [
+    "fundamental_facts",
+    "lineage",
+    "quality",
+]
+suites = ["openbb_platform/providers/dq_quant_data/tests"]
+prefix = "/dq_data"
+
+[router_tests.dq_market]
+commands = [
+    "basket",
+    "captures",
+    "chain",
+    "history",
+    "instruments",
+    "status",
+]
+suites = ["openbb_platform/providers/dq_quant_data/tests"]
+prefix = "/dq_market"
+
+[router_tests.quantitative_dqlib]
+commands = [
+    "call",
+    "cmmarket/call",
+    "commodity/call",
+    "commodity/european_option",
+    "common/call",
+    "credit/call",
+    "credit/curve_analytics",
+    "crmarket/call",
+    "datetime/call",
+    "datetime/simple_year_fraction",
+    "equity/american_option",
+    "equity/build_volatility_surface",
+    "equity/call",
+    "equity/european_option",
+    "fimarket/call",
+    "fixed_income/call",
+    "fixed_income/fixed_coupon_bond_ytm",
+    "foreign_exchange/atm_strike",
+    "foreign_exchange/call",
+    "functions",
+    "fxmarket/call",
+    "interest_rate/call",
+    "interest_rate/curve_analytics",
+    "interest_rate/single_currency_curve",
+    "irmarket/call",
+    "market/call",
+    "numerics/call",
+    "pipeline",
+    "risk/call",
+    "risk/expected_shortfall",
+    "risk/value_at_risk",
+    "staticdata/call",
+    "status",
+    "utility/call",
+]
+suites = ["openbb_platform/extensions/quantitative/tests"]
+prefix = "/quantitative/dqlib"
+
+[unavailable_routes.etf_discovery_active]
+source = "openbb_platform/extensions/etf/openbb_etf/discovery/discovery_router.py"
+function = "active"
+model = "ETFActive"
+source_sha256 = "3deb48925d0a09aac3fc54bbcf9c9c954c6ed39a4b59bbf2e9c2c038943cd720" # pragma: allowlist secret
+
+[unavailable_routes.etf_discovery_gainers]
+source = "openbb_platform/extensions/etf/openbb_etf/discovery/discovery_router.py"
+function = "gainers"
+model = "ETFGainers"
+source_sha256 = "3deb48925d0a09aac3fc54bbcf9c9c954c6ed39a4b59bbf2e9c2c038943cd720" # pragma: allowlist secret
+
+[unavailable_routes.etf_discovery_losers]
+source = "openbb_platform/extensions/etf/openbb_etf/discovery/discovery_router.py"
+function = "losers"
+model = "ETFLosers"
+source_sha256 = "3deb48925d0a09aac3fc54bbcf9c9c954c6ed39a4b59bbf2e9c2c038943cd720" # pragma: allowlist secret
+
+[unavailable_routes.equity_darkpool_otc]
+source = "openbb_platform/extensions/equity/openbb_equity/darkpool/darkpool_router.py"
+function = "otc"
+model = "OTCAggregate"
+source_sha256 = "17f2de05f314ad9de78d90590e784da43d6563526c2ae15cf874c7fa254e574a" # pragma: allowlist secret
+
+[unavailable_routes.equity_shorts_fails_to_deliver]
+source = "openbb_platform/extensions/equity/openbb_equity/shorts/shorts_router.py"
+function = "fails_to_deliver"
+model = "EquityFTD"
+source_sha256 = "c6848f38ef619ee9d2fbf9b2256c71a90516daa8c8740d4321bfa96c8de4a4e2" # pragma: allowlist secret
+
+[unavailable_routes.fixedincome_corporate_hqm]
+source = "openbb_platform/extensions/fixedincome/openbb_fixedincome/corporate/corporate_router.py"
+function = "hqm"
+model = "HighQualityMarketCorporateBond"
+source_sha256 = "20b5cdcf150d81090ca832d3a544a475a76dba9ba299e1e8ae768870c5d6ff73" # pragma: allowlist secret
+
+[unavailable_routes.fixedincome_corporate_spot_rates]
+source = "openbb_platform/extensions/fixedincome/openbb_fixedincome/corporate/corporate_router.py"
+function = "spot_rates"
+model = "SpotRate"
+source_sha256 = "20b5cdcf150d81090ca832d3a544a475a76dba9ba299e1e8ae768870c5d6ff73" # pragma: allowlist secret
+
+[unavailable_routes.fixedincome_government_svensson_yield_curve]
+source = "openbb_platform/extensions/fixedincome/openbb_fixedincome/government/government_router.py"
+function = "svensson_yield_curve"
+model = "SvenssonYieldCurve"
+source_sha256 = "b25d58e1812fea1a18dc9ad03ee27e9499d1c20c8797e37cf61a2e2953f98d62" # pragma: allowlist secret
+
+[unavailable_routes.fixedincome_rate_dpcredit]
+source = "openbb_platform/extensions/fixedincome/openbb_fixedincome/rate/rate_router.py"
+function = "dpcredit"
+model = "DiscountWindowPrimaryCreditRate"
+source_sha256 = "2923d31dc9133f821d75d36d502bcdc870739a55ecdd9e5ca4297d417f171d94" # pragma: allowlist secret
+
+[unavailable_routes.fixedincome_rate_ecb]
+source = "openbb_platform/extensions/fixedincome/openbb_fixedincome/rate/rate_router.py"
+function = "ecb"
+model = "EuropeanCentralBankInterestRates"
+source_sha256 = "2923d31dc9133f821d75d36d502bcdc870739a55ecdd9e5ca4297d417f171d94" # pragma: allowlist secret
+
+[unavailable_routes.fixedincome_rate_effr_forecast]
+source = "openbb_platform/extensions/fixedincome/openbb_fixedincome/rate/rate_router.py"
+function = "effr_forecast"
+model = "PROJECTIONS"
+source_sha256 = "2923d31dc9133f821d75d36d502bcdc870739a55ecdd9e5ca4297d417f171d94" # pragma: allowlist secret
+
+[unavailable_routes.fixedincome_rate_iorb]
+source = "openbb_platform/extensions/fixedincome/openbb_fixedincome/rate/rate_router.py"
+function = "iorb"
+model = "IORB"
+source_sha256 = "2923d31dc9133f821d75d36d502bcdc870739a55ecdd9e5ca4297d417f171d94" # pragma: allowlist secret
+
+[unavailable_routes.fixedincome_rate_sonia]
+source = "openbb_platform/extensions/fixedincome/openbb_fixedincome/rate/rate_router.py"
+function = "sonia"
+model = "SONIA"
+source_sha256 = "2923d31dc9133f821d75d36d502bcdc870739a55ecdd9e5ca4297d417f171d94" # pragma: allowlist secret
+
+[unavailable_routes.fixedincome_spreads_tcm]
+source = "openbb_platform/extensions/fixedincome/openbb_fixedincome/spreads/spreads_router.py"
+function = "tcm"
+model = "TreasuryConstantMaturity"
+source_sha256 = "51541eadcdfad8c36ad286df7b367c3f04adc74fcefe97b1540f5c6c4d1ba120" # pragma: allowlist secret
+
+[unavailable_routes.economy_money_measures]
+source = "openbb_platform/extensions/economy/openbb_economy/economy_router.py"
+function = "money_measures"
+model = "MoneyMeasures"
+source_sha256 = "aff321b50b43c9648efcfd39abbf2a78eb5dd1e011a3dc412b7473084f8af985" # pragma: allowlist secret

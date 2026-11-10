@@ -40,6 +40,7 @@ def execute(params=None):
 
 def ticker(monkeypatch, value, calls=None):
     """Install an offline SDK ticker whose get_info returns or raises ``value``."""
+
     class Ticker:
         def __init__(self, symbol):
             self.symbol = symbol
@@ -92,7 +93,9 @@ def test_source_does_not_call_the_typed_profile_helper(monkeypatch):
     async def projected(*args, **kwargs):
         raise AssertionError("typed profile extraction must not run acquisition")
 
-    monkeypatch.setattr(YFinanceEquityProfileFetcher, "aextract_data", staticmethod(projected))
+    monkeypatch.setattr(
+        YFinanceEquityProfileFetcher, "aextract_data", staticmethod(projected)
+    )
     ticker(monkeypatch, {"symbol": "A", "longName": "Offline"})
     assert execute()[0].payload == [{"symbol": "A", "longName": "Offline"}]
 
@@ -124,7 +127,10 @@ def test_original_typed_profile_compatibility():
     """Keep the legacy standard model strict and unchanged."""
     f = YFinanceEquityProfileFetcher
     q = f.transform_query({"symbol": "A"})
-    assert f.transform_data(q, [{"symbol": "A", "longName": "Offline"}])[0].name == "Offline"
+    assert (
+        f.transform_data(q, [{"symbol": "A", "longName": "Offline"}])[0].name
+        == "Offline"
+    )
     for row in [{"longName": "Offline"}, {"symbol": "A", "longName": 123}]:
         with pytest.raises(ValueError):
             f.transform_data(q, [row])
@@ -154,4 +160,6 @@ def test_nested_non_json_value_is_rejected():
     """Reject non-finite numbers inside nested containers."""
     fetcher = fetcher_for("yfinance", "EquityProfileSource")
     with pytest.raises(ValueError, match="non_json_source"):
-        fetcher.transform_data(fetcher.transform_query({"symbol": "A"}), [{"nested": [float("inf")]}])
+        fetcher.transform_data(
+            fetcher.transform_query({"symbol": "A"}), [{"nested": [float("inf")]}]
+        )

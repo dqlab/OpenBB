@@ -52,7 +52,9 @@ def _plain(value: Any, depth: int = 0) -> None:
 
 
 class YFinanceEquityProfileSourceFetcher(
-    Fetcher[YFinanceEquityProfileSourceQueryParams, list[YFinanceEquityProfileSourceData]]
+    Fetcher[
+        YFinanceEquityProfileSourceQueryParams, list[YFinanceEquityProfileSourceData]
+    ]
 ):
     """Preserve the client's own return without invoking the typed profile model."""
 

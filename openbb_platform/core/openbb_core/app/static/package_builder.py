@@ -14,6 +14,7 @@ import traceback
 import typing as typing_module
 from collections import OrderedDict
 from collections.abc import Callable
+from contextvars import ContextVar
 from inspect import Parameter, _empty, isclass, signature
 from json import dumps, load
 from pathlib import Path
@@ -65,6 +66,38 @@ try:
     CHARTING_INSTALLED = True
 except ImportError:
     CHARTING_INSTALLED = False
+
+_BUILD_CHARTING_FUNCTIONS: ContextVar[dict[str, set[str]] | None] = ContextVar(
+    "build_charting_functions", default=None
+)
+
+
+@contextlib.contextmanager
+def _build_charting_functions():
+    """Cache chart discovery only for the current package build."""
+    if _BUILD_CHARTING_FUNCTIONS.get() is not None:
+        yield
+        return
+    token = _BUILD_CHARTING_FUNCTIONS.set({})
+    try:
+        yield
+    finally:
+        _BUILD_CHARTING_FUNCTIONS.reset(token)
+
+
+def _has_charting_function(path: str) -> bool:
+    """Check chart support, reusing discovery during a package build."""
+    if not CHARTING_INSTALLED:
+        return False
+    cache = _BUILD_CHARTING_FUNCTIONS.get()
+    if cache is None:
+        functions = Charting.functions()
+    else:
+        if "functions" not in cache:
+            cache["functions"] = set(Charting.functions())
+        functions = cache["functions"]
+    return path.replace("/", "_")[1:] in functions
+
 
 try:
     import fcntl  # type: ignore
@@ -200,8 +233,9 @@ class PackageBuilder:
                 try:
                     self._clean(modules)
                     ext_map = self._get_extension_map()
-                    self._save_modules(modules, ext_map)
-                    self._save_reference_file(ext_map)
+                    with _build_charting_functions():
+                        self._save_modules(modules, ext_map)
+                        self._save_reference_file(ext_map)
                     self._save_package()
                     if self.lint:
                         self._run_linters()
@@ -252,6 +286,7 @@ class PackageBuilder:
             ]
         return ext_map
 
+    @_build_charting_functions()
     def _save_modules(
         self,
         modules: str | list[str] | None = None,
@@ -290,6 +325,7 @@ class PackageBuilder:
         code += "### THIS FILE IS AUTO-GENERATED. DO NOT EDIT. ###"
         self._write(code=code, name="__init__")
 
+    @_build_charting_functions()
     def _save_reference_file(self, ext_map: dict[str, list[str]] | None = None):
         """Save the reference.json file."""
         self.console.log("\nWriting reference file...")
@@ -1166,7 +1202,7 @@ class MethodDefinition:
         path_params = PathHandler.extract_path_parameters(path)
 
         # we need to add the chart parameter here bc of the docstring generation
-        if CHARTING_INSTALLED and path.replace("/", "_")[1:] in Charting.functions():
+        if _has_charting_function(path):
             parameter_map["chart"] = Parameter(
                 name="chart",
                 kind=Parameter.POSITIONAL_OR_KEYWORD,
@@ -1812,7 +1848,7 @@ class MethodDefinition:
         if dependency_calls:
             code += "\n".join(dependency_calls) + "\n\n"
 
-        if CHARTING_INSTALLED and path.replace("/", "_")[1:] in Charting.functions():
+        if _has_charting_function(path):
             parameter_map["chart"] = Parameter(
                 name="chart",
                 kind=Parameter.POSITIONAL_OR_KEYWORD,
@@ -3612,7 +3648,9 @@ class ReferenceGenerator:
         # Extract only the Parameters section (between "Parameters" and "Returns")
         params_section = ""
         if "Parameters" in docstring and "Returns" in docstring:
-            params_section = docstring.split("Parameters")[1].split("Returns")[0]
+            params_section = docstring.split("Parameters")[1].split(
+                "Returns", maxsplit=1
+            )[0]
         elif "Parameters" in docstring:
             params_section = docstring.split("Parameters")[1]
         else:
@@ -4243,7 +4281,9 @@ class ReferenceGenerator:
                     result_type = match.group(1)
                 # Check for OBBject_ModelName pattern
                 elif "OBBject_" in type_str:
-                    result_type = type_str.split("OBBject_")[1].split("'")[0]
+                    result_type = type_str.split("OBBject_")[1].split("'", maxsplit=1)[
+                        0
+                    ]
 
             # If not found, try to extract from docstring
             if result_type == "list[Data]":

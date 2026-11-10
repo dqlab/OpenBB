@@ -11,7 +11,9 @@ from openbb_yfinance.models.crypto_historical import YFinanceCryptoHistoricalFet
 from openbb_yfinance.models.currency_historical import YFinanceCurrencyHistoricalFetcher
 from openbb_yfinance.models.equity_historical import YFinanceEquityHistoricalFetcher
 from openbb_yfinance.models.equity_profile import YFinanceEquityProfileFetcher
-from openbb_yfinance.models.equity_profile_source import YFinanceEquityProfileSourceFetcher
+from openbb_yfinance.models.equity_profile_source import (
+    YFinanceEquityProfileSourceFetcher,
+)
 from openbb_yfinance.models.equity_quote import YFinanceEquityQuoteFetcher
 from openbb_yfinance.models.equity_screener import YFinanceEquityScreenerFetcher
 from openbb_yfinance.models.etf_info import YFinanceEtfInfoFetcher
