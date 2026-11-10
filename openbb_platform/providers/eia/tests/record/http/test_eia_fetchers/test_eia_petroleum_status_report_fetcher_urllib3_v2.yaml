@@ -7825,13 +7825,8 @@ interactions:
       - application/vnd.ms-excel
       Date:
       - Tue, 24 Sep 2024 15:25:57 GMT
-      Etag: null
       Last-Modified:
       - Wed, 18 Sep 2024 14:15:52 GMT
-      Via: null
-      X-Amz-Cf-Id: null
-      X-Amz-Cf-Pop: null
-      X-Cache: null
     status:
       code: 200
       message: OK

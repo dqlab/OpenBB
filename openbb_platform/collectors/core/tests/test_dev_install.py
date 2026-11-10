@@ -9,6 +9,7 @@ from tomlkit import loads
 
 
 def test_pep621_dependencies_retain_extras_markers_and_urls(tmp_path, monkeypatch):
+    """Preserve dependency metadata and include the local market providers."""
     path = Path(__file__).resolve().parents[3] / "dev_install.py"
     spec = importlib.util.spec_from_file_location("collector_dev_install", path)
     installer = importlib.util.module_from_spec(spec)
@@ -35,11 +36,16 @@ def test_pep621_dependencies_retain_extras_markers_and_urls(tmp_path, monkeypatc
         "openbb-collection",
     ):
         assert dependencies[name]["markers"] == "python_version >= '3.11'"
+    assert dependencies["openbb-duckdb"]["path"] == "./providers/duckdb"
+    assert dependencies["openbb-stooq"]["path"] == "./providers/stooq"
+    assert dependencies["openbb-dq-quant-data"]["python"] == ">=3.11,<3.14"
 
 
 @pytest.mark.parametrize("target", ["platform", "cli"])
 @pytest.mark.parametrize("failure", ["lock", "install", "interrupt"])
-def test_poetry_failure_restores_files_and_propagates(tmp_path, monkeypatch, target, failure):
+def test_poetry_failure_restores_files_and_propagates(
+    tmp_path, monkeypatch, target, failure
+):
     """Restore both metadata files while preserving failure and cancellation."""
     path = Path(__file__).resolve().parents[3] / "dev_install.py"
     spec = importlib.util.spec_from_file_location("failed_dev_install", path)
@@ -71,7 +77,9 @@ def test_poetry_failure_restores_files_and_propagates(tmp_path, monkeypatch, tar
             raise subprocess.CalledProcessError(19, command)
 
     monkeypatch.setattr(installer.subprocess, "run", execute)
-    expected = KeyboardInterrupt if failure == "interrupt" else subprocess.CalledProcessError
+    expected = (
+        KeyboardInterrupt if failure == "interrupt" else subprocess.CalledProcessError
+    )
     with pytest.raises(expected):
         if target == "platform":
             installer.install_platform_local()

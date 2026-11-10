@@ -31,7 +31,6 @@ interactions:
       - application/json;charset=utf-8
       Date:
       - Thu, 02 Apr 2026 04:20:30 GMT
-      Etag: null
       Last-Modified:
       - Fri, 27 Mar 2026 19:31:05 GMT
       Server:
@@ -52,8 +51,6 @@ interactions:
       - Fri, 27 Mar 2026 19:31:05 GMT
       X-SODA2-Types:
       - '["text","text","text","text","text","text"]'
-      X-Socrata-Region: null
-      X-Socrata-RequestId: null
     status:
       code: 200
       message: OK

@@ -1,7 +1,27 @@
 """Shared test fixtures."""
 
-import pytest
+import asyncio
 from unittest.mock import patch
+
+import pytest
+
+
+def pytest_sessionstart(session):
+    """Provide the loop required by eventkit when tests import ib_insync."""
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        session.config._ibkr_test_loop = loop
+
+
+def pytest_sessionfinish(session):
+    """Close the loop created for this test session, if any."""
+    loop = getattr(session.config, "_ibkr_test_loop", None)
+    if loop is not None:
+        loop.close()
+        asyncio.set_event_loop(None)
 
 
 @pytest.fixture
@@ -32,11 +52,36 @@ def mock_ibkr_client():
             },
         ]
         mock.get_account_summary.return_value = [
-            {"tag": "NetLiquidation", "value": "5000", "currency": "USD", "account": "TEST"},
-            {"tag": "GrossPositionValue", "value": "3050", "currency": "USD", "account": "TEST"},
-            {"tag": "TotalCashValue", "value": "1950", "currency": "USD", "account": "TEST"},
-            {"tag": "MaintMarginReq", "value": "750", "currency": "USD", "account": "TEST"},
-            {"tag": "ExcessLiquidity", "value": "4250", "currency": "USD", "account": "TEST"},
+            {
+                "tag": "NetLiquidation",
+                "value": "5000",
+                "currency": "USD",
+                "account": "TEST",
+            },
+            {
+                "tag": "GrossPositionValue",
+                "value": "3050",
+                "currency": "USD",
+                "account": "TEST",
+            },
+            {
+                "tag": "TotalCashValue",
+                "value": "1950",
+                "currency": "USD",
+                "account": "TEST",
+            },
+            {
+                "tag": "MaintMarginReq",
+                "value": "750",
+                "currency": "USD",
+                "account": "TEST",
+            },
+            {
+                "tag": "ExcessLiquidity",
+                "value": "4250",
+                "currency": "USD",
+                "account": "TEST",
+            },
             {"tag": "Cushion", "value": "0.85", "currency": "", "account": "TEST"},
         ]
         mock.get_quote.return_value = {
