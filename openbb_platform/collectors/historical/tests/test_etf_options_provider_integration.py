@@ -7,14 +7,16 @@ from pathlib import Path
 
 import pytest
 from openbb_akshare.models import etf_options
-from openbb_akshare.utils import cffex_option_quotes
+from openbb_akshare.utils import cffex_option_quotes, etf_option_quotes
 from openbb_collector_core.providers import ProviderDispatcher
 
 from .test_etf_options import TransportResponse, quote_body, sse_master_body
 
 
 def dispatcher(model):
-    return ProviderDispatcher({"provider": "akshare", "model": model, "credentials_env": {}})
+    return ProviderDispatcher(
+        {"provider": "akshare", "model": model, "credentials_env": {}}
+    )
 
 
 def test_etf_models_dispatch_through_installed_provider(monkeypatch):
@@ -27,14 +29,16 @@ def test_etf_models_dispatch_through_installed_provider(monkeypatch):
 
     def quotes(url, **kwargs):
         calls.append(("quotes", url, kwargs))
-        return TransportResponse(quote_body("10000001"))
+        return quote_body("10000001")
 
     monkeypatch.setattr(etf_options, "make_contract_request", master)
-    monkeypatch.setattr(etf_options, "make_quote_request", quotes)
+    monkeypatch.setattr(etf_option_quotes, "_read_quote_body", quotes)
     contracts = dispatcher("AkshareEtfOptionContracts").fetch(
         {"exchange": "SSE", "source": "official", "underlyings": "510050"}
     )
-    quotes = dispatcher("AkshareEtfOptionQuotes").fetch({"symbols": "10000001,10000002"})
+    quotes = dispatcher("AkshareEtfOptionQuotes").fetch(
+        {"symbols": "10000001,10000002"}
+    )
 
     assert contracts.rows[0]["contract_unit"] == 10000
     assert contracts.rows[0]["source_date"] == "2026-10-14"
@@ -69,7 +73,11 @@ def test_cffex_option_models_dispatch_without_changing_daily_collector(monkeypat
 
     def request(url, **kwargs):
         calls.append((url, kwargs))
-        body = json.dumps(payload).encode() if url == cffex_option_quotes.QUOTE_URL else html
+        body = (
+            json.dumps(payload).encode()
+            if url == cffex_option_quotes.QUOTE_URL
+            else html
+        )
         return StreamingResponse(body)
 
     monkeypatch.setattr(cffex_option_quotes, "make_request", request)
@@ -108,7 +116,7 @@ def test_dispatch_validation_precedes_transport(monkeypatch, model, params):
         pytest.fail("invalid option queries must not reach source transport")
 
     monkeypatch.setattr(etf_options, "make_contract_request", forbidden)
-    monkeypatch.setattr(etf_options, "make_quote_request", forbidden)
+    monkeypatch.setattr(etf_option_quotes, "_read_quote_body", forbidden)
     monkeypatch.setattr(cffex_option_quotes, "make_request", forbidden)
     with pytest.raises(Exception, match="(validation|Expected|Invalid)"):
         dispatcher(model).fetch(params)

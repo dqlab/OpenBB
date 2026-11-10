@@ -234,18 +234,12 @@ def parse_batch(
 def fetch_quotes(symbols: str) -> list[dict[str, Any]]:
     """Batch the identical source behind AKShare's option_sse_spot_price_sina."""
     tokens = validate_symbols(symbols)
-    response = make_quote_request(
-        "https://hq.sinajs.cn/list=" + ",".join("CON_OP_" + s for s in tokens),
-        headers={
-            "Referer": "https://stock.finance.sina.com.cn/",
-            "User-Agent": "Mozilla/5.0",
-        },
-        timeout=25,
+    from openbb_akshare.utils.etf_option_quotes import _read_quote_body
+
+    body = _read_quote_body(
+        "https://hq.sinajs.cn/list=" + ",".join("CON_OP_" + s for s in tokens)
     )
-    response.raise_for_status()
-    if len(response.content) > 1_000_000:
-        raise ValueError("quote_response_byte_limit")
-    text = response.content.decode("gb18030", errors="strict")
+    text = body.decode("gb18030", errors="strict")
     stamp = datetime.now(timezone.utc).isoformat()
     return parse_batch(text, tokens, stamp)
 

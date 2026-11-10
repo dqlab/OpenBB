@@ -82,7 +82,10 @@ def test_bad_numeric_preserves_raw(value):
     assert row["quote_error"] and row["raw_fields"]["买价"] == value
 
 
-@pytest.mark.parametrize("token", ["CON_OP_90007393", "90007393 ", "90007393,90007393", "", "123", "90007393;id"])
+@pytest.mark.parametrize(
+    "token",
+    ["CON_OP_90007393", "90007393 ", "90007393,90007393", "", "123", "90007393;id"],
+)
 def test_identifiers_not_repaired(token):
     """Never normalize malformed source identifiers."""
     with pytest.raises(ValueError):
@@ -103,4 +106,127 @@ def test_absent_and_zero_not_synthetic_prices():
     values[FIELDS.index("卖价")] = "0"
     row = parse_batch(assignment(values), ["90007393"], STAMP)[0]
     assert row["bid"] is None and row["ask"] == 0
-    assert row["quote_error"] is None  # collector owns pricing-eligibility classification
+    assert (
+        row["quote_error"] is None
+    )  # collector owns pricing-eligibility classification
+
+
+def test_fetch_uses_bounded_transport(monkeypatch):
+    """The public operation retains its source URL and decoding semantics."""
+    from openbb_akshare.utils import etf_option_quotes as quotes
+
+    urls = []
+
+    def read(url):
+        urls.append(url)
+        return assignment(payload()).encode("gb18030")
+
+    monkeypatch.setattr(quotes, "_read_quote_body", read)
+    assert quotes.fetch_quotes("90007393")[0]["symbol"] == "90007393"
+    assert urls == ["https://hq.sinajs.cn/list=CON_OP_90007393"]
+
+
+@pytest.mark.parametrize("case", ["ok", "large", "redirect", "gzip", "slow"])
+def test_loopback_transport(case, monkeypatch):
+    """Exercise real Requests streaming without contacting an external service."""
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from openbb_akshare.utils import etf_option_quotes as quotes
+
+    release = threading.Event()
+    body_started = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            self.send_response(302 if case == "redirect" else 200)
+            if case == "redirect":
+                self.send_header("Location", "/other")
+            if case == "gzip":
+                self.send_header("Content-Encoding", "gzip")
+            self.send_header(
+                "Content-Length", str(1_000_001 if case in {"large", "redirect"} else 3)
+            )
+            self.end_headers()
+            if case == "redirect":
+                release.wait(2)
+                body_started.set()
+                return
+            try:
+                if case == "slow":
+                    for byte in b"abc":
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(0.08)
+                else:
+                    self.wfile.write(b"x" * 1_000_001 if case == "large" else b"abc")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    # Exercise the shared helper with deterministic settings and no proxy.
+    from openbb_core.provider.utils import helpers
+
+    monkeypatch.setattr(helpers, "get_python_request_settings", lambda: {})
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "REQUESTS_CA_BUNDLE"):
+        monkeypatch.delenv(name, raising=False)
+    url = f"http://127.0.0.1:{server.server_port}/"
+    try:
+        if case in {"ok", "slow"}:
+            started = time.monotonic()
+            assert quotes._read_quote_body(url) == b"abc"
+            if case == "slow":
+                # Successful trickle illustrates that read timeout is not a deadline.
+                assert time.monotonic() - started >= 0.12
+        else:
+            error = {
+                "large": "byte_limit",
+                "redirect": "redirect_unsupported",
+                "gzip": "encoding_unsupported",
+            }[case]
+            with pytest.raises(ValueError, match=error):
+                quotes._read_quote_body(url)
+            if case == "redirect":
+                assert not body_started.is_set()
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_fetcher_round_trip_and_registration(monkeypatch):
+    """The actual registered source model retains diagnostics and exact identifiers."""
+    import asyncio
+
+    from openbb_akshare import akshare_provider
+    from openbb_akshare.models import etf_option_quotes as model
+    from openbb_akshare.utils.catalog import DATASETS
+
+    fetcher = model.AkshareEtfOptionQuotesFetcher
+    assert akshare_provider.fetcher_dict["AkshareEtfOptionQuotes"] is fetcher
+    assert all(
+        d.command != "etf_option_quotes" and d.model != "AkshareEtfOptionQuotes"
+        for d in DATASETS
+    )
+    query = fetcher.transform_query({"symbols": "90007393"})
+    from openbb_akshare.models import etf_options
+
+    monkeypatch.setattr(
+        etf_options,
+        "fetch_quotes",
+        lambda symbols: [{"symbol": symbols, "quote_error": "missing_quote"}],
+    )
+    rows = fetcher.transform_data(
+        query, asyncio.run(fetcher.aextract_data(query, None))
+    )
+    assert rows[0].symbol == "90007393" and rows[0].quote_error == "missing_quote"
+    with pytest.raises(ValueError):
+        fetcher.transform_query({"symbols": "90007393,90007393"})
