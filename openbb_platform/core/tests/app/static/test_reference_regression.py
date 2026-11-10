@@ -45,10 +45,18 @@ def test_provider_metadata_repeatable(monkeypatch):
 
     field = Model.model_fields["symbols"]
     before = deepcopy(field.json_schema_extra)
-    mapping = {"Probe": {"demo": {"QueryParams": {"class": Model, "fields": {"symbols": field}}}}}
+    mapping = {
+        "Probe": {
+            "demo": {"QueryParams": {"class": Model, "fields": {"symbols": field}}}
+        }
+    }
     monkeypatch.setattr(ReferenceGenerator, "pi", SimpleNamespace(map=mapping))
-    first = ReferenceGenerator._get_provider_field_params("Probe", "QueryParams", "demo")
-    second = ReferenceGenerator._get_provider_field_params("Probe", "QueryParams", "demo")
+    first = ReferenceGenerator._get_provider_field_params(
+        "Probe", "QueryParams", "demo"
+    )
+    second = ReferenceGenerator._get_provider_field_params(
+        "Probe", "QueryParams", "demo"
+    )
     assert first == second
     assert field.json_schema_extra == before
     assert first[0]["choices"] == ["List", "typing.List"]
@@ -65,7 +73,9 @@ def test_python_writer_preserves_values_and_comments(tmp_path):
     builder.console = SimpleNamespace(log=lambda *args, **kwargs: None)
     source = "x: typing.List[Literal['List', 'typing.List']] = ['List']\n# Listing typing.List\n"
     builder._write(source, "probe")
-    assert (tmp_path / "package/probe.py").read_text() == source.replace("typing.List[Literal", "list[Literal")
+    assert (tmp_path / "package/probe.py").read_text() == source.replace(
+        "typing.List[Literal", "list[Literal"
+    )
 
 
 def test_provider_type_preserves_literal_values_and_no_nested_list(monkeypatch):
@@ -73,13 +83,23 @@ def test_provider_type_preserves_literal_values_and_no_nested_list(monkeypatch):
 
     class Model(BaseModel):
         x: list[Literal["List", "typing.List"]] = Field(
-            default=[], json_schema_extra={"demo": {"choices": ["List", "typing.List"], "multiple_items_allowed": True}}
+            default=[],
+            json_schema_extra={
+                "demo": {
+                    "choices": ["List", "typing.List"],
+                    "multiple_items_allowed": True,
+                }
+            },
         )
 
     field = Model.model_fields["x"]
-    mapping = {"Probe": {"demo": {"QueryParams": {"class": Model, "fields": {"x": field}}}}}
+    mapping = {
+        "Probe": {"demo": {"QueryParams": {"class": Model, "fields": {"x": field}}}}
+    }
     monkeypatch.setattr(ReferenceGenerator, "pi", SimpleNamespace(map=mapping))
-    result = ReferenceGenerator._get_provider_field_params("Probe", "QueryParams", "demo")[0]
+    result = ReferenceGenerator._get_provider_field_params(
+        "Probe", "QueryParams", "demo"
+    )[0]
     assert "'List'" in result["type"]
     assert "'typing.List'" in result["type"]
     assert "list[list[" not in result["type"].replace(" ", "")
@@ -97,7 +117,10 @@ def test_route_literal_and_default_preserved():
             Literal["List", "typing.List"],
             Query(
                 description="List typing.List",
-                json_schema_extra={"choices": ["List", "typing.List"], "multiple_items_allowed": True},
+                json_schema_extra={
+                    "choices": ["List", "typing.List"],
+                    "multiple_items_allowed": True,
+                },
             ),
         ] = "List",
     ):
@@ -122,7 +145,9 @@ def test_signature_generation_preserves_literal_default_and_description():
         "x",
         Parameter.KEYWORD_ONLY,
         default="typing.List",
-        annotation=Annotated[Literal["List", "typing.List"], OpenBBField(description="List typing.List")],
+        annotation=Annotated[
+            Literal["List", "typing.List"], OpenBBField(description="List typing.List")
+        ],
     )
     result = MethodDefinition.build_func_params(OrderedDict(x=param))
     assert "'typing.List'" in result
@@ -152,9 +177,15 @@ def test_generated_python_executes_with_exact_annotations_and_data(tmp_path):
     from openbb_core.app.model.field import OpenBBField
     from openbb_core.app.static.package_builder import MethodDefinition
 
-    description = "List typing.List  with  exact whitespace\nand a long description " * 2
-    annotation = Annotated[Literal["List", "typing.List"] | int, OpenBBField(description=description)]
-    param = Parameter("x", Parameter.KEYWORD_ONLY, default="typing.List", annotation=annotation)
+    description = (
+        "List typing.List  with  exact whitespace\nand a long description " * 2
+    )
+    annotation = Annotated[
+        Literal["List", "typing.List"] | int, OpenBBField(description=description)
+    ]
+    param = Parameter(
+        "x", Parameter.KEYWORD_ONLY, default="typing.List", annotation=annotation
+    )
     params = MethodDefinition.build_func_params(OrderedDict(x=param))
     source = (
         "import typing\nfrom typing import Annotated, Literal, Union\n"
@@ -166,7 +197,10 @@ def test_generated_python_executes_with_exact_annotations_and_data(tmp_path):
     builder.console = SimpleNamespace(log=lambda *args, **kwargs: None)
     builder._write(source, "probe")
     namespace = {}
-    exec(compile((tmp_path / "package/probe.py").read_text(), "probe.py", "exec"), namespace)  # noqa: S102
+    exec(  # noqa: S102
+        compile((tmp_path / "package/probe.py").read_text(), "probe.py", "exec"),
+        namespace,
+    )  # noqa: S102
     function = namespace["probe"]
     result = signature(function).parameters["x"]
     assert function() == "typing.List"
@@ -189,7 +223,9 @@ def test_python_writer_preserves_shadowed_typing_and_metadata(tmp_path):
     assert (tmp_path / "package/probe.py").read_text() == source
     source = "x: Annotated[typing.List[str], field(typing.List)] = []\n"
     builder._write(source, "probe")
-    assert (tmp_path / "package/probe.py").read_text() == "x: Annotated[list[str], field(typing.List)] = []\n"
+    assert (
+        tmp_path / "package/probe.py"
+    ).read_text() == "x: Annotated[list[str], field(typing.List)] = []\n"
 
 
 def test_multiple_items_metadata_matches_provider_validation(monkeypatch):
@@ -199,13 +235,22 @@ def test_multiple_items_metadata_matches_provider_validation(monkeypatch):
 
     class Model(BaseModel):
         flexible: str | list[str] | None = Field(
-            default=None, json_schema_extra={"multiple_items_allowed": True, "choices": []}
+            default=None,
+            json_schema_extra={"multiple_items_allowed": True, "choices": []},
         )
-        scalar: str = Field(json_schema_extra={"multiple_items_allowed": True, "choices": None})
+        scalar: str = Field(
+            json_schema_extra={"multiple_items_allowed": True, "choices": None}
+        )
 
-    mapping = {"Probe": {"demo": {"QueryParams": {"class": Model, "fields": Model.model_fields}}}}
+    mapping = {
+        "Probe": {
+            "demo": {"QueryParams": {"class": Model, "fields": Model.model_fields}}
+        }
+    }
     monkeypatch.setattr(ReferenceGenerator, "pi", SimpleNamespace(map=mapping))
-    params = ReferenceGenerator._get_provider_field_params("Probe", "QueryParams", "demo")
+    params = ReferenceGenerator._get_provider_field_params(
+        "Probe", "QueryParams", "demo"
+    )
     by_name = {p["name"]: p for p in json.loads(json.dumps(params, allow_nan=False))}
     assert by_name["flexible"]["type"] == "str | list[str] | None"
     assert by_name["scalar"]["type"] == "str"
@@ -253,9 +298,80 @@ def test_format_annotation_preserves_forward_references_and_unicode():
 
     from openbb_core.app.static.package_builder import DocstringGenerator
 
-    assert DocstringGenerator.get_field_type(ForwardRef("typing.List[Thing]"), True) == "typing.List[Thing]"
+    assert (
+        DocstringGenerator.get_field_type(ForwardRef("typing.List[Thing]"), True)
+        == "typing.List[Thing]"
+    )
     result = DocstringGenerator.get_field_type(
-        Union[Literal["文字 typing.List", "NoneType"], list[str], None], True, "website"  # noqa: UP007
+        Union[Literal["文字 typing.List", "NoneType"], list[str], None],  # noqa: UP007
+        True,
+        "website",  # noqa: UP007
     )
     assert "文字 typing.List" in result and "'NoneType'" in result
     assert "list[str]" in result and "None" in result
+
+
+def test_generated_data_annotations_survive_unused_import_cleanup(
+    tmp_path, monkeypatch
+):
+    """Generated native data commands must resolve types after build linting."""
+    import subprocess
+    import sys
+    from collections import OrderedDict
+    from inspect import Parameter
+    from types import ModuleType
+    from typing import Union, get_type_hints
+
+    import numpy as np
+    import pandas as pd
+    from openbb_core.app.static.package_builder import (
+        DataProcessingSupportedTypes,
+        MethodDefinition,
+    )
+    from pydantic import validate_call
+
+    param = Parameter(
+        "data",
+        Parameter.POSITIONAL_OR_KEYWORD,
+        annotation=Union[DataProcessingSupportedTypes.__constraints__],  # noqa: UP007
+    )
+    params = MethodDefinition.build_func_params(OrderedDict(data=param))
+    source = (
+        "from typing import Annotated, Any, ForwardRef, Union\n"
+        "from numpy import ndarray\n"
+        "from pandas import DataFrame, Series\n"
+        "import openbb_core.provider.abstract.data\n"
+        "from openbb_core.provider.abstract.data import Data\n"
+        "from openbb_core.app.model.field import OpenBBField\n"
+        f"def probe({params}):\n    return data\n"
+    )
+    builder = PackageBuilder.__new__(PackageBuilder)
+    builder.directory = tmp_path
+    builder.console = SimpleNamespace(log=lambda *args, **kwargs: None)
+    builder._write(source, "native_data")
+    module = tmp_path / "package/native_data.py"
+    subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-m",
+            "ruff",
+            "check",
+            "--select",
+            "F401",
+            "--fix",
+            str(module),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    generated = ModuleType("openbb_native_data_probe")
+    monkeypatch.setitem(sys.modules, generated.__name__, generated)
+    namespace = generated.__dict__
+    exec(compile(module.read_text(), "native_data.py", "exec"), namespace)  # noqa: S102
+    get_type_hints(namespace["probe"], globalns=namespace)
+    validated = validate_call(
+        namespace["probe"], config={"arbitrary_types_allowed": True}
+    )
+    for data in (pd.DataFrame({"close": [1.0, 2.0]}), np.array([1.0, 2.0])):
+        assert validated(data) is data

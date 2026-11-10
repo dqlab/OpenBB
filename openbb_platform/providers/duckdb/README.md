@@ -228,3 +228,33 @@ forward/backward reads require the corresponding saved OHLC columns. Missing
 prices remain null only for source-marked suspensions. Existing U.S. split-only
 and split-and-dividend modes retain their contracts. BaoStock adjustment factors
 are not inferred cash dividends or split events.
+
+## BaoStock18 offline admission
+
+See [BAOSTOCK18.md](BAOSTOCK18.md) for the separate, versioned narrow-basis
+offline importer and read-only reader. It does not change legacy A-share views.
+
+BaoStock18 reference verification also accepts the explicit opt-in scope
+`catalog_with_recorded_reference_verification` through `production-backup
+--backup-scope` and the shared driver's `backup_scope` config. The CLI default
+remains `full`; the driver's existing exhaustive reference scope remains its
+default. The new scope checks every canonical regular file, enumerates capture
+directories against the frozen per-file inventory, reconciles catalog/contract
+sizes when supplied and compares recorded SHA256 values. Missing hashes are
+computed from bytes. A fixed seed selects a sample across roots, top directories,
+depths and extensions: `min(file_count, 5000, max(1000, ceil(file_count * 0.005)))`.
+Every sampled hash is recomputed; any missing reference, size discrepancy or hash
+discrepancy aborts before admission. A sample cap insufficient to cover the defined
+strata also aborts.
+
+Freeze and backup summaries report checked `count`/`bytes`,
+`recorded_hash_comparisons`, `recomputed_files`/`recomputed_bytes`,
+`missing_hash_recomputed_files`, `sample_recomputed_files`/`sample_recomputed_bytes`,
+`unread_bytes`, and `missing`/`size_mismatch`/`hash_mismatch`, plus seed, sample
+paths and stratum count. Hash comparisons count unique files; every repeated
+catalog hash/size must still agree. These receipts explicitly describe recorded
+verification and sampling, and do not certify exhaustive payload byte rereads.
+Both catalog reference scopes keep the 14400 second backup/restore ceiling.
+Catalog copies and restored catalogs retain independent full byte verification.
+In the recorded scope, generated streaming reference inventories may be up to 4 GiB; other explicitly
+approved metadata retains the 64 MiB per-file / 256 MiB aggregate bound.

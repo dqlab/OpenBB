@@ -14,6 +14,7 @@ import traceback
 import typing as typing_module
 from collections import OrderedDict
 from collections.abc import Callable
+from contextvars import ContextVar
 from copy import deepcopy
 from inspect import Parameter, _empty, isclass, signature
 from json import dumps, load
@@ -67,6 +68,38 @@ try:
 except ImportError:
     CHARTING_INSTALLED = False
 
+_BUILD_CHARTING_FUNCTIONS: ContextVar[dict[str, set[str]] | None] = ContextVar(
+    "build_charting_functions", default=None
+)
+
+
+@contextlib.contextmanager
+def _build_charting_functions():
+    """Cache chart discovery only for the current package build."""
+    if _BUILD_CHARTING_FUNCTIONS.get() is not None:
+        yield
+        return
+    token = _BUILD_CHARTING_FUNCTIONS.set({})
+    try:
+        yield
+    finally:
+        _BUILD_CHARTING_FUNCTIONS.reset(token)
+
+
+def _has_charting_function(path: str) -> bool:
+    """Check chart support, reusing discovery during a package build."""
+    if not CHARTING_INSTALLED:
+        return False
+    cache = _BUILD_CHARTING_FUNCTIONS.get()
+    if cache is None:
+        functions = Charting.functions()
+    else:
+        if "functions" not in cache:
+            cache["functions"] = set(Charting.functions())
+        functions = cache["functions"]
+    return path.replace("/", "_")[1:] in functions
+
+
 try:
     import fcntl  # type: ignore
 
@@ -114,7 +147,7 @@ def _normalize_annotation_types(source: str) -> str:
     if any(
         isinstance(node, ast.Name)
         and node.id == "typing"
-        and isinstance(node.ctx, (ast.Store, ast.Del))
+        and isinstance(node.ctx, ast.Store | ast.Del)
         or isinstance(node, ast.arg)
         and node.arg == "typing"
         for node in ast.walk(tree)
@@ -124,15 +157,39 @@ def _normalize_annotation_types(source: str) -> str:
     edits = []
     annotations = []
     for node in ast.walk(tree):
-        if isinstance(node, (ast.arg, ast.AnnAssign)) and node.annotation:
+        if isinstance(node, ast.arg | ast.AnnAssign) and node.annotation:
             annotations.append(node.annotation)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns:
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.returns:
             annotations.append(node.returns)
     for annotation in annotations:
         nodes = [annotation]
         while nodes:
             node = nodes.pop()
             if isinstance(node, ast.Call):
+                # Keep the existing native-data imports visible to Ruff. Calls
+                # in Annotated metadata and literal values remain untouched.
+                forward_ref = (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "ForwardRef"
+                    or isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "typing"
+                    and node.func.attr == "ForwardRef"
+                )
+                if (
+                    forward_ref
+                    and len(node.args) == 1
+                    and not node.keywords
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value in {"Data", "DataFrame", "Series", "ndarray"}
+                ):
+                    edits.append(
+                        (
+                            position(node.lineno, node.col_offset),
+                            position(node.end_lineno, node.end_col_offset),
+                            node.args[0].value,
+                        )
+                    )
                 continue
             if (
                 isinstance(node, ast.Subscript)
@@ -149,7 +206,11 @@ def _normalize_annotation_types(source: str) -> str:
                 nodes.extend(ast.iter_child_nodes(node))
             if isinstance(node, ast.Name) and node.id == "NoneType":
                 edits.append(
-                    (position(node.lineno, node.col_offset), position(node.end_lineno, node.end_col_offset), "None")
+                    (
+                        position(node.lineno, node.col_offset),
+                        position(node.end_lineno, node.end_col_offset),
+                        "None",
+                    )
                 )
             if (
                 isinstance(node, ast.Attribute)
@@ -184,7 +245,11 @@ def _format_annotation(annotation: Any) -> str:
         return source
     edits = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "typing":
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "typing"
+        ):
             edits.append((node.col_offset, node.end_col_offset, node.attr))
         elif isinstance(node, ast.Name) and node.id == "NoneType":
             edits.append((node.col_offset, node.end_col_offset, "None"))
@@ -301,13 +366,14 @@ class PackageBuilder:
                 try:
                     self._clean(modules)
                     ext_map = self._get_extension_map()
-                    self._save_modules(modules, ext_map)
-                    self._save_reference_file(ext_map)
+                    with _build_charting_functions():
+                        self._save_modules(modules, ext_map)
+                        self._save_reference_file(ext_map)
                     self._save_package()
                     if self.lint:
                         self._run_linters()
                 except BaseException as e:
-                    if not isinstance(e, (KeyboardInterrupt, SystemExit)):
+                    if not isinstance(e, KeyboardInterrupt | SystemExit):
                         self.console.error("\nBuild failed!")  # type: ignore  # pylint: disable=E1101
                         self.console.error(f"Error: {e}")  # type: ignore  # pylint: disable=E1101
                         self.console.error(traceback.format_exc())  # type: ignore  # pylint: disable=E1101
@@ -353,6 +419,7 @@ class PackageBuilder:
             ]
         return ext_map
 
+    @_build_charting_functions()
     def _save_modules(
         self,
         modules: str | list[str] | None = None,
@@ -391,6 +458,7 @@ class PackageBuilder:
         code += "### THIS FILE IS AUTO-GENERATED. DO NOT EDIT. ###"
         self._write(code=code, name="__init__")
 
+    @_build_charting_functions()
     def _save_reference_file(self, ext_map: dict[str, list[str]] | None = None):
         """Save the reference.json file."""
         self.console.log("\nWriting reference file...")
@@ -736,7 +804,11 @@ class ImportDefinition:
                         "__name__",
                         str(hint_type).rsplit(".", maxsplit=1)[-1],
                     )
-                    type_name = raw_type_name.split("[")[0] if "[" in raw_type_name else raw_type_name
+                    type_name = (
+                        raw_type_name.split("[")[0]
+                        if "[" in raw_type_name
+                        else raw_type_name
+                    )
 
                 type_name_str = str(type_name)
                 if type_name_str.startswith("typing.Optional"):
@@ -1265,7 +1337,7 @@ class MethodDefinition:
         path_params = PathHandler.extract_path_parameters(path)
 
         # we need to add the chart parameter here bc of the docstring generation
-        if CHARTING_INSTALLED and path.replace("/", "_")[1:] in Charting.functions():
+        if _has_charting_function(path):
             parameter_map["chart"] = Parameter(
                 name="chart",
                 kind=Parameter.POSITIONAL_OR_KEYWORD,
@@ -1719,7 +1791,11 @@ class MethodDefinition:
                     chunk += char
                 if chunk:
                     parts.append(repr(chunk))
-                desc_repr = "(\n                    " + "\n                    ".join(parts) + "\n                )"
+                desc_repr = (
+                    "(\n                    "
+                    + "\n                    ".join(parts)
+                    + "\n                )"
+                )
 
             default_part = ""
 
@@ -1728,7 +1804,11 @@ class MethodDefinition:
                 if default_repr == "Ellipsis":
                     default_repr = "None"
                 default_part = f" = {default_repr}"
-            if param.default is None and "| None" not in type_repr and "Optional" not in type_repr:
+            if (
+                param.default is None
+                and "| None" not in type_repr
+                and "Optional" not in type_repr
+            ):
                 type_repr += " | None"
             final_param = f"""{param.name.strip()}: Annotated[
             {type_repr},
@@ -1898,7 +1978,7 @@ class MethodDefinition:
         if dependency_calls:
             code += "\n".join(dependency_calls) + "\n\n"
 
-        if CHARTING_INSTALLED and path.replace("/", "_")[1:] in Charting.functions():
+        if _has_charting_function(path):
             parameter_map["chart"] = Parameter(
                 name="chart",
                 kind=Parameter.POSITIONAL_OR_KEYWORD,
@@ -2085,7 +2165,11 @@ class MethodDefinition:
 
                                 default_str = param_dict[param_value][1]
                                 try:
-                                    default = ast.literal_eval(default_str) if default_str else None
+                                    default = (
+                                        ast.literal_eval(default_str)
+                                        if default_str
+                                        else None
+                                    )
                                 except (ValueError, SyntaxError):
                                     default = None
                             else:
@@ -2172,7 +2256,11 @@ class DocstringGenerator:
             String representation of the field type.
         """
         rendered = _format_annotation(field_type)
-        if not is_required and target == "docstring" and type(None) not in get_args(field_type):
+        if (
+            not is_required
+            and target == "docstring"
+            and type(None) not in get_args(field_type)
+        ):
             rendered = f"Optional[{rendered}]"
         return rendered
 
@@ -3508,7 +3596,9 @@ class ReferenceGenerator:
                 )
                 field_type_str = f"{field_type_str} | {expanded_type}"
 
-            default_value = None if field_info.default is PydanticUndefined else field_info.default
+            default_value = (
+                None if field_info.default is PydanticUndefined else field_info.default
+            )
             if default_value == "":
                 default_value = None
 
@@ -3607,7 +3697,9 @@ class ReferenceGenerator:
         # Extract only the Parameters section (between "Parameters" and "Returns")
         params_section = ""
         if "Parameters" in docstring and "Returns" in docstring:
-            params_section = docstring.split("Parameters")[1].split("Returns")[0]
+            params_section = docstring.split("Parameters")[1].split(
+                "Returns", maxsplit=1
+            )[0]
         elif "Parameters" in docstring:
             params_section = docstring.split("Parameters")[1]
         else:
@@ -3758,7 +3850,9 @@ class ReferenceGenerator:
                     continue
 
             param_type = param.annotation
-            is_optional = param.default is not Parameter.empty  # Parameter is optional if it has a default value
+            is_optional = (
+                param.default is not Parameter.empty
+            )  # Parameter is optional if it has a default value
             description = ""
             choices = None
             default = param.default if param.default is not Parameter.empty else None
@@ -3789,7 +3883,8 @@ class ReferenceGenerator:
                     if hasattr(meta, "choices"):
                         choices = meta.choices
                     if hasattr(meta, "default") and all(
-                        meta.default is not sentinel for sentinel in (PydanticUndefined, Parameter.empty, Ellipsis)
+                        meta.default is not sentinel
+                        for sentinel in (PydanticUndefined, Parameter.empty, Ellipsis)
                     ):
                         default = meta.default
                     if hasattr(meta, "json_schema_extra"):
@@ -3802,7 +3897,11 @@ class ReferenceGenerator:
             if str(default.__class__).endswith("Query'>") or "Query" in str(
                 default.__class__
             ):
-                param_type = param_type.annotation if hasattr(param_type, "annotation") else str(param_type)
+                param_type = (
+                    param_type.annotation
+                    if hasattr(param_type, "annotation")
+                    else str(param_type)
+                )
                 description = default.description  # type: ignore
                 json_extra = deepcopy(default.json_schema_extra or {})  # type: ignore
                 has_default = hasattr(default, "default") and default.default not in [  # type: ignore
@@ -3828,7 +3927,8 @@ class ReferenceGenerator:
                     "default": (
                         None
                         if default in (PydanticUndefined, Parameter.empty, Ellipsis)
-                        else default),
+                        else default
+                    ),
                     "optional": is_optional,
                     "choices": choices or json_extra.pop("choices", []),
                     "multiple_items_allowed": json_extra.pop(
@@ -4224,7 +4324,9 @@ class ReferenceGenerator:
                     result_type = match.group(1)
                 # Check for OBBject_ModelName pattern
                 elif "OBBject_" in type_str:
-                    result_type = type_str.split("OBBject_")[1].split("'")[0]
+                    result_type = type_str.split("OBBject_")[1].split("'", maxsplit=1)[
+                        0
+                    ]
 
             # If not found, try to extract from docstring
             if result_type == "list[Data]":

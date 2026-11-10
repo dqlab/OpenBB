@@ -11,6 +11,10 @@ packages = [{ include = "openbb_duckdb" }]
 python = ">=3.10,<4"
 openbb-core = "^1.6.13"
 duckdb = ">=1.0.0,<2"
+pyarrow = { version = ">=16,<27", optional = true }
+
+[tool.poetry.extras]
+baostock18 = ["pyarrow"]
 
 [build-system]
 requires = ["poetry-core"]

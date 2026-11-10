@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dq-historical-market-data-collector"
-version = "0.1.6"
+version = "0.1.7"
 description = "Independent historical market-data collection engine for OpenBB."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,6 +14,7 @@ dependencies = ["openbb-collector-core>=0.1.4,<0.2", "pydantic>=2.7,<3", "PyYAML
 dq-historical-market-data-collector = "dq_historical_market_data_collector.cli:main"
 dq-cffex-daily-collector = "dq_historical_market_data_collector.cffex.cli:main"
 dq-cffex-acquire = "dq_historical_market_data_collector.cffex.acquire:main"
+dq-etf-option-chain-collector = "dq_historical_market_data_collector.etf_options.cli:main"
 
 [project.optional-dependencies]
 ssh = ["openbb-collector-core[ssh]>=0.1.4,<0.2"]
@@ -21,6 +22,7 @@ parquet = ["pyarrow>=15"]
 duckdb = ["duckdb>=1"]
 openbb = ["openbb-core>=1.6.13,<2"]
 cffex = ["openbb-akshare>=1.1,<2"]
+etf-options = ["openbb-akshare>=1.2,<2"]
 dev = ["pytest>=8", "ruff>=0.5", "build>=1", "openbb-core>=1.6.10,<2"]
 
 [tool.setuptools.packages.find]
@@ -29,6 +31,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 dq_historical_market_data_collector = ["example.yaml"]
 "dq_historical_market_data_collector.cffex" = ["README.md"]
+"dq_historical_market_data_collector.etf_options" = ["README.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "../core/src"]

@@ -9,7 +9,7 @@ historical metadata is not established. The repository's reference loaders pass
 both values through, and the CLI handles both as falsy. External consumers and
 their compatibility with this change are unknown.
 
-For the final candidate (builder SHA-256
+For the historical candidate validated on 2026-11-01 (builder SHA-256
 `840c3a22969ba55b4d36240b953d172b9063966316e5a9065aec80023910b309`,
 regression test SHA-256
 `d91844ae27d4908a597a7f50af018f6e324b18a5f55a7d968ab187adc4b463b6`):
@@ -37,3 +37,49 @@ regression test SHA-256
 These are local observations, not CI results or production validation. The
 historical 803-item positional comparison is an inventory, not proof that each
 metadata change is semantically compatible.
+
+
+## Develop rebase validation, 2026-11-10
+
+Base: `ed080b94ea15440f6fcdffc7b1e969cf3d856365`, including PRs #8 and #7.
+The import conflict was resolved by retaining both develop's `ContextVar` build
+cache and the metadata `deepcopy` import. Provider and collector implementations
+are unchanged by this PR.
+
+An additional public SDK check found a regression missed by the original core
+suite: `obb.technical.sma(DataFrame(...), length=2)` failed with
+`NameError: ndarray is not defined`. The annotation normalizer now retains
+develop's handling of the four native data forward references (`Data`,
+`DataFrame`, `Series`, `ndarray`) inside parsed annotations. It leaves literal
+values and annotation metadata intact. A regression test reproduces the failure
+after Ruff removes unused imports and passes with the correction, using both
+DataFrame and ndarray inputs.
+
+Current local observations, using Python 3.12.3 and isolated settings:
+
+- Core: **911 passed, 408 subtests passed**, zero failed or skipped. The reference
+  regression file is included and also passed independently: **13 passed**.
+- A fresh full build has 408 callable routes, matching the baseline route set.
+  Parameter names, kinds, underlying types, defaults and return types match the
+  baseline for all 408 commands. Full annotated signature strings differ where
+  description whitespace is now preserved.
+- Repeated reference generation is equal within a build and leaves 6,268
+  provider field metadata entries unchanged. Written JSON matches the reference
+  structure generated in that same build. Mocked profile/ETF commands and a
+  real local SMA calculation pass. These are offline checks.
+- Changed-source Ruff 0.12.12 / 0.15.22 and Black 25.1.0 pass. Generated-code
+  Black passes with the builder's 122-character setting.
+- **Blocked, not merged:** explicit generated-code Ruff checks exit 1 with
+  **85 diagnostics** (68 D105, 13 E501, 4 D401), under both Ruff versions. The
+  baseline has the same rule/file/message multiset. No lint rule was relaxed.
+  A successful build exit still does not establish passing generated-code lint.
+- The first core run had four home-path masking failures caused by an
+  inconsistent test launcher. The corrected launcher isolates both `Path.home`
+  and `expanduser`; repository assertions were retained. The final counts above
+  come from the corrected environment after the native-data fix.
+
+Current builder SHA-256: `eb58526a8e0d96fee4000c7255cf426148ae2bfef6c3139aa51392bcd91ae203`.
+Current regression test SHA-256: `0b81bc3c76c34bfa98d07be8f0b53ab29a2d352dd3d711b30017ae564e69f328`.
+
+No live provider, gateway, DQ or deployment integration was tested. The PR remains
+open because the user required red checks to block merging.
