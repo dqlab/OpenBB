@@ -1,7 +1,7 @@
 """Offline source-contract tests; synthetic fixtures are not live market data."""
 
 import pytest
-from openbb_akshare.utils.etf_option_quotes import FIELDS, parse_batch, validate_symbols
+from openbb_akshare.models.etf_options import FIELDS, parse_batch, validate_symbols
 
 STAMP = "2026-10-14T08:00:00+00:00"
 
@@ -38,7 +38,7 @@ def test_full_quote_preserves_source(extended):
     assert row["source_time"] == "2026-10-14T15:00:00+08:00"
     assert row["raw_extra_fields"] == values[43:]
     if extended:
-        assert "expiration" not in row and "option_type" not in row
+        assert row["expiration"] == "2026-12-23" and row["option_type"] == "call"
 
 
 @pytest.mark.parametrize("width", [1, 42, 44, 50, 52])
@@ -82,7 +82,10 @@ def test_bad_numeric_preserves_raw(value):
     assert row["quote_error"] and row["raw_fields"]["买价"] == value
 
 
-@pytest.mark.parametrize("token", ["CON_OP_90007393", "90007393 ", "90007393,90007393", "", "123", "90007393;id"])
+@pytest.mark.parametrize(
+    "token",
+    ["CON_OP_90007393", "90007393 ", "90007393,90007393", "", "123", "90007393;id"],
+)
 def test_identifiers_not_repaired(token):
     """Never normalize malformed source identifiers."""
     with pytest.raises(ValueError):
@@ -103,7 +106,9 @@ def test_absent_and_zero_not_synthetic_prices():
     values[FIELDS.index("卖价")] = "0"
     row = parse_batch(assignment(values), ["90007393"], STAMP)[0]
     assert row["bid"] is None and row["ask"] == 0
-    assert row["quote_error"] is None  # collector owns pricing-eligibility classification
+    assert (
+        row["quote_error"] is None
+    )  # collector owns pricing-eligibility classification
 
 
 def test_fetch_uses_bounded_transport(monkeypatch):
@@ -111,6 +116,7 @@ def test_fetch_uses_bounded_transport(monkeypatch):
     from openbb_akshare.utils import etf_option_quotes as quotes
 
     urls = []
+
     def read(url):
         urls.append(url)
         return assignment(payload()).encode("gb18030")
@@ -142,7 +148,9 @@ def test_loopback_transport(case, monkeypatch):
                 self.send_header("Location", "/other")
             if case == "gzip":
                 self.send_header("Content-Encoding", "gzip")
-            self.send_header("Content-Length", str(1_000_001 if case in {"large", "redirect"} else 3))
+            self.send_header(
+                "Content-Length", str(1_000_001 if case in {"large", "redirect"} else 3)
+            )
             self.end_headers()
             if case == "redirect":
                 release.wait(2)
@@ -165,6 +173,7 @@ def test_loopback_transport(case, monkeypatch):
     thread.start()
     # Exercise the shared helper with deterministic settings and no proxy.
     from openbb_core.provider.utils import helpers
+
     monkeypatch.setattr(helpers, "get_python_request_settings", lambda: {})
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "REQUESTS_CA_BUNDLE"):
         monkeypatch.delenv(name, raising=False)
@@ -177,7 +186,11 @@ def test_loopback_transport(case, monkeypatch):
                 # Successful trickle illustrates that read timeout is not a deadline.
                 assert time.monotonic() - started >= 0.12
         else:
-            error = {"large": "byte_limit", "redirect": "redirect_unsupported", "gzip": "encoding_unsupported"}[case]
+            error = {
+                "large": "byte_limit",
+                "redirect": "redirect_unsupported",
+                "gzip": "encoding_unsupported",
+            }[case]
             with pytest.raises(ValueError, match=error):
                 quotes._read_quote_body(url)
             if case == "redirect":
@@ -199,10 +212,21 @@ def test_fetcher_round_trip_and_registration(monkeypatch):
 
     fetcher = model.AkshareEtfOptionQuotesFetcher
     assert akshare_provider.fetcher_dict["AkshareEtfOptionQuotes"] is fetcher
-    assert all(d.command != "etf_option_quotes" and d.model != "AkshareEtfOptionQuotes" for d in DATASETS)
+    assert all(
+        d.command != "etf_option_quotes" and d.model != "AkshareEtfOptionQuotes"
+        for d in DATASETS
+    )
     query = fetcher.transform_query({"symbols": "90007393"})
-    monkeypatch.setattr(model, "fetch_quotes", lambda symbols: [{"symbol": symbols, "quote_error": "missing_quote"}])
-    rows = fetcher.transform_data(query, asyncio.run(fetcher.aextract_data(query, None)))
+    from openbb_akshare.models import etf_options
+
+    monkeypatch.setattr(
+        etf_options,
+        "fetch_quotes",
+        lambda symbols: [{"symbol": symbols, "quote_error": "missing_quote"}],
+    )
+    rows = fetcher.transform_data(
+        query, asyncio.run(fetcher.aextract_data(query, None))
+    )
     assert rows[0].symbol == "90007393" and rows[0].quote_error == "missing_quote"
     with pytest.raises(ValueError):
         fetcher.transform_query({"symbols": "90007393,90007393"})

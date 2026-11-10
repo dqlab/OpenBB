@@ -67,17 +67,22 @@ def test_requests_digest_hook_precedes_session_hook(isolated):
     session = helpers.get_requests_session()
     session.auth = HTTPDigestAuth("synthetic", "synthetic")
     seen = []
-    session.hooks["response"].append(lambda response, **kwargs: seen.append(body.bytes_read) or response)
+    session.hooks["response"].append(
+        lambda response, **kwargs: seen.append(body.bytes_read) or response
+    )
     response = session.get("https://example.invalid/", stream=True)
     assert len(calls) == 2 and body.bytes_read == 2_000_000
     assert seen == [2_000_000]
     response.close()
 
 
-
 @pytest.mark.parametrize(
     "auth",
-    [HTTPDigestAuth("synthetic", "synthetic"), ReadingAuth(), BasicSubclass("synthetic", "synthetic")],
+    [
+        HTTPDigestAuth("synthetic", "synthetic"),
+        ReadingAuth(),
+        BasicSubclass("synthetic", "synthetic"),
+    ],
 )
 def test_unsafe_auth_rejected_before_request(isolated, monkeypatch, auth):
     body, calls = isolated
@@ -87,7 +92,9 @@ def test_unsafe_auth_rejected_before_request(isolated, monkeypatch, auth):
     assert not calls and body.bytes_read == 0
 
 
-@pytest.mark.parametrize("auth", [("synthetic", "synthetic"), HTTPBasicAuth("synthetic", "synthetic")])
+@pytest.mark.parametrize(
+    "auth", [("synthetic", "synthetic"), HTTPBasicAuth("synthetic", "synthetic")]
+)
 def test_basic_auth_does_not_read_challenge(isolated, monkeypatch, auth):
     body, calls = isolated
     monkeypatch.setattr(helpers, "get_python_request_settings", lambda: {"auth": auth})

@@ -17,6 +17,7 @@ from .helpers import (
     import_routers,
     parse_example_string,
 )
+from .lab_inventory import installed_providers
 
 
 def check_router_function_models() -> list[str]:
@@ -97,9 +98,19 @@ def check_api(
         all_fields = get_all_fields(model.strip("'"))
         all_fields.append("provider")
         required_fields_met = False
+        applicable = 0
 
         for api_example in parsed_examples["APIEx"]:
             params = ast.literal_eval(api_example.get("params", "{}"))
+            provider = params.get("provider")
+            if provider and provider not in installed_providers():
+                continue
+            if provider and provider not in ProviderInterface().map[model.strip("'")]:
+                api_example_violation.append(
+                    f"{router_name}: installed provider {provider} does not support {model}"
+                )
+                continue
+            applicable += 1
             if not required_fields_met and required_fields.issubset(params.keys()):
                 required_fields_met = True
 
@@ -111,7 +122,7 @@ def check_api(
                     )
 
         # If after checking all examples, required fields are still not met
-        if not required_fields_met:
+        if applicable and not required_fields_met:
             api_example_violation.append(
                 f"'{router_name}' > '{function.__name__}': missing example with required fields only > {required_fields}"
             )
@@ -141,8 +152,12 @@ def check_router_command_examples() -> list[str]:
                 function.__name__,
             )
             if decorator:
-                decorator_details = get_decorator_details(function)
-                if decorator_details and decorator_details.name == "router.command":
+                decorator_details = get_decorator_details(function, decorator)
+                if not decorator_details or decorator_details.name != "router.command":
+                    general_violation.append(
+                        f"'{router_name}' > '{function.__name__}': could not parse command decorator"
+                    )
+                else:
                     keywords = decorator_details.kwargs or {}
                     examples = keywords.get("examples", [])
                     # General checks

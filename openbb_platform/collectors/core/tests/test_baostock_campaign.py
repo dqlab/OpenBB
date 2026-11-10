@@ -674,7 +674,7 @@ def test_compile_rejects_unsupported_and_nonliteral_before_writes(tmp_path):
 
 Q2_BOUNDARIES = r'''
 if os.environ.get("CAMPAIGN_OFFLINE") == "1":
-    import fcntl, signal, subprocess
+    import contextlib, signal
     from openbb_collector_core import raw_acquisition as qraw
     q2_fired = False
     q2_stage = None
@@ -753,15 +753,18 @@ if os.environ.get("CAMPAIGN_OFFLINE") == "1":
             q2_fire('pending_cleanup')
         return result
     os.close = q2_close_call
-    q2_flock = fcntl.flock
-    def q2_flock_call(fd, operation):
-        if operation == fcntl.LOCK_UN:
-            q2_fire('unlock_before')
-        result = q2_flock(fd, operation)
-        if operation == fcntl.LOCK_UN:
-            q2_fire('unlock_after')
-        return result
-    fcntl.flock = q2_flock_call
+    # Campaign ownership now closes the parent's descriptor while workers may
+    # retain it. Observe that real context exit instead of a removed LOCK_UN.
+    q2_ownership = qraw._ownership
+    @contextlib.contextmanager
+    def q2_ownership_call(*args, **kwargs):
+        with q2_ownership(*args, **kwargs) as fd:
+            try:
+                yield fd
+            finally:
+                q2_fire('owner_close_before')
+        q2_fire('owner_close_after')
+    qraw._ownership = q2_ownership_call
     def q2_profile(frame, event, arg):
         if (frame.f_code.co_name == 'is_set' and frame.f_back is not None
                 and frame.f_back.f_code.co_name == 'finalize'
@@ -776,7 +779,14 @@ if os.environ.get("CAMPAIGN_OFFLINE") == "1":
             q2_fire('snapshot_return')
         elif frame.f_code.co_name == 'finalize':
             q2_fire('finalize_return')
-    sys.setprofile(q2_profile)
+    # These callbacks observe the campaign's final decision only. Profiling SDK
+    # spawn workers adds millions of unrelated import callbacks and changes the
+    # timing of the boundary test without observing any campaign frame.
+    if (os.environ.get('Q2_BOUNDARY') in {
+            'snapshot_return', 'final_sample_before', 'final_sample_after', 'finalize_return'}
+            and 'openbb_collector_core.baostock_campaign' in sys.orig_argv
+            and 'run' in sys.orig_argv):
+        sys.setprofile(q2_profile)
 '''
 
 
@@ -791,7 +801,7 @@ Q2_PRE_CUTOFF = [
 ]
 Q2_POST_CUTOFF = [
     'eligible_replace_before', 'eligible_replace_after', 'eligible_dirsync_after',
-    'finalize_return', 'unlock_before', 'unlock_after', 'final_sample_after',
+    'finalize_return', 'owner_close_before', 'owner_close_after', 'final_sample_after',
 ]
 
 

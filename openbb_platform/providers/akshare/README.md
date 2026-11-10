@@ -36,10 +36,15 @@ Native commands (source-shaped rows, one command per AKShare interface):
 
 `obb.akshare.etf_option_quotes(symbols="10012535,10012536")` requests up to
 50 exact eight-digit Sina option identifiers. The source-reported underlying code
-does not independently establish exchange or security identity. Appended fields
-are retained without interpretation; no contract universe, multiplier, historical
-reconstruction, or official completeness is asserted. Missing and malformed rows
-remain explicit diagnostics, and source time is distinct from fetch time.
+does not independently establish exchange or security identity. The current
+51-field parser retains expiration, option type and raw appended fields. Missing
+and malformed rows remain explicit diagnostics, and source time is distinct from
+fetch time. Contract discovery remains available through `etf_option_contracts`;
+CFFEX models and collectors retain their existing interfaces.
+
+The registered fetcher remains in `models.etf_options`. The older
+`models.etf_option_quotes` path re-exports those same classes; both quote utility
+paths share the current parser and bounded transport.
 
 The source is a direct Sina batch HTTP request, based on the source used by
 AKShare's single-symbol function; its batch protocol is not independently

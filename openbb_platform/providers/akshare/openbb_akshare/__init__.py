@@ -2,7 +2,14 @@
 
 from openbb_core.provider.abstract.provider import Provider
 
-from openbb_akshare.models.etf_option_quotes import AkshareEtfOptionQuotesFetcher
+from openbb_akshare.models.cffex_options import (
+    AkshareCffexOptionExpiriesFetcher,
+    AkshareCffexOptionQuotesFetcher,
+)
+from openbb_akshare.models.etf_options import (
+    AkshareEtfOptionContractsFetcher,
+    AkshareEtfOptionQuotesFetcher,
+)
 from openbb_akshare.models.futures_historical import AkshareFuturesHistoricalFetcher
 from openbb_akshare.models.native import NATIVE_FETCHERS
 
@@ -15,8 +22,11 @@ akshare_provider = Provider(
     ),
     credentials=None,
     fetcher_dict={
-        "AkshareEtfOptionQuotes": AkshareEtfOptionQuotesFetcher,
         "FuturesHistorical": AkshareFuturesHistoricalFetcher,
+        "AkshareCffexOptionExpiries": AkshareCffexOptionExpiriesFetcher,
+        "AkshareCffexOptionQuotes": AkshareCffexOptionQuotesFetcher,
+        "AkshareEtfOptionContracts": AkshareEtfOptionContractsFetcher,
+        "AkshareEtfOptionQuotes": AkshareEtfOptionQuotesFetcher,
         **NATIVE_FETCHERS,
     },
     repr_name="AKShare",
