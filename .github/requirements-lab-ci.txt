@@ -25,3 +25,6 @@ types-PyYAML
 types-python-dateutil
 types-setuptools
 types-six
+
+# Keep the SDK transport aligned with the saved public news response fixtures.
+yfinance==1.8.0

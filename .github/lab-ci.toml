@@ -318,6 +318,7 @@ prefix = "/ibkr"
 commands = [
     "fundamental_facts",
     "lineage",
+    "native_query",
     "quality",
 ]
 suites = ["openbb_platform/providers/dq_quant_data/tests"]

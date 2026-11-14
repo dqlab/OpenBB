@@ -1,5 +1,6 @@
 """Tests for YFinance fetchers."""
 
+import asyncio
 from datetime import date
 
 import pytest
@@ -14,6 +15,9 @@ from openbb_yfinance.models.crypto_historical import YFinanceCryptoHistoricalFet
 from openbb_yfinance.models.currency_historical import YFinanceCurrencyHistoricalFetcher
 from openbb_yfinance.models.equity_historical import YFinanceEquityHistoricalFetcher
 from openbb_yfinance.models.equity_profile import YFinanceEquityProfileFetcher
+from openbb_yfinance.models.equity_profile_source import (
+    YFinanceEquityProfileSourceFetcher,
+)
 from openbb_yfinance.models.equity_quote import YFinanceEquityQuoteFetcher
 from openbb_yfinance.models.equity_screener import YFinanceEquityScreenerFetcher
 from openbb_yfinance.models.etf_info import YFinanceEtfInfoFetcher
@@ -44,6 +48,17 @@ from openbb_yfinance.models.undervalued_large_caps import YFUndervaluedLargeCaps
 test_credentials = UserService().default_user_settings.credentials.model_dump(
     mode="json"
 )
+
+
+def test_yfinance_equity_profile_source_fetcher(monkeypatch):
+    """Exercise the registered source fetcher with a literal offline SDK value."""
+    import yfinance
+
+    payload = {"symbol": "A", "native_extra": None}
+    monkeypatch.setattr(yfinance.Ticker, "get_info", lambda self: payload)
+    fetcher = YFinanceEquityProfileSourceFetcher()
+    result = asyncio.run(fetcher.fetch_data({"symbol": "A"}, {}))
+    assert result[0].payload == [payload]
 
 
 def scrub_string(key, value):

@@ -78,6 +78,26 @@ def test_python_writer_preserves_values_and_comments(tmp_path):
     )
 
 
+def test_python_writer_uses_public_pandas_types_only_in_annotations(tmp_path):
+    """Generated signatures use public types without changing literal evidence."""
+    builder = PackageBuilder.__new__(PackageBuilder)
+    builder.directory = tmp_path
+    builder.console = SimpleNamespace(log=lambda *args, **kwargs: None)
+    source = (
+        "def probe(x: pandas.core.frame.DataFrame | pandas.core.series.Series, "
+        "y: Annotated[Literal['pandas.core.frame.DataFrame'], "
+        "Field(description='pandas.core.series.Series')]):\n"
+        "    return 'pandas.core.frame.DataFrame'\n"
+        "# pandas.core.series.Series\n"
+    )
+    builder._write(source, "pandas_probe")
+    expected = source.replace(
+        "x: pandas.core.frame.DataFrame | pandas.core.series.Series",
+        "x: pandas.DataFrame | pandas.Series",
+    )
+    assert (tmp_path / "package/pandas_probe.py").read_text() == expected
+
+
 def test_provider_type_preserves_literal_values_and_no_nested_list(monkeypatch):
     """Check provider type preserves literal values and no nested list."""
 
