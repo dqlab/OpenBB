@@ -316,6 +316,10 @@ prefix = "/ibkr"
 
 [router_tests.dq_data]
 commands = [
+    "history/describe",
+    "history/scopes",
+    "history/coverage",
+    "history/pages",
     "fundamental_facts",
     "lineage",
     "native_query",

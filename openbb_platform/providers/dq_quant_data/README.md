@@ -265,3 +265,91 @@ python -m ruff check openbb_platform/providers/dq_quant_data
 
 Offline fixtures cover provider mappings, router registration, HTTP settings,
 pagination, source values and provenance. Credentialed API checks are separate.
+
+### Frozen native history (explicit opt-in)
+
+`openbb-dq-quant-data>=0.1.10` adds `obb.dq_data.history.describe`,
+`scopes`, `coverage` and `pages`. Install this package and its matching OpenBB
+core in an isolated environment, set `OPENBB_AUTO_BUILD=false`, then explicitly
+run `python -m openbb_core.build`. Verify the generated callables before use.
+Installing source alone does not upgrade a running consumer's generated SDK.
+
+Set `OPENBB_DQ_HISTORY_CONFIG` to an absolute operator-owned JSON file:
+
+```json
+{
+  "transport": "ssh-command",
+  "ssh_host": "nas.example",
+  "ssh_user": "existing_user",
+  "identity_file": "/absolute/path/to/existing_ssh_identity",
+  "docker_path": "/absolute/path/to/docker",
+  "container_id": "<verified full 64-character running history container ID>",
+  "releases": {"cash_index_1m": "<verified frozen 64-character release SHA>"}
+}
+```
+
+There is no default history connection or arbitrary target URL. Use only the
+already authorized SSH command channel and history container. The bridge has no
+forwarding, proxy, redirect, retry, shell-command configuration or write endpoint.
+It runs fixed HTTP bridge code inside the pinned container. It calls the shared
+OpenBB HTTP helper with a restricted session adapter; the remote loopback HTTP
+request cannot inherit proxy settings. The existing `dq_quant_data_api_key` is
+injected from OpenBB credentials in memory and sent via stdin, never argv or the
+connection file. Configuration must be trusted local operator input. Pin and
+verify the running container/image, read-only mounts and release registry before
+installing that configuration. Changing/replacing a container requires an explicit
+configuration update; failure does not select another container or old service.
+
+```python
+from openbb import obb
+
+release = "<configured frozen release SHA>"
+descriptor = obb.dq_data.history.describe(release_id=release).results
+# Check descriptor['dates'] membership, not min/max date or a maximum watermark.
+request = {
+    "day": "2026-09-10",  # exact UTC day, not a local trading session
+    "instrument": "ibkr:symbol:unknown:USD:NDX",
+    "fields": ["event_epoch_ns", "open", "close", "source_published_ns"],
+    "limit": 256,
+}
+coverage = obb.dq_data.history.coverage(release_id=release, request=request).results
+page = obb.dq_data.history.pages(release_id=release, request=request).results
+# Retain the complete page['meta'] alongside page['data'].
+# For each non-null meta.next_cursor call pages again with the same
+# release/instrument/day/ordered fields and request['cursor'] set to that token.
+# Stop only when next_cursor is null; impose a caller-side total page/row budget.
+```
+
+All four commands return the complete native JSON envelope under `results`.
+Decimal and nanosecond values remain strings, unknown publication times remain
+null, and source/quality/exclusion metadata are retained. Each page is a separate
+remote authorization and fixed-membership check. No conversion to a standard
+float OHLC model or daily-bar/chain contract is performed. `scopes` supports
+`day`, `instrument_prefix`, `after_instrument`, and `limit` up to 32. Follow its
+`next_after_instrument` until an empty discovery page; narrow prefixes when the
+service requests it. `pages` has a maximum of 2048 rows per request.
+
+Only observed revisions in discrete release/instrument/UTC-day membership are
+available. This is not a complete session, continuous history, full option chain,
+real-time service, latest view, or point-in-time/as-of guarantee. The four current
+NAS releases retain **lab** tier and **production_eligible=false**. The owner has
+confirmed the original IBKR data are for their own / the same authorized account's
+internal use; this does not grant wider distribution or additional entitlements.
+Existing grants expire on the service clock and are checked on every page.
+
+Missing dates/instruments and all 17 excluded SOFR contract-days return **422**;
+the scope reason is preserved when allowlisted. A missing scope is never reported
+as an empty initial page. Call the old interface independently where it is needed.
+**Automatic fallback is not implemented.** Authentication, rate-limit, source,
+admission and transport failures never trigger fallback. Existing real-time,
+daily, chain, unlisted domains, endpoints, user defaults and DQ URL/key/CA settings
+continue independently. This release does not provide a universal production
+transport or meet a throughput/latency SLO: one SSH/docker/Python invocation is
+required per page. For sustained shared production use, an operator-provisioned
+history-only HTTPS gateway with equivalent live authentication and pinned registry
+is the next transport option; do not bypass refused SSH forwarding to obtain it.
+
+Disable this SDK path by unsetting `OPENBB_DQ_HISTORY_CONFIG` or removing the
+isolated environment from that consumer's launch command. No old route or service
+needs changing, and an entire database backup or daily incremental catch-up is
+not a prerequisite for these frozen historical reads.

@@ -12,6 +12,7 @@ from openbb_core.app.model.obbject import OBBject
 from openbb_core.app.router import Router
 
 from openbb_dq_quant_data.client import DQAPIClient
+from openbb_dq_quant_data.history_router import router as history_router
 from openbb_dq_quant_data.native import NativeAPIClient, NativeQueryError
 
 router = Router(description="DQ canonical fundamentals, quality and lineage.")
@@ -48,6 +49,9 @@ def native_query(cc: CommandContext, request: dict[str, Any]) -> OBBject[list[di
         request
     )
     return OBBject(results=result["data"], extra=result["meta"])
+
+
+router.include_router(history_router, prefix="/history")
 
 
 def _read(
