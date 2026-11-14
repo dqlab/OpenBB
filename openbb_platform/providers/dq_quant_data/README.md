@@ -18,6 +18,7 @@ classes; database governance operations need dedicated commands.
 | `obb.derivatives.futures.curve(provider="dq_quant_data", ...)` | Server-built futures prices and contract/quality metadata | Futures-curve REST API |
 | `obb.dq_market.*` | Captures, publication/as-of queries, bounded histories, baskets, instruments and status | Market-store REST API |
 | `obb.dq_data.*` | Fundamental facts, quality and lineage | Canonical REST API |
+| `obb.dq_data.native_query(request=...)` | Bounded native records with exact decimal/nanosecond strings and source quality | Native `/v2/query` API |
 
 A provider-only conversion would obscure the governance operations; a router-only
 conversion would lose standard endpoint interoperability. One distribution registers
@@ -45,6 +46,47 @@ optional import is delayed until a local command is called.
 
 Do not install the older copy from `dq-quant-invest-data/integrations` over this
 package. The distribution name and Python import paths remain compatible.
+
+## Native v2 queries
+
+After setting the same DQ URL/key credentials, call the native endpoint through
+the installed Python command:
+
+```python
+result = obb.dq_data.native_query(
+    request={
+        "dataset_id": "example.bars",
+        "instruments": ["example-instrument"],
+        "start_ns": "1791936000000000000",
+        "end_ns": "1792022399999999999",
+        "limit": 256,
+    }
+)
+records = result.results
+metadata = result.extra
+```
+
+The OpenBB REST command is `POST /api/v1/dq_data/native_query`, with this JSON
+object as its request body. It uses the configured DQ credentials. Results retain
+the native `data` in `results` and the native `meta` in `extra`, including quality,
+provider, units and availability; there is no float projection or inferred source
+clock. Dataset/field authorization and time/clock validation remain on the server.
+An unknown source-published clock remains a rejection; an explicit
+`unknown_availability_policy="exclude_unknown"` is forwarded unchanged.
+
+Requests are limited to 64 KiB and an integer row limit from 1 to 10,000 (default
+1,000); responses are limited to 16 MiB and must match the reported row count.
+Each call makes one POST, without automatic paging, redirect following or retries.
+The helper timeout is 10 seconds, subject to the user's OpenBB HTTP settings.
+This is a bounded query, not proof that a full dataset was migrated. Native API
+HTTP error responses preserve their status through OpenBB REST, including 422 and 429;
+an integer `Retry-After` is retained for 429. The generated Python interface
+raises `OpenBBError` containing the native HTTP error status. Direct
+`NativeAPIClient` callers receive `NativeQueryError`, with `status_code`,
+`retry_after` and `upstream_status` attributes; these classes live in
+`openbb_dq_quant_data.native`. Transport failures use a gateway status of 502
+with `upstream_status=None`.
+Upstream error bodies, private paths and credentials are not returned.
 
 ## REST options chain
 

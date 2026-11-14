@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openbb-dq-quant-data"
-version = "0.1.8"
+version = "0.1.9"
 description = "DQ canonical data provider and governed market-store routers for OpenBB."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -12,7 +12,7 @@ dependencies = ["openbb-core>=1.6.13,<2", "pydantic>=2.7"]
 
 [project.optional-dependencies]
 local = ["dq-quant-invest-data>=0.1.5,<0.2"]
-dev = ["pytest>=8", "ruff>=0.9"]
+dev = ["pytest>=8", "ruff>=0.9", "httpx>=0.27"]
 
 [project.urls]
 Repository = "https://github.com/dqlab/OpenBB"
