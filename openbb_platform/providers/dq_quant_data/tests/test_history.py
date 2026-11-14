@@ -283,3 +283,14 @@ def test_installed_rest_retains_rejection_status(configured, status):
     assert result.status_code == status
     assert result.headers.get("Retry-After") == ("2" if status == 429 else None)
     configured.assert_called_once()
+
+
+def test_native_collector_revision_is_an_exact_integer(configured):
+    payload = page()
+    payload["data"][0]["source_revision"] = 1
+    configured.return_value = response(payload)
+    result = history.read_history(
+        {}, RELEASE, "pages", {**BODY, "fields": [*BODY["fields"], "source_revision"]}
+    )
+    assert result == payload
+    assert isinstance(result["data"][0]["source_revision"], int)

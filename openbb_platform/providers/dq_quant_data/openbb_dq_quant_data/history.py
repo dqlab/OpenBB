@@ -217,7 +217,6 @@ def _validate_response(
                 "collector_observed_ns",
                 "central_verified_ns",
                 "original_authority_visible_ns",
-                "source_revision",
             }
         )
     ):
