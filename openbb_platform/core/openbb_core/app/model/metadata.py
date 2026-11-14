@@ -40,8 +40,6 @@ class Metadata(BaseModel):
         """
         # pylint: disable=import-outside-toplevel
         from inspect import isclass  # noqa
-        from numpy import ndarray  # noqa
-        from pandas import DataFrame, Series  # noqa
 
         arguments: dict[str, Any] = {}
         for item in ["provider_choices", "standard_params", "extra_params"]:
@@ -53,6 +51,17 @@ class Metadata(BaseModel):
             # The item might not be a dictionary yet.
             v_item = v_item if isinstance(v_item, dict) else v_item.__dict__
             for arg, arg_val in v_item.items():
+                # JSON arguments need no tabular type inspection. Native query
+                # dictionaries should not load NumPy and pandas just to format
+                # execution metadata on the first command.
+                if type(arg_val) in (str, int, float, bool, dict, type(None)):
+                    text = str(arg_val)
+                    arguments[item][arg] = text[:80] if len(text) > 80 else arg_val
+                    continue
+
+                from numpy import ndarray  # noqa: PLC0415
+                from pandas import DataFrame, Series  # noqa: PLC0415
+
                 new_arg_val: str | dict[str, Sequence[Any]] | None = None
 
                 # Data
