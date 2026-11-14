@@ -568,16 +568,17 @@ def test_raw_master_document_records_its_own_date_source(tmp_path, monkeypatch):
 def test_raw_quote_url_equals_the_provider_url(monkeypatch):
     """The lane's URL template is proven equal to the provider's own."""
     import openbb_akshare.models.etf_options as provider
+    import openbb_akshare.utils.etf_option_quotes as transport
 
     from dq_historical_market_data_collector.etf_options import source as lane_source
 
     recorded = {}
 
-    def stand(url, **kwargs):
+    def stand(url):
         recorded["url"] = url
-        return TransportResponse(quote_body("10000001"), 200, "text/plain; charset=gb18030")
+        return quote_body("10000001")
 
-    monkeypatch.setattr(provider, "make_quote_request", stand)
+    monkeypatch.setattr(transport, "_read_quote_body", stand)
     provider.fetch_quotes("10000001")
     assert recorded["url"] == lane_source.quote_batch_url(["10000001"])
 

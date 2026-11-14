@@ -129,7 +129,7 @@ def create_indent(n: int) -> str:
 
 
 def _normalize_annotation_types(source: str) -> str:
-    """Normalize qualified typing containers only within parsed annotations."""
+    """Normalize public type names only within parsed annotations."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -139,9 +139,19 @@ def _normalize_annotation_types(source: str) -> str:
     for line in lines:
         offsets.append(offsets[-1] + len(line))
 
-    def position(line: int, byte_column: int) -> int:
+    def position(line: int | None, byte_column: int | None) -> int:
+        if line is None or byte_column is None:
+            raise ValueError("Parsed annotation is missing its source position")
         prefix = lines[line - 1].encode("utf-8")[:byte_column].decode("utf-8")
         return offsets[line - 1] + len(prefix)
+
+    def is_annotated(value: ast.expr) -> bool:
+        return (
+            isinstance(value, ast.Name)
+            and value.id == "Annotated"
+            or isinstance(value, ast.Attribute)
+            and value.attr == "Annotated"
+        )
 
     # A local or module binding may make ``typing`` something else.
     if any(
@@ -154,7 +164,7 @@ def _normalize_annotation_types(source: str) -> str:
     ):
         return source
 
-    edits = []
+    edits: list[tuple[int, int, str]] = []
     annotations = []
     for node in ast.walk(tree):
         if isinstance(node, ast.arg | ast.AnnAssign) and node.annotation:
@@ -162,7 +172,7 @@ def _normalize_annotation_types(source: str) -> str:
         elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.returns:
             annotations.append(node.returns)
     for annotation in annotations:
-        nodes = [annotation]
+        nodes: list[ast.AST] = [annotation]
         while nodes:
             node = nodes.pop()
             if isinstance(node, ast.Call):
@@ -176,29 +186,25 @@ def _normalize_annotation_types(source: str) -> str:
                     and node.func.value.id == "typing"
                     and node.func.attr == "ForwardRef"
                 )
+                reference = node.args[0] if len(node.args) == 1 else None
                 if (
                     forward_ref
-                    and len(node.args) == 1
                     and not node.keywords
-                    and isinstance(node.args[0], ast.Constant)
-                    and node.args[0].value in {"Data", "DataFrame", "Series", "ndarray"}
+                    and isinstance(reference, ast.Constant)
+                    and isinstance(reference.value, str)
+                    and reference.value in {"Data", "DataFrame", "Series", "ndarray"}
                 ):
                     edits.append(
                         (
                             position(node.lineno, node.col_offset),
                             position(node.end_lineno, node.end_col_offset),
-                            node.args[0].value,
+                            reference.value,
                         )
                     )
                 continue
             if (
                 isinstance(node, ast.Subscript)
-                and (
-                    isinstance(node.value, ast.Name)
-                    and node.value.id == "Annotated"
-                    or isinstance(node.value, ast.Attribute)
-                    and node.value.attr == "Annotated"
-                )
+                and is_annotated(node.value)
                 and isinstance(node.slice, ast.Tuple)
             ):
                 nodes.extend((node.value, node.slice.elts[0]))
@@ -212,6 +218,19 @@ def _normalize_annotation_types(source: str) -> str:
                         "None",
                     )
                 )
+            if isinstance(node, ast.Attribute) and node.attr in {"DataFrame", "Series"}:
+                public_type = {
+                    "pandas.core.frame.DataFrame": "pandas.DataFrame",
+                    "pandas.core.series.Series": "pandas.Series",
+                }.get(ast.unparse(node))
+                if public_type:
+                    edits.append(
+                        (
+                            position(node.lineno, node.col_offset),
+                            position(node.end_lineno, node.end_col_offset),
+                            public_type,
+                        )
+                    )
             if (
                 isinstance(node, ast.Attribute)
                 and isinstance(node.value, ast.Name)
