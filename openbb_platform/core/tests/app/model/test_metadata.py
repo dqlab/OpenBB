@@ -1,5 +1,6 @@
 """Test the Metadata model."""
 
+import builtins
 from datetime import datetime
 
 import numpy as np
@@ -7,6 +8,23 @@ import pandas as pd
 import pytest
 from openbb_core.app.model.metadata import Metadata
 from openbb_core.provider.abstract.data import Data
+
+
+def test_json_arguments_do_not_import_tabular_libraries(monkeypatch):
+    """Keep the native JSON command's first call independent of pandas startup."""
+    original = builtins.__import__
+
+    def guarded(name, *args, **kwargs):
+        if name.split(".")[0] in {"numpy", "pandas"}:
+            raise AssertionError("JSON metadata imported a tabular library")
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded)
+    values = {"request": {"dataset": "cash", "limit": 256},
+              "long": "x" * 100, "zero": 0, "enabled": False, "unknown": None}
+    actual = Metadata(arguments={"standard_params": values}, route="/dq_data/native_query",
+                      duration=0, timestamp=datetime.now())
+    assert actual.arguments["standard_params"] == {**values, "long": "x" * 80}
 
 
 def test_Metadata():
